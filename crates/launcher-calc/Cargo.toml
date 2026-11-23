@@ -1,0 +1,13 @@
+[package]
+name = "launcher-calc"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[lib]
+path = "src/calc.rs"
+
+[dependencies]
+launcher-core.workspace = true
+numbat.workspace = true

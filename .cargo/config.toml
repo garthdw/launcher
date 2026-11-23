@@ -1,0 +1,4 @@
+[env]
+# Matches the app's `LSMinimumSystemVersion`; C code in dependencies (ring) otherwise targets the
+# build machine's macOS and the Swift link warns for every object.
+MACOSX_DEPLOYMENT_TARGET = "26.0"

@@ -1,0 +1,5 @@
+/target
+# Written by `scripts/bundle` from the Rust library.
+/macos/.build
+/macos/Sources/launcher_ffiFFI
+/macos/Sources/Launcher/Generated

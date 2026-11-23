@@ -1,0 +1,14 @@
+[package]
+name = "uniffi-bindgen"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+# The bindgen CLI must match the `uniffi` version the FFI crate links, so it lives here.
+[[bin]]
+name = "uniffi-bindgen"
+path = "src/main.rs"
+
+[dependencies]
+uniffi = { workspace = true, features = ["cli"] }

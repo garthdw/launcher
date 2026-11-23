@@ -1,0 +1,50 @@
+#!/usr/bin/env bash
+# Builds the Rust core, generates its Swift bindings, and assembles a signed
+# target/release/Launcher.app without installing it.
+# LAUNCHER_VERSION overrides the bundle version, which defaults to the workspace's.
+# Set MAC_APP_SIGN to a codesigning identity; without it the bundle is signed ad hoc, and macOS
+# asks again for the Accessibility permission after every build.
+set -euo pipefail
+cd "$(dirname "$0")/.."
+
+cargo build --release --locked -p launcher-ffi
+generated=$(mktemp -d)
+trap 'rm -rf "$generated"' EXIT
+cargo run --release --locked -q -p uniffi-bindgen -- generate \
+  --library target/release/liblauncher_ffi.a --language swift --out-dir "$generated"
+mkdir -p macos/Sources/launcher_ffiFFI macos/Sources/Launcher/Generated
+cp "$generated/launcher_ffiFFI.h" macos/Sources/launcher_ffiFFI/
+# SwiftPM finds a system library's module map only under this name.
+cp "$generated/launcher_ffiFFI.modulemap" macos/Sources/launcher_ffiFFI/module.modulemap
+cp "$generated/launcher_ffi.swift" macos/Sources/Launcher/Generated/
+
+swift build --package-path macos -c release
+version=${LAUNCHER_VERSION:-$(cargo metadata --no-deps --format-version 1 --locked |
+  python3 -c 'import json, sys; print(next(p["version"] for p in json.load(sys.stdin)["packages"] if p["name"] == "launcher-ffi"))')}
+
+app=target/release/Launcher.app
+rm -rf "$app"
+mkdir -p "$app/Contents/MacOS"
+cp "$(swift build --package-path macos -c release --show-bin-path)/Launcher" "$app/Contents/MacOS/Launcher"
+cat >"$app/Contents/Info.plist" <<EOF
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>CFBundleName</key><string>Launcher</string>
+  <key>CFBundleDisplayName</key><string>Launcher</string>
+  <key>CFBundleIdentifier</key><string>dev.dewet.launcher</string>
+  <key>CFBundleExecutable</key><string>Launcher</string>
+  <key>CFBundlePackageType</key><string>APPL</string>
+  <key>CFBundleShortVersionString</key><string>$version</string>
+  <key>CFBundleVersion</key><string>$version</string>
+  <key>LSMinimumSystemVersion</key><string>26.0</string>
+  <!-- No Dock icon or menu bar; the panel is reached by its hotkey. -->
+  <key>LSUIElement</key><true/>
+  <key>NSHighResolutionCapable</key><true/>
+</dict>
+</plist>
+EOF
+plutil -lint "$app/Contents/Info.plist" >/dev/null
+codesign --force --sign "${MAC_APP_SIGN:--}" "$app"
+echo "$app"

@@ -1,0 +1,3 @@
+allow-private-module-inception = true
+avoid-breaking-exported-api = false
+ignore-interior-mutability = []

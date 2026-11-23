@@ -1,0 +1,16 @@
+[package]
+name = "launcher-ffi"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[lib]
+path = "src/ffi.rs"
+# `staticlib` links into the Swift app; `lib` lets uniffi-bindgen read the metadata in tests.
+crate-type = ["staticlib", "lib"]
+
+[dependencies]
+launcher-core.workspace = true
+launcher-calc.workspace = true
+uniffi.workspace = true
