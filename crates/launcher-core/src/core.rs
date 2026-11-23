@@ -15,7 +15,7 @@ pub enum Action {
 
 /// Where settings and state live: `~/.config/launcher` on every platform.
 pub fn config_directory() -> Option<PathBuf> {
-    std::env::var_os("HOME").map(|home| Path::new(&home).join(".config/launcher"))
+    std::env::home_dir().map(|home| home.join(".config/launcher"))
 }
 
 pub trait Plugin {

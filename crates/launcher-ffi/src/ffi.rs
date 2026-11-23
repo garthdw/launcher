@@ -4,9 +4,9 @@
 use std::path::Path;
 use std::sync::{Arc, Mutex};
 
-use launcher_apps::{Apps, default_roots};
+use launcher_apps::Apps;
 use launcher_calc::Calc;
-use launcher_core::{Plugin, config_directory};
+use launcher_core::Plugin;
 
 uniffi::setup_scaffolding!();
 
@@ -53,11 +53,7 @@ impl Launcher {
             Ok(calc) => plugins.push(Box::new(calc)),
             Err(error) => eprintln!("calculator unavailable: {error}"),
         }
-        let frecency_path = config_directory().map(|directory| directory.join("frecency"));
-        if frecency_path.is_none() {
-            eprintln!("HOME isn't set, so apps are ranked without frecency");
-        }
-        plugins.push(Box::new(Apps::new(default_roots(), frecency_path)));
+        plugins.push(Box::new(Apps::start()));
         Arc::new(Self {
             plugins: Mutex::new(plugins),
         })

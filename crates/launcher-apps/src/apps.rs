@@ -8,7 +8,7 @@ use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use launcher_core::{Action, Item, Plugin};
+use launcher_core::{Action, Item, Plugin, config_directory};
 use notify::{RecommendedWatcher, RecursiveMode, Watcher};
 
 const MAX_RESULTS: usize = 8;
@@ -29,13 +29,13 @@ const HOUR: u64 = 60 * 60;
 const DAY: u64 = 24 * HOUR;
 const WEEK: u64 = 7 * DAY;
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Debug, PartialEq, Eq, PartialOrd, Ord)]
 struct App {
     name: String,
     path: PathBuf,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq)]
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
 struct Usage {
     count: u32,
     last_opened: u64,
@@ -64,9 +64,18 @@ pub struct Apps {
 }
 
 impl Apps {
-    /// Scans `roots` in the background, then rescans whenever they change. Without a
-    /// `frecency_path`, apps are ranked by match alone.
-    pub fn new(roots: Vec<PathBuf>, frecency_path: Option<PathBuf>) -> Self {
+    /// Indexes the app folders in the background and keeps the index current, with frecency
+    /// kept in the config directory.
+    pub fn start() -> Self {
+        let frecency_path = config_directory().map(|directory| directory.join("frecency"));
+        if frecency_path.is_none() {
+            eprintln!("no home folder, so apps are ranked without frecency");
+        }
+        Self::watching(app_folders(), frecency_path)
+    }
+
+    /// Without a `frecency_path`, apps are ranked by match alone.
+    fn watching(roots: Vec<PathBuf>, frecency_path: Option<PathBuf>) -> Self {
         let index = Arc::new(Mutex::new(Vec::new()));
         let (sender, receiver) = mpsc::channel();
         let watcher = watch(&roots, sender);
@@ -121,10 +130,7 @@ impl Plugin for Apps {
             return;
         };
         let now = now();
-        let usage = self.usage.entry(path.to_path_buf()).or_insert(Usage {
-            count: 0,
-            last_opened: now,
-        });
+        let usage = self.usage.entry(path.to_path_buf()).or_default();
         usage.count = usage.count.saturating_add(1);
         usage.last_opened = now;
         if self.usage.len() > MAX_REMEMBERED
@@ -143,7 +149,7 @@ impl Plugin for Apps {
 }
 
 /// The folders macOS installs apps into. Linux will index `.desktop` files instead.
-pub fn default_roots() -> Vec<PathBuf> {
+fn app_folders() -> Vec<PathBuf> {
     if !cfg!(target_os = "macos") {
         return Vec::new();
     }
@@ -152,8 +158,8 @@ pub fn default_roots() -> Vec<PathBuf> {
         PathBuf::from("/System/Applications"),
         PathBuf::from("/System/Applications/Utilities"),
     ];
-    if let Some(home) = std::env::var_os("HOME") {
-        roots.push(Path::new(&home).join("Applications"));
+    if let Some(home) = std::env::home_dir() {
+        roots.push(home.join("Applications"));
     }
     roots
 }
@@ -211,8 +217,8 @@ fn scan(roots: &[PathBuf]) -> Vec<App> {
         // One level of plain folders, for vendor folders such as `/Applications/Adobe …/`.
         collect_apps(root, 1, &mut apps);
     }
-    apps.sort_by(|left, right| (&left.name, &left.path).cmp(&(&right.name, &right.path)));
-    apps.dedup_by(|left, right| left.path == right.path);
+    apps.sort();
+    apps.dedup();
     apps
 }
 
@@ -233,18 +239,13 @@ fn collect_apps(folder: &Path, depth: usize, apps: &mut Vec<App>) {
                 continue;
             }
         };
-        if is_bundle(&path) {
-            // The shell gets paths as strings, so a non-UTF-8 one couldn't be opened.
-            match (
-                path.file_stem().and_then(|stem| stem.to_str()),
-                path.to_str(),
-            ) {
-                (Some(name), Some(_)) => apps.push(App {
-                    name: name.to_owned(),
-                    path,
-                }),
-                _ => eprintln!("skipping app with a non-UTF-8 path: {}", path.display()),
-            }
+        if is_bundle(&path)
+            && let Some(name) = path.file_stem()
+        {
+            apps.push(App {
+                name: name.to_string_lossy().into_owned(),
+                path,
+            });
         } else if depth > 0 && path.is_dir() {
             collect_apps(&path, depth - 1, apps);
         }
@@ -258,13 +259,18 @@ fn rank<'a>(
     query: &str,
     now: u64,
 ) -> Vec<&'a App> {
+    let query = fold_query(query);
+    if query.is_empty() {
+        return Vec::new();
+    }
     let mut ranked: Vec<(i32, &App)> = apps
         .iter()
         .filter_map(|app| {
+            let score = score(&app.name, &query)?;
             let bonus = usage
                 .get(&app.path)
                 .map_or(0, |usage| frecency_bonus(usage.weight(now)));
-            Some((score(&app.name, query)? + bonus, app))
+            Some((score + bonus, app))
         })
         .collect();
     ranked.sort_by_key(|(score, _)| Reverse(*score));
@@ -276,21 +282,27 @@ fn frecency_bonus(weight: f64) -> i32 {
     ((weight.ln_1p() * 8.0) as i32).min(MAX_FRECENCY_BONUS)
 }
 
-/// How well `query`'s letters match `name` in order, ignoring case and spaces in the query, or
-/// `None` if they don't. Matches at word starts, which acronyms hit, and runs of consecutive
-/// letters score higher; gaps and longer names score lower.
-fn score(name: &str, query: &str) -> Option<i32> {
-    let name: Vec<char> = name.chars().collect();
-    let folded: Vec<char> = name.iter().copied().map(fold_case).collect();
-    let query: Vec<char> = query
+/// The query's letters, case-folded and without spaces, so "studio code" matches as well.
+fn fold_query(query: &str) -> Vec<char> {
+    query
         .chars()
         .filter(|character| !character.is_whitespace())
         .map(fold_case)
-        .collect();
+        .collect()
+}
+
+/// How well the folded `query`'s letters match `name` in order, or `None` if they don't.
+/// Matches at word starts, which acronyms hit, and runs of consecutive letters score higher;
+/// gaps and longer names score lower.
+fn score(name: &str, query: &[char]) -> Option<i32> {
     let (first, rest) = query.split_first()?;
-    let bonuses: Vec<i32> = (0..name.len())
-        .map(|index| {
-            if is_word_start(&name, index) {
+    let name: Vec<char> = name.chars().collect();
+    let folded: Vec<char> = name.iter().copied().map(fold_case).collect();
+    let previous_characters = std::iter::once(None).chain(name.iter().copied().map(Some));
+    let bonuses: Vec<i32> = previous_characters
+        .zip(name.iter().copied())
+        .map(|(previous, current)| {
+            if is_word_start(previous, current) {
                 WORD_START
             } else {
                 0
@@ -339,16 +351,10 @@ fn fold_case(character: char) -> char {
     character.to_lowercase().next().unwrap_or(character)
 }
 
-fn is_word_start(name: &[char], index: usize) -> bool {
-    let Some(&current) = name.get(index) else {
-        return false;
-    };
-    match index.checked_sub(1).and_then(|previous| name.get(previous)) {
-        None => true,
-        Some(&previous) => {
-            !previous.is_alphanumeric() || (previous.is_lowercase() && current.is_uppercase())
-        }
-    }
+fn is_word_start(previous: Option<char>, current: char) -> bool {
+    previous.is_none_or(|previous| {
+        !previous.is_alphanumeric() || (previous.is_lowercase() && current.is_uppercase())
+    })
 }
 
 fn now() -> u64 {
@@ -435,6 +441,10 @@ mod tests {
             .collect()
     }
 
+    fn matches(name: &str, query: &str) -> Option<i32> {
+        score(name, &fold_query(query))
+    }
+
     fn eventually(mut condition: impl FnMut() -> bool) -> bool {
         for _ in 0..100 {
             if condition() {
@@ -483,33 +493,33 @@ mod tests {
             ["Screen Sharing", "System Settings"],
             "two word starts beat a word start and a mid-word s"
         );
+    }
+
+    #[test]
+    fn letters_must_be_in_order() {
+        assert_eq!(matches("Safari", "fas"), None);
+        assert_eq!(matches("Safari", ""), None);
+        assert!(matches("Safari", "SAF").is_some());
+        assert!(matches("Visual Studio Code", "studio code").is_some());
+    }
+
+    #[test]
+    fn word_start_beats_mid_word() {
+        assert!(matches("Text Edit", "e") > matches("Tbe Edit", "b"));
         assert!(
-            score("System Settings", "ss") > score("Chess", "ss"),
+            matches("TextEdit", "e") > matches("Tbe Edit", "b"),
+            "camel-case hump"
+        );
+        assert!(
+            matches("System Settings", "ss") > matches("Chess", "ss"),
             "word starts beat a consecutive run mid-word"
         );
     }
 
     #[test]
-    fn letters_must_be_in_order() {
-        assert_eq!(score("Safari", "fas"), None);
-        assert_eq!(score("Safari", ""), None);
-        assert!(score("Safari", "SAF").is_some());
-        assert!(score("Visual Studio Code", "studio code").is_some());
-    }
-
-    #[test]
-    fn word_start_beats_mid_word() {
-        assert!(score("Text Edit", "e") > score("Tbe Edit", "b"));
-        assert!(
-            score("TextEdit", "e") > score("Tbe Edit", "b"),
-            "camel-case hump"
-        );
-    }
-
-    #[test]
     fn non_ascii_names_dont_panic() {
-        assert!(score("Ünïcødé Äpp", "üä").is_some());
-        assert!(score("İstanbul", "i").is_some());
+        assert!(matches("Ünïcødé Äpp", "üä").is_some());
+        assert!(matches("İstanbul", "i").is_some());
     }
 
     #[test]
@@ -583,7 +593,7 @@ mod tests {
     fn opened_records_usage() -> io::Result<()> {
         let folder = tempfile::tempdir()?;
         let path = folder.path().join("frecency");
-        let mut plugin = Apps::new(Vec::new(), Some(path.clone()));
+        let mut plugin = Apps::watching(Vec::new(), Some(path.clone()));
         let safari = Path::new("/Applications/Safari.app");
         plugin.opened(safari);
         plugin.opened(safari);
@@ -634,7 +644,7 @@ mod tests {
     fn new_apps_appear_without_restart() -> io::Result<()> {
         let root = tempfile::tempdir()?;
         fs::create_dir(root.path().join("Safari.app"))?;
-        let mut plugin = Apps::new(vec![root.path().to_path_buf()], None);
+        let mut plugin = Apps::watching(vec![root.path().to_path_buf()], None);
         let mut titles = |query: &str| -> Vec<String> {
             plugin
                 .query(query)
