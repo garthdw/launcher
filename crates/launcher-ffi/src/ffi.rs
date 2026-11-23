@@ -99,12 +99,16 @@ mod tests {
     use super::*;
 
     #[test]
-    fn query_converts_items() {
-        let launcher = Launcher::new();
+    fn query_converts_items() -> Result<(), Box<dyn std::error::Error>> {
+        // Only the calculator, so installed apps can't add results.
+        let launcher = Launcher {
+            plugins: Mutex::new(vec![Box::new(Calc::new()?)]),
+        };
         let items = launcher.query(" 2 + 3 ".into());
         assert_eq!(items.len(), 1);
         assert_eq!(items[0].title, "5");
         assert!(matches!(&items[0].action, Action::Copy { text } if text == "5"));
         assert!(launcher.query("   ".into()).is_empty());
+        Ok(())
     }
 }
