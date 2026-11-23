@@ -146,6 +146,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSTextFieldDelegate, N
         case let .copy(text):
             NSPasteboard.general.clearContents()
             NSPasteboard.general.setString(text, forType: .string)
+        case let .open(path):
+            NSWorkspace.shared.openApplication(
+                at: URL(fileURLWithPath: path), configuration: NSWorkspace.OpenConfiguration()
+            ) { _, error in
+                if let error {
+                    log("can't open \(path): \(error.localizedDescription)")
+                } else {
+                    Task { @MainActor in self.launcher.opened(path: path) }
+                }
+            }
         }
     }
 

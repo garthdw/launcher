@@ -1,6 +1,7 @@
 //! The boundary the native shells call. Its types mirror `launcher-core`'s so the core stays
 //! free of FFI derives; a Rust shell (Linux) uses the core directly.
 
+use std::path::Path;
 use std::sync::{Arc, Mutex};
 
 use launcher_calc::Calc;
@@ -18,12 +19,16 @@ pub struct Item {
 #[derive(uniffi::Enum)]
 pub enum Action {
     Copy { text: String },
+    Open { path: String },
 }
 
 impl From<launcher_core::Item> for Item {
     fn from(item: launcher_core::Item) -> Self {
         let action = match item.action {
             launcher_core::Action::Copy(text) => Action::Copy { text },
+            launcher_core::Action::Open(path) => Action::Open {
+                path: path.to_string_lossy().into_owned(),
+            },
         };
         Self {
             title: item.title,
@@ -67,6 +72,17 @@ impl Launcher {
             .flat_map(|plugin| plugin.query(query))
             .map(Item::from)
             .collect()
+    }
+
+    /// The shell opened `path` from an `Action::Open` result.
+    pub fn opened(&self, path: String) {
+        let Ok(mut plugins) = self.plugins.lock() else {
+            eprintln!("a plugin panicked; not recording {path}");
+            return;
+        };
+        for plugin in plugins.iter_mut() {
+            plugin.opened(Path::new(&path));
+        }
     }
 }
 
