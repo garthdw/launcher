@@ -1,0 +1,16 @@
+[package]
+name = "launcher-apps"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[lib]
+path = "src/apps.rs"
+
+[dependencies]
+launcher-core.workspace = true
+notify.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
