@@ -164,10 +164,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSTextFieldDelegate, N
             NSWorkspace.shared.open(
                 URL(fileURLWithPath: path), configuration: NSWorkspace.OpenConfiguration()
             ) { _, error in
-                if let error {
-                    log("can't open \(path): \(error.localizedDescription)")
-                } else {
-                    Task { @MainActor in self.launcher.opened(path: path) }
+                let failure = error?.localizedDescription
+                Task { @MainActor in
+                    guard let failure else {
+                        self.launcher.opened(path: path)
+                        return
+                    }
+                    log("can't open \(path): \(failure)")
+                    // The panel has already closed, so nothing else would show the failure.
+                    let alert = NSAlert()
+                    alert.messageText = "Can't open \(FileManager.default.displayName(atPath: path))"
+                    alert.informativeText = failure
+                    NSApp.activate()
+                    alert.runModal()
                 }
             }
         }
