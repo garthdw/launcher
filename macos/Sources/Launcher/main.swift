@@ -126,7 +126,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSTextFieldDelegate, N
             row.wantsLayer = true
             // Concentric with the glass: its 18 pt radius less the row's 6 pt inset.
             row.layer?.cornerRadius = 12
-            row.layer?.backgroundColor = index == picked ? NSColor.controlAccentColor.cgColor : nil
             var titleX: CGFloat = 12
             if case let .open(path) = item.action {
                 let icon = NSImageView(image: NSWorkspace.shared.icon(forFile: path))
@@ -146,6 +145,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSTextFieldDelegate, N
             row.addSubview(subtitle)
             results.addSubview(row)
         }
+        highlightPicked()
+    }
+
+    /// Moving the selection only recolours rows; rebuilding them would fetch every icon again.
+    func highlightPicked() {
+        for (index, row) in results.subviews.enumerated() {
+            row.layer?.backgroundColor = index == picked ? NSColor.controlAccentColor.cgColor : nil
+        }
     }
 
     func run(_ item: Item) {
@@ -154,8 +161,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSTextFieldDelegate, N
             NSPasteboard.general.clearContents()
             NSPasteboard.general.setString(text, forType: .string)
         case let .open(path):
-            NSWorkspace.shared.openApplication(
-                at: URL(fileURLWithPath: path), configuration: NSWorkspace.OpenConfiguration()
+            NSWorkspace.shared.open(
+                URL(fileURLWithPath: path), configuration: NSWorkspace.OpenConfiguration()
             ) { _, error in
                 if let error {
                     log("can't open \(path): \(error.localizedDescription)")
@@ -188,7 +195,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSTextFieldDelegate, N
         default:
             return false
         }
-        layout()
+        highlightPicked()
         return true
     }
 }
