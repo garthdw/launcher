@@ -57,7 +57,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSTextFieldDelegate, N
         field.drawsBackground = false
         field.focusRingType = .none
         field.font = .systemFont(ofSize: 20)
-        field.placeholderString = "Calculate, convert…"
+        field.placeholderString = "Search apps, calculate, convert…"
         field.delegate = self
         field.autoresizingMask = [.width, .minYMargin]
         results.autoresizingMask = [.width, .height]
@@ -127,9 +127,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSTextFieldDelegate, N
             // Concentric with the glass: its 18 pt radius less the row's 6 pt inset.
             row.layer?.cornerRadius = 12
             row.layer?.backgroundColor = index == picked ? NSColor.controlAccentColor.cgColor : nil
+            var titleX: CGFloat = 12
+            if case let .open(path) = item.action {
+                let icon = NSImageView(image: NSWorkspace.shared.icon(forFile: path))
+                icon.frame = NSRect(x: 10, y: 8, width: 28, height: 28)
+                row.addSubview(icon)
+                titleX = 46
+            }
             let title = NSTextField(labelWithString: item.title)
             title.font = .systemFont(ofSize: 17, weight: .semibold)
-            title.frame = NSRect(x: 12, y: 11, width: 380, height: 22)
+            title.frame = NSRect(x: titleX, y: 11, width: 392 - titleX, height: 22)
             let subtitle = NSTextField(labelWithString: item.subtitle)
             subtitle.font = .systemFont(ofSize: 13)
             subtitle.textColor = .secondaryLabelColor
