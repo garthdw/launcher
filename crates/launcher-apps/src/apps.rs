@@ -4,9 +4,9 @@ use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::{self, Receiver, Sender};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, Weak};
 use std::thread;
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use launcher_core::{Action, Item, Plugin, config_directory};
 use notify::{RecommendedWatcher, RecursiveMode, Watcher};
@@ -15,6 +15,8 @@ const MAX_RESULTS: usize = 8;
 const MAX_REMEMBERED: usize = 500;
 /// Installs and updates touch the folders many times in a burst; rescan once it settles.
 const SETTLE: Duration = Duration::from_millis(500);
+/// A folder that never goes quiet (a helper logging next to its app) still gets rescanned.
+const MAX_SETTLE: Duration = Duration::from_secs(3);
 
 const MATCH: i32 = 16;
 const WORD_START: i32 = 12;
@@ -22,7 +24,7 @@ const WORD_START: i32 = 12;
 const CONSECUTIVE: i32 = 4;
 const GAP_START: i32 = 3;
 const GAP_EXTEND: i32 = 1;
-/// Frecency reorders comparable matches but never lifts a scattered match over a clean one.
+/// Two word starts' worth: frecency reorders close matches but can't overturn a much better one.
 const MAX_FRECENCY_BONUS: i32 = 24;
 
 const HOUR: u64 = 60 * 60;
@@ -60,7 +62,7 @@ pub struct Apps {
     // Writes run on one thread, in order, so a later save can't land before an earlier one.
     saver: Option<Sender<String>>,
     // Watching stops when this drops, which also ends the rescan thread.
-    _watcher: Option<RecommendedWatcher>,
+    _watcher: Option<Arc<Mutex<RecommendedWatcher>>>,
 }
 
 impl Apps {
@@ -76,12 +78,14 @@ impl Apps {
 
     /// Without a `frecency_path`, apps are ranked by match alone.
     fn watching(roots: Vec<PathBuf>, frecency_path: Option<PathBuf>) -> Self {
+        let roots: Vec<PathBuf> = roots.iter().map(|root| resolve(root)).collect();
         let index = Arc::new(Mutex::new(Vec::new()));
         let (sender, receiver) = mpsc::channel();
-        let watcher = watch(&roots, sender);
+        let watcher = watch(&roots, sender).map(|watcher| Arc::new(Mutex::new(watcher)));
         thread::spawn({
             let index = index.clone();
-            move || keep_index(&index, &roots, &receiver)
+            let watcher = watcher.as_ref().map_or_else(Weak::new, Arc::downgrade);
+            move || keep_index(&index, &roots, &watcher, &receiver)
         });
         let usage = frecency_path.as_deref().map(load_usage).unwrap_or_default();
         let saver = frecency_path.map(|path| {
@@ -137,6 +141,7 @@ impl Plugin for Apps {
             && let Some(weakest) = self
                 .usage
                 .iter()
+                .filter(|(remembered, _)| remembered.as_path() != path)
                 .min_by(|left, right| left.1.weight(now).total_cmp(&right.1.weight(now)))
                 .map(|(path, _)| path.clone())
         {
@@ -164,21 +169,54 @@ fn app_folders() -> Vec<PathBuf> {
     roots
 }
 
-fn keep_index(index: &Mutex<Vec<App>>, roots: &[PathBuf], changes: &Receiver<()>) {
-    let replace = |apps| match index.lock() {
-        Ok(mut index) => *index = apps,
-        Err(_) => eprintln!("the app index is poisoned; not refreshing it"),
+/// Rescans after each burst of changes. Each root is watched once it exists, before the scan,
+/// so an app added in between is still caught.
+fn keep_index(
+    index: &Mutex<Vec<App>>,
+    roots: &[PathBuf],
+    watcher: &Weak<Mutex<RecommendedWatcher>>,
+    changes: &Receiver<()>,
+) {
+    let mut watched = vec![false; roots.len()];
+    let mut refresh = || {
+        if let Some(watcher) = watcher.upgrade() {
+            match watcher.lock() {
+                Ok(mut watcher) => {
+                    for (root, watched) in roots.iter().zip(&mut watched) {
+                        if *watched || !root.is_dir() {
+                            continue;
+                        }
+                        match watcher.watch(root, RecursiveMode::Recursive) {
+                            Ok(()) => *watched = true,
+                            Err(error) => eprintln!("can't watch {}: {error}", root.display()),
+                        }
+                    }
+                }
+                Err(_) => eprintln!("the app folder watcher is poisoned; not watching new folders"),
+            }
+        }
+        match index.lock() {
+            Ok(mut index) => *index = scan(roots),
+            Err(_) => eprintln!("the app index is poisoned; not refreshing it"),
+        }
     };
-    replace(scan(roots));
+    refresh();
     while changes.recv().is_ok() {
-        while changes.recv_timeout(SETTLE).is_ok() {}
-        replace(scan(roots));
+        let deadline = Instant::now() + MAX_SETTLE;
+        while Instant::now() < deadline && changes.recv_timeout(SETTLE).is_ok() {}
+        refresh();
     }
 }
 
+/// Watches the parent of each root that doesn't exist yet (`~/Applications` often doesn't), so
+/// `keep_index` hears when it's created; it watches the roots themselves.
 fn watch(roots: &[PathBuf], changes: Sender<()>) -> Option<RecommendedWatcher> {
+    let relevant_roots = roots.to_vec();
+    let relevant = move |path: &PathBuf| {
+        !inside_bundle(path) && relevant_roots.iter().any(|root| path.starts_with(root))
+    };
     let handler = move |result: notify::Result<notify::Event>| match result {
-        Ok(event) if event.paths.iter().any(|path| !inside_bundle(path)) => {
+        Ok(event) if event.paths.iter().any(&relevant) => {
             if changes.send(()).is_err() {
                 eprintln!("the app index thread stopped; ignoring folder changes");
             }
@@ -193,12 +231,28 @@ fn watch(roots: &[PathBuf], changes: Sender<()>) -> Option<RecommendedWatcher> {
             return None;
         }
     };
-    for root in roots.iter().filter(|root| root.is_dir()) {
-        if let Err(error) = watcher.watch(root, RecursiveMode::Recursive) {
-            eprintln!("can't watch {}: {error}", root.display());
+    let missing_parents = roots
+        .iter()
+        .filter(|root| !root.exists())
+        .filter_map(|root| root.parent())
+        .filter(|parent| parent.is_dir());
+    for parent in missing_parents {
+        if let Err(error) = watcher.watch(parent, RecursiveMode::NonRecursive) {
+            eprintln!("can't watch {}: {error}", parent.display());
         }
     }
     Some(watcher)
+}
+
+/// Resolves symlinks in the part of `path` that exists, since watchers report resolved paths
+/// (`/private/var/…` for `/var/…`) and events are matched against the roots by prefix.
+fn resolve(path: &Path) -> PathBuf {
+    path.ancestors()
+        .find_map(|ancestor| {
+            let rest = path.strip_prefix(ancestor).ok()?;
+            Some(fs::canonicalize(ancestor).ok()?.join(rest))
+        })
+        .unwrap_or_else(|| path.to_path_buf())
 }
 
 /// Apps write inside their own bundles (updates, caches); only bundles appearing or going
@@ -232,13 +286,21 @@ fn collect_apps(folder: &Path, depth: usize, apps: &mut Vec<App>) {
         }
     };
     for entry in entries {
-        let path = match entry {
-            Ok(entry) => entry.path(),
+        let entry = match entry {
+            Ok(entry) => entry,
             Err(error) => {
                 eprintln!("can't list {}: {error}", folder.display());
                 continue;
             }
         };
+        // Updaters stage hidden copies (`.Foo.app`) next to the real bundle.
+        if entry.file_name().as_encoded_bytes().starts_with(b".") {
+            continue;
+        }
+        let path = entry.path();
+        if !path.is_dir() {
+            continue;
+        }
         if is_bundle(&path)
             && let Some(name) = path.file_stem()
         {
@@ -246,7 +308,7 @@ fn collect_apps(folder: &Path, depth: usize, apps: &mut Vec<App>) {
                 name: name.to_string_lossy().into_owned(),
                 path,
             });
-        } else if depth > 0 && path.is_dir() {
+        } else if depth > 0 {
             collect_apps(&path, depth - 1, apps);
         }
     }
@@ -269,17 +331,15 @@ fn rank<'a>(
             let score = score(&app.name, &query)?;
             let bonus = usage
                 .get(&app.path)
-                .map_or(0, |usage| frecency_bonus(usage.weight(now)));
+                // Saturating float-to-int cast; the weight is never negative.
+                .map_or(0, |usage| {
+                    ((usage.weight(now).ln_1p() * 8.0) as i32).min(MAX_FRECENCY_BONUS)
+                });
             Some((score + bonus, app))
         })
         .collect();
     ranked.sort_by_key(|(score, _)| Reverse(*score));
     ranked.into_iter().map(|(_, app)| app).collect()
-}
-
-fn frecency_bonus(weight: f64) -> i32 {
-    // Saturating float-to-int cast; the weight is never negative.
-    ((weight.ln_1p() * 8.0) as i32).min(MAX_FRECENCY_BONUS)
 }
 
 /// The query's letters, case-folded and without spaces, so "studio code" matches as well.
@@ -302,11 +362,10 @@ fn score(name: &str, query: &[char]) -> Option<i32> {
     let bonuses: Vec<i32> = previous_characters
         .zip(name.iter().copied())
         .map(|(previous, current)| {
-            if is_word_start(previous, current) {
-                WORD_START
-            } else {
-                0
-            }
+            let word_start = previous.is_none_or(|previous| {
+                !previous.is_alphanumeric() || (previous.is_lowercase() && current.is_uppercase())
+            });
+            if word_start { WORD_START } else { 0 }
         })
         .collect();
 
@@ -351,12 +410,6 @@ fn fold_case(character: char) -> char {
     character.to_lowercase().next().unwrap_or(character)
 }
 
-fn is_word_start(previous: Option<char>, current: char) -> bool {
-    previous.is_none_or(|previous| {
-        !previous.is_alphanumeric() || (previous.is_lowercase() && current.is_uppercase())
-    })
-}
-
 fn now() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -399,13 +452,10 @@ fn parse_usage_line(line: &str) -> Option<(PathBuf, Usage)> {
 fn serialize_usage(usage: &HashMap<PathBuf, Usage>) -> String {
     usage
         .iter()
-        .map(|(path, usage)| {
-            format!(
-                "{}\t{}\t{}\n",
-                usage.count,
-                usage.last_opened,
-                path.display()
-            )
+        .filter_map(|(path, usage)| {
+            // A line-based file can't hold these; they'd be misread when loaded.
+            let path = path.to_str().filter(|path| !path.contains('\n'))?;
+            Some(format!("{}\t{}\t{path}\n", usage.count, usage.last_opened))
         })
         .collect()
 }
@@ -423,6 +473,7 @@ fn save(path: &Path, contents: &str) -> io::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::atomic::{AtomicBool, Ordering};
 
     fn apps(names: &[&str]) -> Vec<App> {
         names
@@ -443,6 +494,14 @@ mod tests {
 
     fn matches(name: &str, query: &str) -> Option<i32> {
         score(name, &fold_query(query))
+    }
+
+    fn titles(plugin: &mut Apps, query: &str) -> Vec<String> {
+        plugin
+            .query(query)
+            .into_iter()
+            .map(|item| item.title)
+            .collect()
     }
 
     fn eventually(mut condition: impl FnMut() -> bool) -> bool {
@@ -611,9 +670,11 @@ mod tests {
             "Vendor/Tool.app",
             "Vendor/Deeper/Hidden.app",
             "Not An App",
+            ".Safari Update.app",
         ] {
             fs::create_dir_all(root.path().join(folder))?;
         }
+        fs::write(root.path().join("notes.app"), "not a bundle")?;
         let names = |roots: &[PathBuf]| -> Vec<String> {
             scan(roots).into_iter().map(|app| app.name).collect()
         };
@@ -645,16 +706,83 @@ mod tests {
         let root = tempfile::tempdir()?;
         fs::create_dir(root.path().join("Safari.app"))?;
         let mut plugin = Apps::watching(vec![root.path().to_path_buf()], None);
-        let mut titles = |query: &str| -> Vec<String> {
-            plugin
-                .query(query)
-                .into_iter()
-                .map(|item| item.title)
-                .collect()
-        };
-        assert!(eventually(|| titles("saf") == ["Safari"]));
+        assert!(eventually(|| titles(&mut plugin, "saf") == ["Safari"]));
         fs::create_dir(root.path().join("Zed.app"))?;
-        assert!(eventually(|| titles("zed") == ["Zed"]));
+        assert!(eventually(|| titles(&mut plugin, "zed") == ["Zed"]));
         Ok(())
+    }
+
+    #[test]
+    fn app_folders_created_later_are_watched() -> io::Result<()> {
+        let home = tempfile::tempdir()?;
+        let applications = home.path().join("Applications");
+        let mut plugin = Apps::watching(vec![applications.clone()], None);
+        fs::create_dir_all(applications.join("Zed.app"))?;
+        assert!(eventually(|| titles(&mut plugin, "zed") == ["Zed"]));
+        fs::create_dir(applications.join("Yak.app"))?;
+        assert!(eventually(|| titles(&mut plugin, "yak") == ["Yak"]));
+        Ok(())
+    }
+
+    #[test]
+    fn constant_writes_dont_hold_off_rescans() -> io::Result<()> {
+        let root = tempfile::tempdir()?;
+        let vendor = root.path().join("Vendor");
+        fs::create_dir(&vendor)?;
+        fs::create_dir(root.path().join("Safari.app"))?;
+        let mut plugin = Apps::watching(vec![root.path().to_path_buf()], None);
+        assert!(eventually(|| titles(&mut plugin, "saf") == ["Safari"]));
+        let stop = Arc::new(AtomicBool::new(false));
+        let writer = thread::spawn({
+            let stop = stop.clone();
+            move || -> io::Result<()> {
+                while !stop.load(Ordering::Relaxed) {
+                    fs::write(vendor.join("log"), "busy")?;
+                    thread::sleep(Duration::from_millis(100));
+                }
+                Ok(())
+            }
+        });
+        fs::create_dir(root.path().join("Zed.app"))?;
+        let found = eventually(|| titles(&mut plugin, "zed") == ["Zed"]);
+        stop.store(true, Ordering::Relaxed);
+        assert!(writer.join().is_ok_and(|result| result.is_ok()));
+        assert!(found);
+        Ok(())
+    }
+
+    #[test]
+    fn opening_a_new_app_when_full_keeps_it() -> io::Result<()> {
+        let folder = tempfile::tempdir()?;
+        let mut plugin = Apps::watching(Vec::new(), Some(folder.path().join("frecency")));
+        let now = now();
+        plugin.usage = (0..MAX_REMEMBERED)
+            .map(|index| {
+                let usage = Usage {
+                    count: 2,
+                    last_opened: now,
+                };
+                (PathBuf::from(format!("/Applications/{index}.app")), usage)
+            })
+            .collect();
+        let safari = Path::new("/Applications/Safari.app");
+        plugin.opened(safari);
+        assert!(plugin.usage.contains_key(safari));
+        assert_eq!(plugin.usage.len(), MAX_REMEMBERED);
+        Ok(())
+    }
+
+    #[test]
+    fn newlines_in_paths_dont_corrupt_frecency() {
+        let safari = PathBuf::from("/Applications/Safari.app");
+        let usage = Usage {
+            count: 1,
+            last_opened: 7,
+        };
+        let saved = serialize_usage(&HashMap::from([
+            (safari.clone(), usage),
+            (PathBuf::from("/Applications/Two\nLines.app"), usage),
+        ]));
+        assert_eq!(parse_usage(&saved), HashMap::from([(safari, usage)]));
     }
 }
