@@ -13,6 +13,11 @@ pub enum Action {
     Open(PathBuf),
 }
 
+/// Where settings and state live: `~/.config/launcher` on every platform.
+pub fn config_directory() -> Option<PathBuf> {
+    std::env::var_os("HOME").map(|home| Path::new(&home).join(".config/launcher"))
+}
+
 pub trait Plugin {
     /// Runs on the UI thread for every keystroke, so it must stay well under a frame.
     fn query(&mut self, query: &str) -> Vec<Item>;

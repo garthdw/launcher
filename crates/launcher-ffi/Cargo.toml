@@ -12,5 +12,6 @@ crate-type = ["staticlib", "lib"]
 
 [dependencies]
 launcher-core.workspace = true
+launcher-apps.workspace = true
 launcher-calc.workspace = true
 uniffi.workspace = true
