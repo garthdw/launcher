@@ -110,7 +110,7 @@ impl Calc {
         };
         mentions_currency(query).then(|| Item {
             title: title.into(),
-            subtitle: "Calculator".into(),
+            subtitle: String::new(),
             action: Action::Nothing,
             detail: Vec::new(),
             relevance: CALCULATION,
@@ -326,7 +326,7 @@ impl Plugin for Calc {
             Rates::Loaded(date) if is_money(&value) => {
                 format!("ECB rates of {}", date.strftime("%-d %b"))
             }
-            _ => "Calculator".into(),
+            _ => String::new(),
         };
         vec![Item {
             title: plain_text(&value, &FormatOptions::default()),
@@ -489,7 +489,7 @@ mod tests {
             calc.query("100 USD to EUR"),
             [Item {
                 title: "Loading exchange rates…".into(),
-                subtitle: "Calculator".into(),
+                subtitle: String::new(),
                 action: Action::Nothing,
                 detail: Vec::new(),
                 relevance: CALCULATION,
@@ -517,7 +517,7 @@ mod tests {
         publish(&calc.pending, Update::Unavailable);
         assert_eq!(
             shown(&mut calc, "100 USD to EUR"),
-            [("Exchange rates unavailable".into(), "Calculator".into())]
+            [("Exchange rates unavailable".into(), String::new())]
         );
         Ok(())
     }
@@ -534,7 +534,7 @@ mod tests {
         );
         assert_eq!(
             shown(&mut calc, "2 m"),
-            [("2 m".into(), "Calculator".into())],
+            [("2 m".into(), String::new())],
             "only money is dated"
         );
         Ok(())

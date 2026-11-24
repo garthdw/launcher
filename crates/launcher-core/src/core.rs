@@ -7,7 +7,8 @@ use std::sync::Arc;
 #[derive(Clone, Debug, PartialEq)]
 pub struct Item {
     pub title: String,
-    /// What the item is, such as its source. The shell adds the keys that act on it.
+    /// More about the item, such as an app's folder; the group's header already names the
+    /// plugin. The shell adds the keys that act on it.
     pub subtitle: String,
     pub action: Action,
     /// Shown on request in a scrolling, monospaced view; empty for items without one.
