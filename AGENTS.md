@@ -26,9 +26,10 @@ cargo build --profile profiling              # release with full symbols, for sa
 ## Architecture
 
 - `crates/launcher-core` (`core.rs`): the `Plugin` trait, `Item`, `Action` and an item's detail `Section`s. No FFI or UI dependencies.
-- `crates/launcher-plugins` (`plugins.rs`): `start()` builds every plugin in result order and starts their background work. Shells call it rather than choosing plugins, so they stay thin: they draw results, name the keys and run actions.
+- `crates/launcher-plugins` (`plugins.rs`): `start()` builds every plugin in result order and starts their background work, which calls the shell's `ResultsChanged` when it may have changed results so the shell asks again for the shown query. Shells call it rather than choosing plugins, so they stay thin: they draw results, name the keys and run actions.
 - `crates/launcher-apps` (`apps.rs`): app search. Indexes `.app` bundles in the macOS app folders on a background thread and rescans when `notify` reports a change; a small fuzzy matcher favouring word starts, plus frecency kept in `~/.config/launcher/frecency`. The shell opens results (`Action::Open`) and draws their icons.
-- `crates/launcher-calc` (`calc.rs`): numbat for arithmetic, units and currency. Exchange rates come from the ECB, cached on disk and fetched again in the background at launch when a day old; numbat's own fetch is off, since it would run on the UI thread.
+- `crates/launcher-calc` (`calc.rs`, `rates.rs`): numbat for arithmetic, units and currency. Exchange rates come from the ECB, cached on disk and fetched again in the background when a day old, while the app runs too; each new set builds a fresh numbat `Context` off the UI thread, swapped in at the next query. Until rates load, a currency query shows a muted `Action::Nothing` item. numbat's own fetch is off, since it would run on the UI thread.
+- `vendor/numbat`: numbat 1.24.0 with the patches in its `PATCHES.md`, through `[patch.crates-io]`.
 - `crates/launcher-jwt` (`jwt.rs`): decodes a pasted JSON Web Token (signature not verified) into its claims and expiry, with the header, payload and times as its detail.
 - `crates/launcher-ffi` (`ffi.rs`): the UniFFI boundary the Swift shell calls: a `Launcher` object holding the plugins, and records mirroring the core's types, so the core stays free of FFI derives. Built as a static library linked into the app.
 - `crates/uniffi-bindgen`: the bindgen CLI, pinned to the same `uniffi` as the FFI crate.

@@ -11,10 +11,42 @@ use jiff::civil::Date;
 const ECB_URL: &str = "https://www.ecb.europa.eu/stats/eurofxref/eurofxref-daily.xml";
 pub(crate) const RATES_FILE: &str = "eurofxref-daily.xml";
 /// The ECB publishes once per weekday, around 16:00 CET.
-pub(crate) const RATES_LIFETIME: Duration = Duration::from_secs(24 * 60 * 60);
+const RATES_LIFETIME: Duration = Duration::from_secs(24 * 60 * 60);
+
+/// The newest rates to be had, and their date: cached ones under a day old, else fetched ones,
+/// else older cached ones.
+pub(crate) fn current(directory: &Path) -> Option<(String, Date)> {
+    let path = directory.join(RATES_FILE);
+    let xml = match read_cache(&path) {
+        Some((xml, true)) => xml,
+        stale => match fetch() {
+            Ok(xml) => {
+                if let Err(error) = store(directory, &path, &xml) {
+                    eprintln!("could not cache exchange rates: {error}");
+                }
+                xml
+            }
+            Err(error) => {
+                eprintln!("could not fetch exchange rates: {error}");
+                stale?.0
+            }
+        },
+    };
+    let date = rates_date(&xml)?;
+    Some((xml, date))
+}
+
+/// Cached rates under a day old, and their date.
+pub(crate) fn fresh(directory: &Path) -> Option<(String, Date)> {
+    let (xml, true) = read_cache(&directory.join(RATES_FILE))? else {
+        return None;
+    };
+    let date = rates_date(&xml)?;
+    Some((xml, date))
+}
 
 /// The cached rates file, if it holds rates, and whether it is under a day old.
-pub(crate) fn read_cache(path: &Path) -> Option<(String, bool)> {
+fn read_cache(path: &Path) -> Option<(String, bool)> {
     let xml = match fs::read_to_string(path) {
         Ok(xml) => xml,
         Err(error) if error.kind() == ErrorKind::NotFound => return None,
@@ -35,8 +67,7 @@ pub(crate) fn read_cache(path: &Path) -> Option<(String, bool)> {
     Some((xml, fresh))
 }
 
-/// Fetches the ECB's rates and caches them at `path`, in `directory`.
-pub(crate) fn fetch(directory: &Path, path: &Path) -> Result<String, Box<dyn Error>> {
+fn fetch() -> Result<String, Box<dyn Error>> {
     let xml = attohttpc::get(ECB_URL)
         .timeout(Duration::from_secs(15))
         .send()?
@@ -45,16 +76,20 @@ pub(crate) fn fetch(directory: &Path, path: &Path) -> Result<String, Box<dyn Err
     if rates_date(&xml).is_none() {
         return Err(format!("no rates in the response from {ECB_URL}").into());
     }
-    fs::create_dir_all(directory)?;
-    // Renamed into place, so a write cut short never leaves a cache that looks fresh.
-    let partial = path.with_extension("partial");
-    fs::write(&partial, &xml)?;
-    fs::rename(&partial, path)?;
     Ok(xml)
 }
 
+/// Caches `xml` at `path`, in `directory`. Renamed into place, so a write cut short never
+/// leaves a cache that looks fresh.
+fn store(directory: &Path, path: &Path, xml: &str) -> std::io::Result<()> {
+    fs::create_dir_all(directory)?;
+    let partial = path.with_extension("partial");
+    fs::write(&partial, xml)?;
+    fs::rename(&partial, path)
+}
+
 /// The date of the rates in an ECB reference rates file, if it holds any rates.
-pub(crate) fn rates_date(xml: &str) -> Option<Date> {
+fn rates_date(xml: &str) -> Option<Date> {
     if numbat_exchange_rates::parse_exchange_rates(xml).is_none_or(|rates| rates.is_empty()) {
         return None;
     }

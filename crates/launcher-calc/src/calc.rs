@@ -1,73 +1,236 @@
 mod rates;
 
-use std::path::Path;
-use std::sync::OnceLock;
+use std::path::{Path, PathBuf};
+use std::sync::{Arc, LazyLock, Mutex};
+use std::thread;
+use std::time::{Duration, Instant};
 
 use jiff::civil::Date;
-use launcher_core::{Action, Item, Plugin, Section};
+use launcher_core::{Action, Item, Plugin, ResultsChanged, Section};
 use numbat::markup::plain_text_format;
-use numbat::module_importer::BuiltinModuleImporter;
+use numbat::module_importer::{BuiltinModuleImporter, ModuleImporter};
 use numbat::pretty_print::PrettyPrint;
-use numbat::resolver::CodeSource;
+use numbat::resolver::{CodeSource, ModulePath};
 use numbat::value::Value;
 use numbat::{Context, FormatOptions, InterpreterResult, NumbatError};
 
-use rates::{RATES_FILE, rates_date, read_cache};
-
-/// The date of the rates numbat holds. numbat keeps them in a process-wide `OnceLock` that
-/// panics when set twice, so they load once per process, and only through `use_rates`.
-static RATES_DATE: OnceLock<Date> = OnceLock::new();
+/// How often to check whether the cached rates are a day old. Hourly rather than sleeping a
+/// day, since a sleeping Mac doesn't advance a thread's sleep.
+const RATES_CHECK: Duration = Duration::from_secs(60 * 60);
+/// How soon to try again while no rates have loaded, as at login before the network is up.
+const RATES_RETRY: Duration = Duration::from_secs(60);
 
 pub struct Calc {
     context: Context,
+    rates: Rates,
+    /// The newest update not yet taken. One slot rather than a queue, so contexts don't pile up
+    /// while no query comes to take them.
+    pending: Arc<Mutex<Option<Update>>>,
+}
+
+/// What the calculator has of exchange rates.
+enum Rates {
+    Loading,
+    Unavailable,
+    Loaded(Date),
+}
+
+/// From the thread that keeps exchange rates current.
+enum Update {
+    /// A context with currencies at the rates of the date.
+    Loaded(Box<Context>, Date),
+    /// No rates could be fetched or found in the cache.
+    Unavailable,
 }
 
 impl Calc {
+    /// A calculator without exchange rates: currencies say rates are loading.
     pub fn new() -> Result<Self, Box<NumbatError>> {
-        let mut context = Context::new(BuiltinModuleImporter::default());
-        context
-            .interpret("use prelude", CodeSource::Internal)
-            .map(drop)?;
-        Ok(Self { context })
+        Ok(Self {
+            context: context(false)?,
+            rates: Rates::Loading,
+            pending: Arc::default(),
+        })
     }
 
-    /// Loads the ECB rates cached in `directory` when they are under a day old. Otherwise
-    /// fetches fresh ones in the background, falling back to the old cache if that fails, since
-    /// rates load only once per process.
-    pub fn load_exchange_rates(directory: &Path) {
-        let path = directory.join(RATES_FILE);
-        match read_cache(&path) {
-            Some((xml, true)) => {
-                use_rates(&xml);
+    /// Loads exchange rates in the background, from the cache in `directory` or the ECB, and
+    /// keeps them a day old at most, calling `changed` whenever currencies change.
+    pub fn start(directory: PathBuf, changed: ResultsChanged) -> Result<Self, Box<NumbatError>> {
+        // Rates under a day old load now, so launch builds one context rather than two.
+        let calc = match rates::fresh(&directory) {
+            Some((xml, date)) => {
+                Context::set_exchange_rates(&xml);
+                Self {
+                    context: context(true)?,
+                    rates: Rates::Loaded(date),
+                    pending: Arc::default(),
+                }
             }
-            stale => {
-                let directory = directory.to_path_buf();
-                std::thread::spawn(move || match rates::fetch(&directory, &path) {
-                    Ok(xml) => {
-                        use_rates(&xml);
-                    }
-                    Err(error) => {
-                        eprintln!("could not fetch exchange rates: {error}");
-                        if let Some((xml, _)) = stale {
-                            use_rates(&xml);
-                        }
-                    }
-                });
+            None => Self::new()?,
+        };
+        let loaded = match calc.rates {
+            Rates::Loaded(date) => Some(date),
+            Rates::Loading | Rates::Unavailable => None,
+        };
+        let pending = Arc::downgrade(&calc.pending);
+        thread::spawn(move || keep_rates_current(&directory, loaded, &pending, &*changed));
+        Ok(calc)
+    }
+
+    fn take_update(&mut self) {
+        let update = match self.pending.lock() {
+            Ok(mut pending) => pending.take(),
+            Err(_) => {
+                eprintln!("the exchange rates thread panicked; keeping the rates there are");
+                None
             }
+        };
+        match update {
+            Some(Update::Loaded(context, date)) => {
+                self.context = *context;
+                self.rates = Rates::Loaded(date);
+            }
+            Some(Update::Unavailable) => self.rates = Rates::Unavailable,
+            None => {}
         }
+    }
+
+    /// Says why a query that failed for want of rates has no result.
+    fn rates_missing(&self, query: &str) -> Option<Item> {
+        let title = match self.rates {
+            Rates::Loading => "Loading exchange rates…",
+            Rates::Unavailable => "Exchange rates unavailable",
+            Rates::Loaded(_) => return None,
+        };
+        mentions_currency(query).then(|| Item {
+            title: title.into(),
+            subtitle: "Calculator".into(),
+            action: Action::Nothing,
+            detail: Vec::new(),
+        })
     }
 }
 
-/// Hands valid rates to numbat, unless it holds some already.
-fn use_rates(xml: &str) -> bool {
-    let Some(date) = rates_date(xml) else {
-        return false;
+/// A prelude context, with currencies at the rates numbat holds when `currencies` is set.
+/// numbat's on-demand currency loading stays off: before rates load it would find none, and
+/// after, the module loads here, off the UI thread.
+fn context(currencies: bool) -> Result<Context, Box<NumbatError>> {
+    let mut context = Context::new(BuiltinModuleImporter::default());
+    context
+        .interpret("use prelude", CodeSource::Internal)
+        .map(drop)?;
+    if currencies {
+        context
+            .interpret("use units::currencies", CodeSource::Internal)
+            .map(drop)?;
+    }
+    Ok(context)
+}
+
+/// Leaves `update` for the calculator to take, replacing any it hasn't.
+fn publish(pending: &Mutex<Option<Update>>, update: Update) {
+    match pending.lock() {
+        Ok(mut pending) => *pending = Some(update),
+        Err(_) => eprintln!("the calculator panicked; not updating exchange rates"),
+    }
+}
+
+/// Runs until the calculator, which holds `pending`, is gone. `loaded` is the date of the rates
+/// it started with, if any.
+fn keep_rates_current(
+    directory: &Path,
+    mut loaded: Option<Date>,
+    pending: &std::sync::Weak<Mutex<Option<Update>>>,
+    changed: &dyn Fn(),
+) {
+    let mut told_unavailable = false;
+    loop {
+        let update = match rates::current(directory) {
+            Some((xml, date)) if loaded != Some(date) => {
+                let started = Instant::now();
+                Context::set_exchange_rates(&xml);
+                match context(true) {
+                    Ok(context) => {
+                        eprintln!(
+                            "exchange rates of {date} loaded in {} ms",
+                            started.elapsed().as_millis()
+                        );
+                        loaded = Some(date);
+                        Some(Update::Loaded(Box::new(context), date))
+                    }
+                    Err(error) => {
+                        eprintln!("could not load exchange rates: {error}");
+                        None
+                    }
+                }
+            }
+            // Only before any loaded: older rates beat none.
+            None if loaded.is_none() && !told_unavailable => {
+                told_unavailable = true;
+                Some(Update::Unavailable)
+            }
+            _ => None,
+        };
+        if let Some(update) = update {
+            let Some(pending) = pending.upgrade() else {
+                return;
+            };
+            publish(&pending, update);
+            changed();
+        }
+        thread::sleep(if loaded.is_some() {
+            RATES_CHECK
+        } else {
+            RATES_RETRY
+        });
+    }
+}
+
+/// The names numbat's currency module gives currencies: units, their aliases and symbols.
+/// Read once, when a query first needs them.
+static CURRENCY_NAMES: LazyLock<Vec<String>> = LazyLock::new(currency_names);
+
+fn currency_names() -> Vec<String> {
+    let path = ModulePath(vec!["units".into(), "currencies".into()]);
+    let Some((module, _)) = BuiltinModuleImporter::default().import(&path) else {
+        eprintln!("numbat has no currency module");
+        return Vec::new();
     };
-    RATES_DATE.get_or_init(|| {
-        Context::set_exchange_rates(xml);
-        date
-    });
-    true
+    module
+        .lines()
+        .map(str::trim)
+        .flat_map(|line| {
+            let names = if let Some(aliases) = line.strip_prefix("@aliases(") {
+                aliases.trim_end_matches(')')
+            } else if let Some(unit) = line.strip_prefix("unit ") {
+                unit.split(':').next().unwrap_or_default()
+            } else {
+                ""
+            };
+            names
+                .split(',')
+                .filter_map(|name| name.split(':').next())
+                .map(str::trim)
+                .filter(|name| !name.is_empty())
+                .map(str::to_owned)
+                .collect::<Vec<_>>()
+        })
+        .collect()
+}
+
+/// Whether `query` names a currency other than the euro, whose rates must load first.
+fn mentions_currency(query: &str) -> bool {
+    let is_word = |c: char| c.is_alphanumeric() || c == '_';
+    CURRENCY_NAMES.iter().any(|name| {
+        if name.chars().all(is_word) {
+            // "100USD" is a number and a currency to numbat.
+            query
+                .split(|c| !is_word(c))
+                .any(|word| word.trim_start_matches(|c: char| c.is_ascii_digit()) == name)
+        } else {
+            query.contains(name.as_str())
+        }
+    })
 }
 
 /// Whether `value` is in money, whose base unit is the euro.
@@ -85,29 +248,25 @@ fn is_money(value: &Value) -> bool {
 
 impl Plugin for Calc {
     fn query(&mut self, query: &str) -> Vec<Item> {
+        self.take_update();
         // Bare words such as an app name are valid numbat identifiers ("m", "day"), but echoing
         // them back as "1 m" is noise in a launcher.
         if !query.chars().any(|c| c.is_ascii_digit()) {
             return Vec::new();
         }
-        // The prelude has all a launcher needs, and importing the currency module before rates
-        // load would leave numbat without them for good.
+        // An import stays in the context for good: before rates load, the currency module would
+        // keep NaN rates, and `use all` would hold every module in memory.
         if query
             .split(|c: char| !c.is_alphanumeric() && c != '_')
             .any(|word| word == "use")
         {
             return Vec::new();
         }
-        let rates_date = RATES_DATE.get();
-        // Meeting a currency makes numbat look its rates up. Before they load, that lookup would
-        // leave numbat without rates for good.
-        self.context
-            .load_currency_module_on_demand(rates_date.is_some());
-        let query = x_as_times(query);
+        let rewritten = x_as_times(query);
         let Ok((statements, InterpreterResult::Value(value))) =
-            self.context.interpret(&query, CodeSource::Text)
+            self.context.interpret(&rewritten, CodeSource::Text)
         else {
-            return Vec::new();
+            return self.rates_missing(query).into_iter().collect();
         };
         // Digit separators read well but break pasting into most other apps.
         let unseparated = FormatOptions {
@@ -136,8 +295,10 @@ impl Plugin for Calc {
                 text: precise,
             });
         }
-        let subtitle = match rates_date {
-            Some(date) if is_money(&value) => format!("ECB rates of {}", date.strftime("%-d %b")),
+        let subtitle = match self.rates {
+            Rates::Loaded(date) if is_money(&value) => {
+                format!("ECB rates of {}", date.strftime("%-d %b"))
+            }
             _ => "Calculator".into(),
         };
         vec![Item {
@@ -200,6 +361,7 @@ fn x_as_times(query: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::rates::RATES_FILE;
     use crate::rates::tests::ECB_XML;
 
     fn items(query: &str) -> Vec<Item> {
@@ -285,59 +447,128 @@ mod tests {
     /// numbat holds exchange rates process-wide, so tests that set them take turns.
     static RATES: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
+    fn shown(calc: &mut Calc, query: &str) -> Vec<(String, String)> {
+        calc.query(query)
+            .into_iter()
+            .map(|item| (item.title, item.subtitle))
+            .collect()
+    }
+
     #[test]
-    fn replaced_rates_reach_a_new_context() -> Result<(), Box<NumbatError>> {
-        let _turn = RATES.lock();
-        let usd_in_eur = || -> Result<String, Box<NumbatError>> {
-            let mut context = Context::new(BuiltinModuleImporter::default());
-            context.load_currency_module_on_demand(true);
-            context
-                .interpret("use prelude", CodeSource::Internal)
-                .map(drop)?;
-            match context.interpret("100 USD -> EUR", CodeSource::Text)? {
-                (_, InterpreterResult::Value(value)) => {
-                    Ok(plain_text(&value, &FormatOptions::default()))
-                }
-                (_, result) => panic!("not a value: {result:?}"),
-            }
-        };
-        Context::set_exchange_rates(ECB_XML);
-        assert_eq!(usd_in_eur()?, "80 €");
-        Context::set_exchange_rates(&ECB_XML.replace("1.25", "2"));
-        assert_eq!(usd_in_eur()?, "50 €");
-        Context::set_exchange_rates(ECB_XML);
+    fn currency_before_rates_load_says_so() -> Result<(), Box<NumbatError>> {
+        let mut calc = Calc::new()?;
+        assert_eq!(
+            calc.query("100 USD to EUR"),
+            [Item {
+                title: "Loading exchange rates…".into(),
+                subtitle: "Calculator".into(),
+                action: Action::Nothing,
+                detail: Vec::new(),
+            }]
+        );
+        assert_eq!(
+            calc.query("£20 to EUR").len(),
+            1,
+            "symbols are currencies too"
+        );
+        assert_eq!(
+            calc.query("100USD to EUR").len(),
+            1,
+            "a code may follow the number"
+        );
+        assert_eq!(
+            titles("100 EUR + 5 €"),
+            ["105 €"],
+            "the euro needs no rates"
+        );
+        assert!(
+            titles("100 parsecs + 2 usd2").is_empty(),
+            "nor is every error one"
+        );
+        publish(&calc.pending, Update::Unavailable);
+        assert_eq!(
+            shown(&mut calc, "100 USD to EUR"),
+            [("Exchange rates unavailable".into(), "Calculator".into())]
+        );
         Ok(())
     }
 
     #[test]
-    fn currency_uses_cached_rates() -> Result<(), Box<dyn std::error::Error>> {
+    fn fresh_cached_rates_load_at_start() -> Result<(), Box<dyn std::error::Error>> {
         let _turn = RATES.lock();
         let cache = tempfile::tempdir()?;
         std::fs::write(cache.path().join(RATES_FILE), ECB_XML)?;
-        Calc::load_exchange_rates(cache.path());
+        let mut calc = Calc::start(cache.path().to_path_buf(), Arc::new(|| {}))?;
         assert_eq!(
-            items("100 USD to EUR")
-                .into_iter()
-                .map(|item| (item.title, item.subtitle))
-                .collect::<Vec<_>>(),
+            shown(&mut calc, "100 USD to EUR"),
             [("80 €".into(), "ECB rates of 21 Nov".into())]
         );
         assert_eq!(
-            items("2 m")
-                .into_iter()
-                .map(|item| item.subtitle)
-                .collect::<Vec<_>>(),
-            ["Calculator"],
+            shown(&mut calc, "2 m"),
+            [("2 m".into(), "Calculator".into())],
             "only money is dated"
         );
         Ok(())
     }
 
     #[test]
+    fn replaced_rates_reach_a_new_context() -> Result<(), Box<dyn std::error::Error>> {
+        let _turn = RATES.lock();
+        let date = jiff::civil::date(2026, 11, 21);
+        Context::set_exchange_rates(ECB_XML);
+        let mut calc = Calc::new()?;
+        publish(
+            &calc.pending,
+            Update::Loaded(Box::new(context(true)?), date),
+        );
+        assert_eq!(
+            shown(&mut calc, "100 USD to EUR"),
+            [("80 €".into(), "ECB rates of 21 Nov".into())]
+        );
+        Context::set_exchange_rates(&ECB_XML.replace("1.25", "2"));
+        assert_eq!(
+            shown(&mut calc, "100 USD to EUR"),
+            [("80 €".into(), "ECB rates of 21 Nov".into())],
+            "a context keeps the rates it loaded"
+        );
+        let outdated = context(false)?;
+        publish(&calc.pending, Update::Loaded(Box::new(outdated), date));
+        publish(
+            &calc.pending,
+            Update::Loaded(Box::new(context(true)?), date),
+        );
+        assert_eq!(
+            shown(&mut calc, "100 USD to EUR"),
+            [("50 €".into(), "ECB rates of 21 Nov".into())],
+            "the newest update replaces one not yet taken"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn currency_names_follow_numbats_module() {
+        let mut codes: Vec<String> = currency_names()
+            .into_iter()
+            .filter(|name| name.len() == 3 && name.chars().all(|c| c.is_ascii_uppercase()))
+            .collect();
+        codes.sort();
+        assert_eq!(
+            codes,
+            [
+                "AUD", "BGN", "BRL", "CAD", "CHF", "CNY", "CZK", "DKK", "GBP", "HKD", "HUF", "IDR",
+                "ILS", "INR", "ISK", "JPY", "KRW", "MYR", "NIS", "NOK", "NZD", "PHP", "PLN", "RON",
+                "SEK", "SGD", "THB", "TRY", "USD", "ZAR",
+            ],
+            "numbat's currencies changed: check `mentions_currency` still finds them"
+        );
+        assert!(currency_names().contains(&"$".to_owned()));
+        assert!(currency_names().contains(&"dollar".to_owned()));
+    }
+
+    #[test]
     fn ignores_imports() {
-        // Importing the currency module before rates load would leave numbat without them.
         assert!(titles("use units::currencies; 1").is_empty());
-        assert!(titles("use all; 2").is_empty());
+        assert!(titles("2; use all").is_empty());
     }
 
     #[test]

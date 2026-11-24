@@ -9,14 +9,12 @@ use launcher_jwt::Jwt;
 /// calls `changed` when it may have changed the results.
 pub fn start(changed: ResultsChanged) -> Plugins {
     let mut plugins: Vec<Box<dyn Plugin + Send>> = Vec::new();
-    match Calc::new() {
-        Ok(calc) => {
-            match cache_directory() {
-                Some(directory) => Calc::load_exchange_rates(&directory),
-                None => eprintln!("no home folder to cache exchange rates in"),
-            }
-            plugins.push(Box::new(calc));
-        }
+    let rates_directory = cache_directory().unwrap_or_else(|| {
+        eprintln!("no home folder, so exchange rates are cached in the temporary folder");
+        std::env::temp_dir()
+    });
+    match Calc::start(rates_directory, changed.clone()) {
+        Ok(calc) => plugins.push(Box::new(calc)),
         Err(error) => eprintln!("calculator unavailable: {error}"),
     }
     plugins.push(Box::new(Jwt));
