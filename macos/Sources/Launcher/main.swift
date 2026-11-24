@@ -321,6 +321,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSTextFieldDelegate, N
         field.focusRingType = .none
         field.font = .systemFont(ofSize: 20)
         field.placeholderString = "Search apps, calculate, convert…"
+        // One line that scrolls sideways: a pasted token would otherwise wrap onto a clipped second line.
+        field.usesSingleLineMode = true
+        field.cell?.wraps = false
+        field.cell?.isScrollable = true
         field.delegate = self
         field.autoresizingMask = [.width, .minYMargin]
         // A fixed height: `resize` reads it as the list's, so the panel growing mustn't stretch it.
