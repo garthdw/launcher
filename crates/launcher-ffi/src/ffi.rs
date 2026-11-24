@@ -333,25 +333,14 @@ pub trait ResultsListener: Send + Sync {
     fn results_changed(&self);
 }
 
-#[uniffi::export(callback_interface)]
-pub trait SettingsListener: Send + Sync {
-    /// Called from another thread when the config file changed, for the shell to call
-    /// `Launcher::reload_settings`.
-    fn settings_changed(&self);
-}
-
 #[uniffi::export]
 impl Launcher {
-    /// Starts the plugins the config file turns on, and watches the file.
+    /// Starts the plugins the config file turns on.
     #[uniffi::constructor]
-    pub fn new(
-        listener: Box<dyn ResultsListener>,
-        settings_listener: Box<dyn SettingsListener>,
-    ) -> Arc<Self> {
+    pub fn new(listener: Box<dyn ResultsListener>) -> Arc<Self> {
         let listener: Arc<dyn ResultsListener> = Arc::from(listener);
         Arc::new(Self(Mutex::new(launcher_plugins::Launcher::start(
             Arc::new(move || listener.results_changed()),
-            move || settings_listener.settings_changed(),
         ))))
     }
 

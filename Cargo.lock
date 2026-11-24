@@ -752,7 +752,6 @@ version = "0.1.0"
 dependencies = [
  "launcher-core",
  "launcher-window",
- "notify",
  "serde",
  "serde_json",
  "tempfile",
@@ -794,7 +793,6 @@ dependencies = [
  "launcher-config",
  "launcher-core",
  "launcher-jwt",
- "notify",
 ]
 
 [[package]]

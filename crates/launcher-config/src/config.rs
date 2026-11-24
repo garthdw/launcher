@@ -5,21 +5,15 @@ use std::collections::HashMap;
 use std::fs::{self, OpenOptions};
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
-use std::sync::mpsc;
-use std::thread;
-use std::time::Duration;
 
 use launcher_core::{Hotkey, Key, config_directory, log};
 use launcher_window::{Binding, DEFAULT_BINDINGS, WindowAction};
-use notify::{RecommendedWatcher, RecursiveMode, Watcher};
 use serde::Deserialize;
 use serde::de::{self, Deserializer};
 
 /// What `config init` writes: every setting commented out at its default, so the file overrides
 /// only what the user uncomments. Settings are commented with a bare `#`, prose with `# `.
 pub const DEFAULT_FILE: &str = include_str!("default.toml");
-/// Editors save in bursts (a temporary file, then a rename over the old one); reload once quiet.
-const SETTLE: Duration = Duration::from_millis(100);
 
 #[derive(Clone, Debug, PartialEq, Deserialize)]
 #[serde(default, deny_unknown_fields)]
@@ -282,58 +276,6 @@ fn init(path: &Path) -> io::Result<bool> {
     }
 }
 
-/// Calls `changed` on another thread once a burst of changes to the file at `path` settles.
-/// Watches its folder, creating it if need be, so a file created later or saved by renaming
-/// another over it is seen too. When the file is a symlink, as dotfile managers make, its
-/// target's folder is watched as well. Watching stops when the returned watcher drops.
-pub fn watch(
-    path: &Path,
-    changed: impl Fn() + Send + 'static,
-) -> notify::Result<RecommendedWatcher> {
-    let (Some(directory), Some(name)) = (path.parent(), path.file_name()) else {
-        return Err(notify::Error::generic("not a file path").add_path(path.into()));
-    };
-    fs::create_dir_all(directory).map_err(notify::Error::io)?;
-    let target = fs::canonicalize(path)
-        .ok()
-        .filter(|target| target.parent() != fs::canonicalize(directory).ok().as_deref());
-    let target_directory = target.as_deref().and_then(Path::parent);
-    let names: Vec<_> = [Some(name), target.as_deref().and_then(Path::file_name)]
-        .into_iter()
-        .flatten()
-        .map(|name| name.to_os_string())
-        .collect();
-    let (sender, receiver) = mpsc::channel();
-    let mut watcher =
-        notify::recommended_watcher(move |result: notify::Result<notify::Event>| match result {
-            Ok(event)
-                if !event.kind.is_access()
-                    && event
-                        .paths
-                        .iter()
-                        .filter_map(|path| path.file_name())
-                        .any(|name| names.iter().any(|watched| watched == name)) =>
-            {
-                if sender.send(()).is_err() {
-                    log!("the config reload thread stopped; ignoring changes");
-                }
-            }
-            Ok(_) => {}
-            Err(error) => log!("config watcher: {error}"),
-        })?;
-    watcher.watch(directory, RecursiveMode::NonRecursive)?;
-    if let Some(target_directory) = target_directory {
-        watcher.watch(target_directory, RecursiveMode::NonRecursive)?;
-    }
-    thread::spawn(move || {
-        while receiver.recv().is_ok() {
-            while receiver.recv_timeout(SETTLE).is_ok() {}
-            changed();
-        }
-    });
-    Ok(watcher)
-}
-
 #[cfg(test)]
 mod tests {
 
@@ -503,55 +445,6 @@ mod tests {
         assert_eq!(run_command(&["-NSDocumentRevisionsDebugMode".into()]), None);
         assert_eq!(run_command(&["config".into()]), Some(64));
         assert_eq!(run_command(&["config".into(), "nit".into()]), Some(64));
-    }
-
-    #[test]
-    fn watch_reports_saves_including_renames_over_the_file()
-    -> Result<(), Box<dyn std::error::Error>> {
-        let folder = tempfile::tempdir()?;
-        let path = folder.path().join("launcher/config.toml");
-        let (sender, receiver) = mpsc::channel();
-        let _watcher = watch(&path, move || {
-            if sender.send(()).is_err() {
-                log!("the test stopped listening");
-            }
-        })?;
-        let wait = Duration::from_secs(5);
-
-        fs::write(&path, "hotkey = \"cmd+space\"")?;
-        receiver.recv_timeout(wait)?;
-
-        let temporary = path.with_file_name(".config.toml.swp");
-        fs::write(&temporary, "hotkey = \"ctrl+space\"")?;
-        fs::rename(&temporary, &path)?;
-        receiver.recv_timeout(wait)?;
-
-        fs::write(path.with_file_name("frecency"), "")?;
-        assert!(receiver.recv_timeout(Duration::from_secs(1)).is_err());
-        Ok(())
-    }
-
-    #[test]
-    fn watch_follows_a_symlinked_file_to_its_target() -> Result<(), Box<dyn std::error::Error>> {
-        let folder = tempfile::tempdir()?;
-        let dotfiles = folder.path().join("dotfiles");
-        fs::create_dir_all(&dotfiles)?;
-        let target = dotfiles.join("launcher.toml");
-        fs::write(&target, "")?;
-        let path = folder.path().join("launcher/config.toml");
-        fs::create_dir_all(folder.path().join("launcher"))?;
-        std::os::unix::fs::symlink(&target, &path)?;
-        let (sender, receiver) = mpsc::channel();
-        let _watcher = watch(&path, move || {
-            if sender.send(()).is_err() {
-                log!("the test stopped listening");
-            }
-        })?;
-        // Events from making the link can arrive late; only the save counts.
-        while receiver.recv_timeout(Duration::from_secs(1)).is_ok() {}
-        fs::write(&target, "hotkey = \"cmd+space\"")?;
-        receiver.recv_timeout(Duration::from_secs(5))?;
-        Ok(())
     }
 
     /// The schema editors read, kept in step with the settings.

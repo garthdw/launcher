@@ -73,7 +73,8 @@ a `target/release` build that the next bundle replaces:
 ⌘Q in the launcher quits, with or without the item.
 
 Hotkeys are modifiers and a key joined by `+`, such as `"ctrl+alt+left"` or `"cmd+shift+k"`. The
-launcher reloads the file when it's saved. If the file has a mistake, the launcher keeps the
+launcher reads the file again when you press ⌘R in it, or choose Reload Settings from the menu
+bar item. If the file has a mistake, the launcher keeps the
 settings it had and says what's wrong; if another app holds a hotkey exclusively, it says which
 setting it can't use. Apps that registered a hotkey without exclusivity lose it to the launcher
 while it runs, and clashes with macOS's own shortcuts (such as Spotlight's ⌘Space) can't be
