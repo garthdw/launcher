@@ -416,21 +416,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSTextFieldDelegate, N
     }
 
     @objc func toggleLaunchAtLogin() {
-        let app = SMAppService.mainApp
-        let status = app.status
+        let on = SMAppService.mainApp.status != .enabled
         do {
-            if status == .enabled {
-                try app.unregister()
-            } else if status != .requiresApproval {
-                try app.register()
-            }
+            try setLaunchAtLogin(on)
         } catch {
             log("can't change launch at login: \(error)")
-            showAlert("Can't turn \(status == .enabled ? "off" : "on") Launch at Login", error.localizedDescription)
+            showAlert("Can't turn \(on ? "on" : "off") Launch at Login", error.localizedDescription)
             return
         }
         // Registered, but off in System Settings, as when the user turned it off there.
-        guard app.status == .requiresApproval else { return }
+        guard SMAppService.mainApp.status == .requiresApproval else { return }
         if showAlert(
             "Turn on Launcher in Login Items",
             loginItemApproval,
