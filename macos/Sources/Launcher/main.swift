@@ -101,7 +101,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSTextFieldDelegate, N
         results.autoresizingMask = [.width, .height]
         content.addSubview(field)
         content.addSubview(results)
-        layout()
+        resize()
     }
 
     func registerHotkey() {
@@ -142,19 +142,24 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSTextFieldDelegate, N
 
     func refresh() {
         items = launcher.query(query: field.stringValue)
-        layout()
+        buildRows()
+        resize()
         picked = 0
     }
 
-    func layout() {
-        let rowHeight: CGFloat = 44
-        let listHeight = items.isEmpty ? 0 : CGFloat(items.count) * (rowHeight + 2) + 12
-        let height = 56 + listHeight
+    /// Fits the panel to what it shows, keeping its top edge where it is.
+    func resize() {
+        let height = 56 + results.frame.height
         var frame = panel.frame
         frame.origin.y += frame.height - height
         frame.size.height = height
         panel.setFrame(frame, display: true)
         field.frame = NSRect(x: 18, y: height - 56 + 16, width: 640 - 36, height: 26)
+    }
+
+    func buildRows() {
+        let rowHeight: CGFloat = 44
+        let listHeight = items.isEmpty ? 0 : CGFloat(items.count) * (rowHeight + 2) + 12
         results.frame = NSRect(x: 0, y: 0, width: 640, height: listHeight)
         results.subviews.forEach { $0.removeFromSuperview() }
         for (index, item) in items.enumerated() {
