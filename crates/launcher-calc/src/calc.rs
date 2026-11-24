@@ -276,10 +276,16 @@ impl Plugin for Calc {
         }
         // Imports and definitions stay in the context for good: `let x = 3` would leave `x` in
         // later answers, before rates load the currency module would keep NaN rates, and
-        // `use all` would hold every module in memory.
+        // `use all` would hold every module in memory. `ans` and `_` name the last result,
+        // which every keystroke replaces, so they'd answer with a half-typed query's.
         if query
             .split(|c: char| !c.is_alphanumeric() && c != '_')
-            .any(|word| matches!(word, "use" | "let" | "fn" | "unit" | "dimension" | "struct"))
+            .any(|word| {
+                matches!(
+                    word,
+                    "use" | "let" | "fn" | "unit" | "dimension" | "struct" | "ans" | "_"
+                )
+            })
         {
             return Vec::new();
         }
@@ -627,7 +633,7 @@ mod tests {
     }
 
     #[test]
-    fn definitions_dont_outlive_their_query() -> Result<(), Box<NumbatError>> {
+    fn nothing_outlives_its_query() -> Result<(), Box<NumbatError>> {
         let mut calc = Calc::new()?;
         for definition in [
             "let x = 3",
@@ -640,6 +646,10 @@ mod tests {
         }
         for uses in ["x + 1", "double(2)", "2 widget", "1 x", "x"] {
             assert_eq!(shown(&mut calc, uses), [], "{uses}");
+        }
+        calc.query("2 + 3");
+        for earlier in ["ans", "_", "ans + 1", "_ * 2"] {
+            assert_eq!(shown(&mut calc, earlier), [], "{earlier}");
         }
         Ok(())
     }
