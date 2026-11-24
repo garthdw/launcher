@@ -13,6 +13,8 @@ enum Metrics {
     static let inset: CGFloat = 6
     /// Concentric with the glass: its radius less the inset.
     static let selectionRadius = glassRadius - inset
+    /// A row's icon, square.
+    static let icon: CGFloat = 28
 }
 
 /// Borderless panels refuse key status by default, and the query field needs it.
@@ -595,7 +597,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSTextFieldDelegate, N
         row.wantsLayer = true
         row.layer?.cornerRadius = Metrics.selectionRadius
         let icon = NSImageView(image: item.icon.image)
-        icon.frame = NSRect(x: 10, y: 8, width: 28, height: 28)
+        icon.frame = NSRect(x: 10, y: 8, width: Metrics.icon, height: Metrics.icon)
         icon.contentTintColor = .secondaryLabelColor
         row.addSubview(icon)
         let titleX = icon.frame.maxX + 8
