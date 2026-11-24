@@ -39,7 +39,7 @@ cat >"$app/Contents/Info.plist" <<EOF
   <key>CFBundleShortVersionString</key><string>$version</string>
   <key>CFBundleVersion</key><string>$version</string>
   <key>LSMinimumSystemVersion</key><string>26.0</string>
-  <!-- No Dock icon or menu bar; the panel is reached by its hotkey. -->
+  <!-- No Dock icon or main menu; the panel is reached by its hotkey or the menu bar item. -->
   <key>LSUIElement</key><true/>
   <key>NSHighResolutionCapable</key><true/>
 </dict>

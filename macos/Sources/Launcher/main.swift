@@ -1,5 +1,6 @@
 import AppKit
 import Carbon.HIToolbox
+import ServiceManagement
 
 let started = CFAbsoluteTimeGetCurrent()
 
@@ -18,7 +19,8 @@ enum Metrics {
 final class Panel: NSPanel {
     override var canBecomeKey: Bool { true }
 
-    /// The app has no menu bar to route editing shortcuts, so the panel sends them itself.
+    /// The app has no main menu to route shortcuts, so the panel sends them itself: editing, ⌘Q
+    /// and ⌘,.
     override func performKeyEquivalent(with event: NSEvent) -> Bool {
         guard event.modifierFlags.intersection(.deviceIndependentFlagsMask).subtracting(.capsLock) == .command
         else { return super.performKeyEquivalent(with: event) }
@@ -27,6 +29,8 @@ final class Panel: NSPanel {
         case "v": #selector(NSText.paste(_:))
         case "x": #selector(NSText.cut(_:))
         case "a": #selector(NSText.selectAll(_:))
+        case "q": #selector(NSApplication.terminate(_:))
+        case ",": #selector(AppDelegate.openSettingsFile)
         default: nil
         }
         guard let action else { return super.performKeyEquivalent(with: event) }
@@ -219,7 +223,7 @@ final class DetailText: NSTextView {
 }
 
 @MainActor
-final class AppDelegate: NSObject, NSApplicationDelegate, NSTextFieldDelegate, NSWindowDelegate {
+final class AppDelegate: NSObject, NSApplicationDelegate, NSTextFieldDelegate, NSWindowDelegate, NSMenuDelegate {
     lazy var launcher = Launcher(
         listener: MainRelay { [weak self] in self?.resultsChanged() },
         settingsListener: MainRelay { [weak self] in self?.reloadSettings() }
@@ -252,6 +256,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSTextFieldDelegate, N
     /// after it, rather than in an alert on top.
     var pendingProblems: [String]?
     var showingProblems = false
+    /// Built only while the settings show it, so hiding it frees it.
+    var statusItem: NSStatusItem?
 
     func applicationDidFinishLaunching(_: Notification) {
         // Lazy only so the relays can reach `self`; plugins start their background work, and the
@@ -317,7 +323,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSTextFieldDelegate, N
         }, 1, &pressed, delegate, nil)
     }
 
-    func reloadSettings() {
+    @objc func reloadSettings() {
         if let settings = launcher.reloadSettings() { apply(settings) }
     }
 
@@ -328,6 +334,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSTextFieldDelegate, N
             UnregisterEventHotKey(hotkey.ref)
         }
         hotkeys = [:]
+        showStatusItem(settings.menuBar)
         let problems = [settings.problem].compactMap { $0 } + settings.bindings.compactMap(register)
         problems.forEach(log)
         // The alert's modal loop still runs reloads, so a save while it shows lands here.
@@ -343,6 +350,89 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSTextFieldDelegate, N
             showing = pendingProblems ?? []
         }
         showingProblems = false
+    }
+
+    func showStatusItem(_ shown: Bool) {
+        if !shown, let statusItem {
+            NSStatusBar.system.removeStatusItem(statusItem)
+            self.statusItem = nil
+        } else if shown, statusItem == nil {
+            let item = NSStatusBar.system.statusItem(withLength: NSStatusItem.squareLength)
+            item.button?.image = NSImage(systemSymbolName: "command", accessibilityDescription: "Launcher")
+            let menu = NSMenu()
+            for (title, action, key) in [
+                ("Open Launcher", #selector(openPanel), ""),
+                ("Open Settings", #selector(openSettingsFile), ","),
+                ("Reload Settings", #selector(reloadSettings), ""),
+                ("Launch at Login", #selector(toggleLaunchAtLogin), ""),
+            ] {
+                menu.addItem(withTitle: title, action: action, keyEquivalent: key).target = self
+            }
+            menu.addItem(.separator())
+            menu.addItem(withTitle: "Quit Launcher", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q")
+                .target = NSApp
+            menu.delegate = self
+            item.menu = menu
+            statusItem = item
+        }
+    }
+
+    @objc func openPanel() {
+        summon(at: CFAbsoluteTimeGetCurrent())
+    }
+
+    /// Opens the config file in the app that opens `.toml` files, else TextEdit, writing it first
+    /// when there's none.
+    @objc func openSettingsFile() {
+        let file: URL
+        do {
+            file = try URL(fileURLWithPath: settingsFile())
+        } catch let SettingsFileError.Unavailable(reason) {
+            showAlert("Can't open the settings", reason)
+            return
+        } catch {
+            showAlert("Can't open the settings", "\(error)")
+            return
+        }
+        let workspace = NSWorkspace.shared
+        guard let editor = workspace.urlForApplication(toOpen: file)
+            ?? workspace.urlForApplication(withBundleIdentifier: "com.apple.TextEdit")
+        else {
+            showAlert("Can't open the settings", "No app opens \(file.path).")
+            return
+        }
+        open(file, with: editor)
+    }
+
+    /// Ticks Launch at Login from the system's state each time the menu opens, since System
+    /// Settings can change it too.
+    func menuNeedsUpdate(_ menu: NSMenu) {
+        let state: NSControl.StateValue = switch SMAppService.mainApp.status {
+        case .enabled: .on
+        case .requiresApproval: .mixed
+        default: .off
+        }
+        menu.items.first { $0.action == #selector(toggleLaunchAtLogin) }?.state = state
+    }
+
+    @objc func toggleLaunchAtLogin() {
+        let on = SMAppService.mainApp.status != .enabled
+        do {
+            try setLaunchAtLogin(on)
+        } catch {
+            log("can't change launch at login: \(error)")
+            showAlert("Can't turn \(on ? "on" : "off") Launch at Login", error.localizedDescription)
+            return
+        }
+        // Registered, but off in System Settings, as when the user turned it off there.
+        guard SMAppService.mainApp.status == .requiresApproval else { return }
+        if showAlert(
+            "Turn on Launcher in Login Items",
+            loginItemApproval,
+            buttons: ["Open Login Items", "Cancel"]
+        ) == .alertFirstButtonReturn {
+            SMAppService.openSystemSettingsLoginItems()
+        }
     }
 
     /// Its action runs when the hotkey is pressed, whichever app is frontmost. Returns why it
@@ -525,20 +615,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSTextFieldDelegate, N
         case let .copy(text):
             if copyToPasteboard(text) { launcher.ran(choice: item.choice) }
         case let .open(path):
-            NSWorkspace.shared.open(
-                URL(fileURLWithPath: path), configuration: NSWorkspace.OpenConfiguration()
-            ) { _, error in
-                let failure = error?.localizedDescription
-                Task { @MainActor in
-                    guard let failure else {
-                        self.launcher.ran(choice: item.choice)
-                        return
-                    }
-                    log("can't open \(path): \(failure)")
-                    // The panel has already closed, so nothing else would show the failure.
-                    showAlert("Can't open \(FileManager.default.displayName(atPath: path))", failure)
-                }
-            }
+            open(URL(fileURLWithPath: path)) { self.launcher.ran(choice: item.choice) }
         case .nothing:
             break
         }
@@ -614,6 +691,26 @@ func hintLabel(_ string: String) -> NSTextField {
     return label
 }
 
+/// Opens `file` in `app`, or else its default app, then runs `opened`. A failure shows an alert,
+/// since the panel has already closed, so nothing else would show it.
+@MainActor
+func open(_ file: URL, with app: URL? = nil, opened: @escaping @MainActor @Sendable () -> Void = {}) {
+    let finished: @Sendable (NSRunningApplication?, (any Error)?) -> Void = { _, error in
+        let failure = error?.localizedDescription
+        Task { @MainActor in
+            guard let failure else { return opened() }
+            log("can't open \(file.path): \(failure)")
+            showAlert("Can't open \(FileManager.default.displayName(atPath: file.path))", failure)
+        }
+    }
+    let configuration = NSWorkspace.OpenConfiguration()
+    if let app {
+        NSWorkspace.shared.open([file], withApplicationAt: app, configuration: configuration, completionHandler: finished)
+    } else {
+        NSWorkspace.shared.open(file, configuration: configuration, completionHandler: finished)
+    }
+}
+
 /// Activates the app to show the alert, then gives focus back: window management acts on the
 /// frontmost app. Returns which of `buttons` was clicked, from `.alertFirstButtonReturn`.
 @MainActor
@@ -676,9 +773,14 @@ func log(_ message: String) {
     try? FileHandle.standardError.write(contentsOf: Data((message + "\n").utf8))
 }
 
-// `Launcher config init`, from the app's own binary, so there's no separate tool to build and sign.
-if let status = configCommand(arguments: Array(CommandLine.arguments.dropFirst())) {
-    exit(status)
+// `Launcher config init` and `Launcher login on`, from the app's own binary, so there's no separate
+// tool to build and sign.
+do {
+    // A block, so `arguments` stays local rather than a global every file could see.
+    let arguments = Array(CommandLine.arguments.dropFirst())
+    if let status = loginCommand(arguments) ?? configCommand(arguments: arguments) {
+        exit(status)
+    }
 }
 
 startLog()

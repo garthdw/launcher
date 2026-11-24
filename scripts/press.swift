@@ -4,8 +4,8 @@
 // miss it; events posted at the HID level are routed like real ones. Needs the Accessibility
 // permission for the terminal running it.
 //
-//   press right right esc cmd+c       keys by name, with cmd+, opt+, ctrl+, shift+ modifiers
-//   press --text '100 N to lbf'       types text
+//   press right right esc cmd+c cmd+,  keys by name, with cmd+ opt+ ctrl+ shift+ modifiers
+//   press --text '100 N to lbf'        types text
 import ApplicationServices
 import Carbon.HIToolbox
 import Foundation
@@ -15,6 +15,7 @@ let keys: [String: Int] = [
     "space": kVK_Space, "delete": kVK_Delete, "left": kVK_LeftArrow, "right": kVK_RightArrow,
     "up": kVK_UpArrow, "down": kVK_DownArrow,
     "a": kVK_ANSI_A, "c": kVK_ANSI_C, "v": kVK_ANSI_V, "x": kVK_ANSI_X, "z": kVK_ANSI_Z,
+    "q": kVK_ANSI_Q, ",": kVK_ANSI_Comma,
     // The window layouts' hotkeys.
     "d": kVK_ANSI_D, "f": kVK_ANSI_F, "g": kVK_ANSI_G,
     "i": kVK_ANSI_I, "j": kVK_ANSI_J, "k": kVK_ANSI_K, "u": kVK_ANSI_U,

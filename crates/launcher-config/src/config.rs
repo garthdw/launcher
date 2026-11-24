@@ -27,6 +27,9 @@ pub struct Config {
     /// Opens the launcher.
     #[serde(deserialize_with = "hotkey")]
     pub hotkey: Hotkey,
+    /// Shows an item in the menu bar to open the launcher or the config file, reload settings,
+    /// launch at login and quit. Off by default, since showing it takes about 2 MB.
+    pub menu_bar: bool,
     pub plugins: EnabledPlugins,
     /// The window actions with a hotkey, in `DEFAULT_BINDINGS`' order.
     #[serde(deserialize_with = "window_bindings")]
@@ -43,6 +46,7 @@ impl Default for Config {
                 command: false,
                 shift: false,
             },
+            menu_bar: false,
             plugins: EnabledPlugins::default(),
             window: DEFAULT_BINDINGS.to_vec(),
         }
@@ -204,9 +208,9 @@ fn read(path: &Path) -> Result<Config, String> {
     }
 }
 
-/// Runs `config` commands, the launcher's only command-line use: the shell hands over its
-/// arguments before starting its UI. `None` when they aren't a command, so the UI starts; else
-/// the exit status.
+/// Runs `config` commands, which every shell shares: the shell hands over its arguments, after
+/// trying its own commands (macOS's `login`), before starting its UI. `None` when they aren't a
+/// command, so the UI starts; else the exit status.
 #[expect(
     clippy::disallowed_macros,
     reason = "a command's messages go to its terminal, not the log"
@@ -231,11 +235,11 @@ pub fn run_command(arguments: &[String]) -> Option<i32> {
         return Some(64);
     }
     Some(match init(&path) {
-        Ok(()) => {
+        Ok(true) => {
             println!("wrote {}", path.display());
             0
         }
-        Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {
+        Ok(false) => {
             eprintln!(
                 "{} already exists; move it aside to write the defaults again",
                 path.display()
@@ -249,16 +253,33 @@ pub fn run_command(arguments: &[String]) -> Option<i32> {
     })
 }
 
-/// Writes `DEFAULT_FILE` to `path`, leaving a file already there alone.
-fn init(path: &Path) -> io::Result<()> {
+/// The config file, writing what `config init` does first when there's none, so an editor opens
+/// on every setting rather than an empty file.
+pub fn file_to_edit() -> Result<PathBuf, String> {
+    let path = path()?;
+    init(&path).map_err(|error| format!("can't write {}: {error}", path.display()))?;
+    Ok(path)
+}
+
+/// Writes `DEFAULT_FILE` to `path`; `false` when a file is already there, left alone.
+fn init(path: &Path) -> io::Result<bool> {
     if let Some(directory) = path.parent() {
         fs::create_dir_all(directory)?;
     }
-    OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .open(path)?
-        .write_all(DEFAULT_FILE.as_bytes())
+    match OpenOptions::new().write(true).create_new(true).open(path) {
+        Ok(mut file) => match file.write_all(DEFAULT_FILE.as_bytes()) {
+            Ok(()) => Ok(true),
+            Err(error) => {
+                // Left in place, a partial file would pass for the user's own from then on.
+                if let Err(removing) = fs::remove_file(path) {
+                    log!("can't remove the partial {}: {removing}", path.display());
+                }
+                Err(error)
+            }
+        },
+        Err(error) if error.kind() == io::ErrorKind::AlreadyExists => Ok(false),
+        Err(error) => Err(error),
+    }
 }
 
 /// Calls `changed` on another thread once a burst of changes to the file at `path` settles.
@@ -364,6 +385,7 @@ mod tests {
         let config = parse(
             r#"
             hotkey = "cmd+space"
+            menu_bar = true
             [plugins]
             jwt = false
             [window]
@@ -375,6 +397,7 @@ mod tests {
             panic!("{config:?}");
         };
         assert_eq!(config.hotkey, parsed("cmd+space"));
+        assert!(config.menu_bar);
         assert_eq!(
             config.plugins,
             EnabledPlugins {
@@ -458,14 +481,19 @@ mod tests {
     fn init_writes_the_defaults_once() -> io::Result<()> {
         let folder = tempfile::tempdir()?;
         let path = folder.path().join("launcher/config.toml");
-        init(&path)?;
+        assert!(init(&path)?);
         assert_eq!(fs::read_to_string(&path)?, DEFAULT_FILE);
         fs::write(&path, "hotkey = \"cmd+space\"")?;
-        assert_eq!(
-            init(&path).map_err(|error| error.kind()),
-            Err(io::ErrorKind::AlreadyExists)
-        );
+        assert!(!init(&path)?);
         assert_eq!(fs::read_to_string(&path)?, "hotkey = \"cmd+space\"");
+        Ok(())
+    }
+
+    #[test]
+    fn a_file_in_place_of_the_folder_is_no_config_file() -> io::Result<()> {
+        let folder = tempfile::tempdir()?;
+        fs::write(folder.path().join("launcher"), "")?;
+        assert!(init(&folder.path().join("launcher/config.toml")).is_err());
         Ok(())
     }
 
@@ -556,6 +584,7 @@ mod tests {
             .collect();
         let expected = serde_json::json!({
             "hotkey": config.hotkey.to_string(),
+            "menu_bar": config.menu_bar,
             "plugins": serde_json::to_value(config.plugins)?,
             "window": window,
         });
