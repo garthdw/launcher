@@ -22,14 +22,21 @@ yours) to keep macOS permissions across rebuilds; without it the app is signed a
 
 ## Settings
 
-Settings live in `~/.config/launcher/config.toml`: the launcher's hotkey, each window action's
-hotkey (or `"none"`), and which plugins are on. Write one with every setting commented out at its
-default, with comments explaining them; uncomment only what you change, so later defaults still
-reach the rest:
+Settings live in `~/.config/launcher/config.toml`: the launcher's hotkey, whether its menu bar
+item shows, each window action's hotkey (or `"none"`), and which plugins are on. ⌘, in the
+launcher opens the file, first writing one with every setting commented out at its default, with
+comments explaining them; uncomment only what you change, so later defaults still reach the rest.
+`config init` writes the same file from a terminal:
 
 ```sh
 target/release/Launcher.app/Contents/MacOS/Launcher config init
 ```
+
+The menu bar item, off by default since it takes about 2 MB (`menu_bar = true` shows it), opens
+the launcher or the settings file, reloads the settings, quits, and turns Launch at Login on or
+off; turning it on once is enough, as the login item stays after the menu bar item is hidden again.
+Launch at Login isn't in the file, since macOS keeps it: System Settings › General › Login Items
+changes it too. ⌘Q in the launcher quits, with or without the item.
 
 Hotkeys are modifiers and a key joined by `+`, such as `"ctrl+alt+left"` or `"cmd+shift+k"`. The
 launcher reloads the file when it's saved. If the file has a mistake, the launcher keeps the
