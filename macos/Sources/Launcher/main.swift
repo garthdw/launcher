@@ -20,10 +20,9 @@ final class Panel: NSPanel {
 
     /// The app has no menu bar to route editing shortcuts, so the panel sends them itself.
     override func performKeyEquivalent(with event: NSEvent) -> Bool {
-        guard event.modifierFlags.intersection(.deviceIndependentFlagsMask) == .command else {
-            return super.performKeyEquivalent(with: event)
-        }
-        let action: Selector? = switch event.charactersIgnoringModifiers {
+        guard event.modifierFlags.intersection(.deviceIndependentFlagsMask).subtracting(.capsLock) == .command
+        else { return super.performKeyEquivalent(with: event) }
+        let action: Selector? = switch event.charactersIgnoringModifiers?.lowercased() {
         case "c": #selector(NSText.copy(_:))
         case "v": #selector(NSText.paste(_:))
         case "x": #selector(NSText.cut(_:))
@@ -119,6 +118,8 @@ final class DetailText: NSTextView {
     private var sections: [(range: NSRange, text: String)] = []
     private var picked = 0 {
         didSet {
+            // Otherwise ⌘C would copy an earlier mouse selection instead of the section just picked.
+            setSelectedRange(NSRange(location: sections[picked].range.location, length: 0))
             needsDisplay = true
             scrollRangeToVisible(sections[picked].range)
         }
@@ -255,7 +256,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSTextFieldDelegate, N
         field.placeholderString = "Search apps, calculate, convert…"
         field.delegate = self
         field.autoresizingMask = [.width, .minYMargin]
-        results.autoresizingMask = [.width, .height]
+        // A fixed height: `resize` reads it as the list's, so the panel growing mustn't stretch it.
+        results.autoresizingMask = [.width]
         content.addSubview(field)
         content.addSubview(results)
         resize()
@@ -279,6 +281,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSTextFieldDelegate, N
 
     func summon(at time: CFAbsoluteTime) {
         summoned = time
+        // ⌥Space while the panel is still key comes here without hiding it first.
+        closeDetail()
         if let screen = NSScreen.main {
             let frame = screen.visibleFrame
             panel.setFrameTopLeftPoint(NSPoint(x: frame.midX - panel.frame.width / 2, y: frame.maxY - 180))
@@ -304,25 +308,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSTextFieldDelegate, N
 
     func refresh() {
         items = launcher.query(query: field.stringValue)
-        buildRows()
-        resize()
-        picked = 0
-    }
-
-    /// Fits the panel to what it shows, keeping its top edge where it is.
-    func resize() {
-        let height = Metrics.headerHeight + (detail?.bodyHeight ?? results.frame.height)
-        var frame = panel.frame
-        frame.origin.y += frame.height - height
-        frame.size.height = height
-        panel.setFrame(frame, display: true)
-        field.frame = NSRect(x: 18, y: height - Metrics.headerHeight + 16, width: Metrics.width - 36, height: 26)
-        field.isHidden = detail != nil
-        results.isHidden = detail != nil
-        detail?.frame = NSRect(x: 0, y: 0, width: Metrics.width, height: height)
-    }
-
-    func buildRows() {
         let rowHeight: CGFloat = 44
         let listHeight = items.isEmpty ? 0 : CGFloat(items.count) * (rowHeight + 2) + Metrics.inset * 2
         results.frame = NSRect(x: 0, y: 0, width: Metrics.width, height: listHeight)
@@ -351,6 +336,21 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSTextFieldDelegate, N
             row.addSubview(subtitle)
             results.addSubview(row)
         }
+        resize()
+        picked = 0
+    }
+
+    /// Fits the panel to what it shows, keeping its top edge where it is.
+    func resize() {
+        let height = Metrics.headerHeight + (detail?.bodyHeight ?? results.frame.height)
+        var frame = panel.frame
+        frame.origin.y += frame.height - height
+        frame.size.height = height
+        panel.setFrame(frame, display: true)
+        field.frame = NSRect(x: 18, y: height - Metrics.headerHeight + 16, width: Metrics.width - 36, height: 26)
+        field.isHidden = detail != nil
+        results.isHidden = detail != nil
+        detail?.frame = NSRect(x: 0, y: 0, width: Metrics.width, height: height)
     }
 
     /// Moving the selection only recolours rows; rebuilding them would fetch every icon again.
@@ -360,20 +360,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSTextFieldDelegate, N
         }
     }
 
-    func showDetail(of item: Item) {
-        let pane = DetailPane(item: item)
-        pane.text.back = { [unowned self] in showList() }
-        pane.text.run = { [unowned self] in choose(picked) }
+    func showDetail(of index: Int) {
+        let pane = DetailPane(item: items[index])
+        pane.text.back = { [unowned self] in
+            closeDetail()
+            panel.makeFirstResponder(field)
+            field.currentEditor()?.moveToEndOfDocument(nil)
+        }
+        // The shown item, not `picked`: hidden rows under the pane may still track the pointer.
+        pane.text.run = { [unowned self] in choose(index) }
         detail = pane
         content.addSubview(pane)
         resize()
         panel.makeFirstResponder(pane.text)
-    }
-
-    func showList() {
-        closeDetail()
-        panel.makeFirstResponder(field)
-        field.currentEditor()?.moveToEndOfDocument(nil)
     }
 
     /// The pane is rebuilt each time it opens, so nothing stays resident once it closes.
@@ -434,7 +433,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSTextFieldDelegate, N
         case #selector(NSResponder.moveRight(_:))
             where textView.selectedRange() == NSRange(location: (textView.string as NSString).length, length: 0)
             && items.indices.contains(picked) && !items[picked].detail.isEmpty:
-            showDetail(of: items[picked])
+            showDetail(of: picked)
         case #selector(NSResponder.insertNewline(_:)):
             choose(picked)
             return true
