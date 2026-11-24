@@ -346,7 +346,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSTextFieldDelegate, N
                 titleX = 46
             }
             let title = titleLabel(item.title)
-            title.frame = NSRect(x: titleX, y: 11, width: 392 - titleX, height: 22)
             // The shell names its own keys, so plugins' subtitles say only what an item is.
             let keys = switch item.action {
             case .copy: "↵ copies"
@@ -357,9 +356,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSTextFieldDelegate, N
                     .filter { !$0.isEmpty }
                     .joined(separator: " · ")
             )
-            // Long subtitles such as app folders lose their start, not the keys.
+            // Long subtitles such as app folders lose their start, not the keys. A subtitle may
+            // take room a short title leaves, but never squeezes a long title further.
             subtitle.lineBreakMode = .byTruncatingHead
-            subtitle.frame = NSRect(x: 396, y: 13, width: 220, height: 18)
+            let end = row.frame.width - 12
+            let subtitleX = min(396, max(titleX + title.fittingSize.width + 4, end - subtitle.fittingSize.width))
+            subtitle.frame = NSRect(x: subtitleX, y: 13, width: end - subtitleX, height: 18)
+            title.frame = NSRect(x: titleX, y: 11, width: subtitleX - 4 - titleX, height: 22)
             row.addSubview(title)
             row.addSubview(subtitle)
             results.addSubview(row)
