@@ -1,0 +1,130 @@
+#!/bin/sh
+# Bundles the app, then measures it against the budget below over several launches: summon to
+# focus, and the footprint with the panel open and after Esc hides it, as medians of the runs
+# after a warm-up. Fails when one is over budget. Raise a budget only deliberately, in the commit
+# that needs it, saying why.
+#
+# Usage: scripts/measure [runs] [query]
+#
+# Quits any running copy, which holds ⌥Space, and reopens it after. Pressing Esc needs the
+# Accessibility permission for the terminal, as scripts/press does.
+set -eu
+
+budget_summon_ms=100
+budget_open_kb=$((26 * 1024))
+budget_hidden_kb=$((26 * 1024 + 512))
+budget_peak_kb=$((27 * 1024))
+
+runs=${1:-6}
+query=${2:-100 N to lbf}
+root=$(cd "$(dirname "$0")/.." && pwd)
+app=$root/target/release/Launcher.app/Contents/MacOS/Launcher
+work=$(mktemp -d)
+
+running=$(pgrep -x Launcher | head -1 || true)
+if [ -n "$running" ]; then
+    reopen=$(ps -o comm= -p "$running" | sed 's|/Contents/MacOS/Launcher$||')
+fi
+finish() {
+    pkill -x Launcher || true
+    if [ -n "${reopen:-}" ]; then
+        open "$reopen"
+    fi
+    rm -rf "$work"
+}
+trap finish EXIT
+
+"$root/scripts/bundle" >"$work/bundle.log" 2>&1 || {
+    cat "$work/bundle.log" >&2
+    exit 1
+}
+
+wait_seconds() {
+    osascript -e "delay $1"
+}
+
+# vmmap's figures, such as 24.5M or 980K, in KB; footprint rounds to whole MB.
+footprint_kb() {
+    vmmap -summary "$1" | awk -v field="$2" '
+        index($0, "Physical footprint" field ":") == 1 {
+            value = $NF
+            unit = substr(value, length(value))
+            number = substr(value, 1, length(value) - 1)
+            if (unit == "M") number *= 1024
+            else if (unit == "G") number *= 1048576
+            printf "%d\n", number
+        }'
+}
+
+# On-screen windows the process owns, so the panel's state is known without the Accessibility
+# permission.
+windows() {
+    osascript -l JavaScript -e "ObjC.import('CoreGraphics');
+        ObjC.deepUnwrap(ObjC.castRefToObject(\$.CGWindowListCopyWindowInfo(1, 0)))
+            .filter(window => window.kCGWindowOwnerPID === $1).length"
+}
+
+median() {
+    sort -n | awk '{ values[NR] = $1 } END { print values[int((NR + 1) / 2)] }'
+}
+
+pkill -x Launcher || true
+while pgrep -x Launcher >/dev/null; do wait_seconds 0.1; done
+
+printf '%-6s %10s %10s %10s %10s\n' run summon_ms open_kb hidden_kb peak_kb
+for run in $(seq 0 "$runs"); do
+    log=$work/run-$run.log
+    LAUNCHER_OPEN=$query "$app" 2>"$log" &
+    pid=$!
+    waited=0
+    until rg -q 'summon to focus' "$log"; do
+        waited=$((waited + 1))
+        if [ "$waited" -gt 100 ]; then
+            echo "run $run: the panel never took focus; is the screen locked?" >&2
+            cat "$log" >&2
+            exit 1
+        fi
+        wait_seconds 0.1
+    done
+    summon=$(rg -o 'summon to focus: ([0-9.]+)' -r '$1' "$log")
+    wait_seconds 2
+    if [ "$(windows "$pid")" -eq 0 ]; then
+        echo "run $run: the panel isn't on screen" >&2
+        exit 1
+    fi
+    open_kb=$(footprint_kb "$pid" "")
+    "$root/scripts/press" esc
+    wait_seconds 2
+    if [ "$(windows "$pid")" -ne 0 ]; then
+        echo "run $run: Esc didn't hide the panel" >&2
+        exit 1
+    fi
+    hidden_kb=$(footprint_kb "$pid" "")
+    peak_kb=$(footprint_kb "$pid" " (peak)")
+    kill "$pid"
+    wait "$pid" 2>/dev/null || true
+    if [ "$run" -eq 0 ]; then
+        printf '%-6s %10s %10s %10s %10s\n' warm-up "$summon" "$open_kb" "$hidden_kb" "$peak_kb"
+        continue
+    fi
+    printf '%-6s %10s %10s %10s %10s\n' "$run" "$summon" "$open_kb" "$hidden_kb" "$peak_kb"
+    echo "$summon $open_kb $hidden_kb $peak_kb" >>"$work/runs"
+done
+
+over=0
+check() {
+    measured=$(awk -v column="$2" '{ print $column }' "$work/runs" | median)
+    if awk -v measured="$measured" -v budget="$3" 'BEGIN { exit !(measured > budget) }'; then
+        verdict="OVER BUDGET"
+        over=1
+    else
+        verdict=ok
+    fi
+    printf '%-10s median %8s, budget %8s %s: %s\n' "$1" "$measured" "$3" "$4" "$verdict"
+}
+echo
+check summon 1 "$budget_summon_ms" ms
+check open 2 "$budget_open_kb" KB
+check hidden 3 "$budget_hidden_kb" KB
+check peak 4 "$budget_peak_kb" KB
+exit "$over"
