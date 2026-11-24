@@ -1,3 +1,4 @@
+use std::cmp::Reverse;
 use std::fmt;
 use std::path::PathBuf;
 use std::str::FromStr;
@@ -11,6 +12,11 @@ pub struct Item {
     pub action: Action,
     /// Shown on request in a scrolling, monospaced view; empty for items without one.
     pub detail: Vec<Section>,
+    /// How well the item answers the query, from 0 to 100 on a scale every plugin shares, so the
+    /// shell can show the best plugin's results first. 100: the query can only mean this item,
+    /// such as a pasted token. About 90: a calculation, or an app whose name starts with the
+    /// query. Lower: looser matches.
+    pub relevance: u8,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -201,6 +207,9 @@ pub fn write_log(line: fmt::Arguments) {
 pub type ResultsChanged = Arc<dyn Fn() + Send + Sync>;
 
 pub trait Plugin {
+    /// Heads the plugin's results.
+    fn name(&self) -> &'static str;
+
     /// Runs on the UI thread for every keystroke, so it must stay well under a frame.
     fn query(&mut self, query: &str) -> Vec<Item>;
 
@@ -212,9 +221,11 @@ pub trait Plugin {
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct PluginId(usize);
 
-pub struct Found {
+/// One plugin's items for a query, in the plugin's order.
+pub struct Group {
     pub plugin: PluginId,
-    pub item: Item,
+    pub name: &'static str,
+    pub items: Vec<Item>,
 }
 
 /// The plugins a shell runs, asked in order. A place can be empty, for a plugin that's off, so
@@ -239,23 +250,30 @@ impl Plugins {
         }
     }
 
-    /// Runs on the UI thread for every keystroke, so every plugin must stay well under a frame.
-    pub fn query(&mut self, query: &str) -> Vec<Found> {
+    /// Each plugin's items, the group with the most relevant item first; ties keep the plugins'
+    /// order. Runs on the UI thread for every keystroke, so every plugin must stay well under a
+    /// frame.
+    pub fn query(&mut self, query: &str) -> Vec<Group> {
         let query = query.trim();
         if query.is_empty() {
             return Vec::new();
         }
-        self.0
+        let mut groups: Vec<Group> = self
+            .0
             .iter_mut()
             .enumerate()
-            .filter_map(|(index, plugin)| Some((index, plugin.as_mut()?)))
-            .flat_map(|(index, plugin)| {
-                plugin.query(query).into_iter().map(move |item| Found {
+            .filter_map(|(index, plugin)| {
+                let plugin = plugin.as_mut()?;
+                let items = plugin.query(query);
+                (!items.is_empty()).then(|| Group {
                     plugin: PluginId(index),
-                    item,
+                    name: plugin.name(),
+                    items,
                 })
             })
-            .collect()
+            .collect();
+        groups.sort_by_key(|group| Reverse(group.items.iter().map(|item| item.relevance).max()));
+        groups
     }
 
     /// The shell ran `action` from an item `plugin` produced; only that plugin hears of it.
@@ -276,19 +294,41 @@ mod tests {
 
     type Ran = Arc<Mutex<Vec<Action>>>;
 
+    /// Answers every query with an item per relevance, titled with its name, the query and the
+    /// item's place.
     struct Recorder {
-        title: &'static str,
+        name: &'static str,
+        relevances: Vec<u8>,
         ran: Ran,
     }
 
+    impl Recorder {
+        fn new(name: &'static str, relevances: &[u8]) -> Self {
+            Self {
+                name,
+                relevances: relevances.to_vec(),
+                ran: Ran::default(),
+            }
+        }
+    }
+
     impl Plugin for Recorder {
+        fn name(&self) -> &'static str {
+            self.name
+        }
+
         fn query(&mut self, query: &str) -> Vec<Item> {
-            vec![Item {
-                title: format!("{} {query}", self.title),
-                subtitle: String::new(),
-                action: Action::Copy(self.title.into()),
-                detail: Vec::new(),
-            }]
+            self.relevances
+                .iter()
+                .enumerate()
+                .map(|(place, &relevance)| Item {
+                    title: format!("{} {query} {place}", self.name),
+                    subtitle: String::new(),
+                    action: Action::Copy(self.name.into()),
+                    detail: Vec::new(),
+                    relevance,
+                })
+                .collect()
         }
 
         fn ran(&mut self, action: &Action) {
@@ -299,41 +339,69 @@ mod tests {
     }
 
     fn recorders() -> (Plugins, Ran, Ran) {
-        let first = Arc::new(Mutex::new(Vec::new()));
-        let second = Arc::new(Mutex::new(Vec::new()));
-        let plugins = Plugins::new(vec![
-            Box::new(Recorder {
-                title: "first",
-                ran: first.clone(),
-            }),
-            Box::new(Recorder {
-                title: "second",
-                ran: second.clone(),
-            }),
-        ]);
-        (plugins, first, second)
+        let first = Recorder::new("first", &[50]);
+        let second = Recorder::new("second", &[50]);
+        let (first_ran, second_ran) = (first.ran.clone(), second.ran.clone());
+        let plugins = Plugins::new(vec![Box::new(first), Box::new(second)]);
+        (plugins, first_ran, second_ran)
+    }
+
+    /// Each group's name and its items' titles, in the order shown.
+    fn shown(plugins: &mut Plugins, query: &str) -> Vec<(&'static str, Vec<String>)> {
+        plugins
+            .query(query)
+            .into_iter()
+            .map(|group| {
+                let titles = group.items.into_iter().map(|item| item.title).collect();
+                (group.name, titles)
+            })
+            .collect()
     }
 
     #[test]
     fn query_asks_every_plugin_with_the_trimmed_query() {
         let (mut plugins, _, _) = recorders();
-        let titles: Vec<String> = plugins
-            .query("  2 + 3 ")
-            .into_iter()
-            .map(|found| found.item.title)
-            .collect();
-        assert_eq!(titles, ["first 2 + 3", "second 2 + 3"]);
+        assert_eq!(
+            shown(&mut plugins, "  2 + 3 "),
+            [
+                ("first", vec!["first 2 + 3 0".to_owned()]),
+                ("second", vec!["second 2 + 3 0".to_owned()]),
+            ]
+        );
         assert!(plugins.query("   ").is_empty());
+    }
+
+    #[test]
+    fn groups_are_ordered_by_their_best_item() {
+        let mut plugins = Plugins::new(vec![
+            Box::new(Recorder::new("calculator", &[60])),
+            Box::new(Recorder::new("silent", &[])),
+            Box::new(Recorder::new("apps", &[40, 90, 20])),
+            Box::new(Recorder::new("tied", &[90])),
+        ]);
+        let order: Vec<(&str, Vec<String>)> = shown(&mut plugins, "q");
+        assert_eq!(
+            order,
+            [
+                (
+                    "apps",
+                    vec!["apps q 0".to_owned(), "apps q 1".into(), "apps q 2".into()]
+                ),
+                ("tied", vec!["tied q 0".to_owned()]),
+                ("calculator", vec!["calculator q 0".to_owned()]),
+            ],
+            "a plugin's own order stands, ties keep the plugins' order, and empty groups go"
+        );
     }
 
     #[test]
     fn ran_reaches_only_the_producing_plugin() {
         let (mut plugins, first, second) = recorders();
-        let found = plugins.query("anything");
-        let Some(chosen) = found.get(1) else {
-            panic!("expected two items, got {}", found.len());
+        let groups = plugins.query("anything");
+        let Some(chosen) = groups.get(1) else {
+            panic!("expected two groups, got {}", groups.len());
         };
-        plugins.ran(chosen.plugin, &chosen.item.action);
+        plugins.ran(chosen.plugin, &chosen.items[0].action);
         assert!(first.lock().is_ok_and(|ran| ran.is_empty()));
         assert!(
             second
@@ -345,16 +413,14 @@ mod tests {
     #[test]
     fn emptying_a_place_keeps_the_others_ids() {
         let (mut plugins, _, second) = recorders();
-        let found = plugins.query("anything");
+        let groups = plugins.query("anything");
         plugins.set(0, None);
-        let titles: Vec<String> = plugins
-            .query("again")
-            .into_iter()
-            .map(|found| found.item.title)
-            .collect();
-        assert_eq!(titles, ["second again"]);
-        for chosen in &found {
-            plugins.ran(chosen.plugin, &chosen.item.action);
+        assert_eq!(
+            shown(&mut plugins, "again"),
+            [("second", vec!["second again 0".to_owned()])]
+        );
+        for group in &groups {
+            plugins.ran(group.plugin, &group.items[0].action);
         }
         assert!(
             second

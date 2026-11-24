@@ -19,6 +19,9 @@ use numbat::{Context, FormatOptions, InterpreterResult, NumbatError};
 const RATES_CHECK: Duration = Duration::from_secs(60 * 60);
 /// How soon to try again while no rates have loaded, as at login before the network is up.
 const RATES_RETRY: Duration = Duration::from_secs(60);
+/// A query with a number is almost surely a calculation. Only an app whose name starts with it,
+/// as "1Password" does with "1pass", ranks higher.
+const CALCULATION: u8 = 90;
 
 pub struct Calc {
     context: Context,
@@ -107,6 +110,7 @@ impl Calc {
             subtitle: "Calculator".into(),
             action: Action::Nothing,
             detail: Vec::new(),
+            relevance: CALCULATION,
         })
     }
 }
@@ -256,6 +260,10 @@ fn is_money(value: &Value) -> bool {
 }
 
 impl Plugin for Calc {
+    fn name(&self) -> &'static str {
+        "Calculator"
+    }
+
     fn query(&mut self, query: &str) -> Vec<Item> {
         self.take_update();
         // Bare words such as an app name are valid numbat identifiers ("m", "day"), but echoing
@@ -315,6 +323,7 @@ impl Plugin for Calc {
             subtitle,
             action: Action::Copy(copied),
             detail,
+            relevance: CALCULATION,
         }]
     }
 }
@@ -473,6 +482,7 @@ mod tests {
                 subtitle: "Calculator".into(),
                 action: Action::Nothing,
                 detail: Vec::new(),
+                relevance: CALCULATION,
             }]
         );
         assert_eq!(

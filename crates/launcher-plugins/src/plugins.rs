@@ -8,8 +8,8 @@ use launcher_core::{Plugin, Plugins, ResultsChanged, cache_directory, log};
 use launcher_jwt::Jwt;
 use notify::RecommendedWatcher;
 
-/// The plugins, in the order their results show; each has a place in `Plugins`, empty while
-/// it's off.
+/// The plugins, in the order their results show when equally relevant; each has a place in
+/// `Plugins`, empty while it's off.
 #[derive(Clone, Copy)]
 enum Place {
     Calculator,
@@ -179,12 +179,17 @@ mod tests {
     struct Echo;
 
     impl Plugin for Echo {
+        fn name(&self) -> &'static str {
+            "Echo"
+        }
+
         fn query(&mut self, query: &str) -> Vec<Item> {
             vec![Item {
                 title: query.into(),
                 subtitle: String::new(),
                 action: launcher_core::Action::Nothing,
                 detail: Vec::new(),
+                relevance: 50,
             }]
         }
     }
@@ -233,7 +238,7 @@ mod tests {
             .plugins()
             .query("anything")
             .into_iter()
-            .map(|found| format!("{:?}", found.plugin))
+            .map(|group| format!("{:?}", group.plugin))
             .collect();
         assert_eq!(places, ["PluginId(0)", "PluginId(2)"]);
     }

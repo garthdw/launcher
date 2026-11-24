@@ -238,10 +238,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSTextFieldDelegate, N
     )
     let content = NSView()
     let field = NSTextField()
-    let results = NSView()
+    let results = FlippedView()
     /// Shown in place of the field and list while an item's detail is open.
     var detail: DetailPane?
+    /// Every group's items, in the order shown.
     var items: [Item] = []
+    /// Each item's row; group headers sit between them in `results`.
+    var rows: [Row] = []
     var picked = 0 {
         didSet { highlightPicked() }
     }
@@ -507,17 +510,29 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSTextFieldDelegate, N
 
     func refresh() {
         resultsStale = false
-        items = launcher.query(query: field.stringValue)
-        let rowHeight: CGFloat = 44
-        let listHeight = items.isEmpty ? 0 : CGFloat(items.count) * (rowHeight + 2) + Metrics.inset * 2
-        results.frame = NSRect(x: 0, y: 0, width: Metrics.width, height: listHeight)
+        let groups = launcher.query(query: field.stringValue)
+        items = groups.flatMap(\.items)
+        rows = []
         results.subviews.forEach { $0.removeFromSuperview() }
-        for (index, item) in items.enumerated() {
-            results.addSubview(row(for: item, at: index, frame: NSRect(
-                x: Metrics.inset, y: listHeight - Metrics.inset - CGFloat(index + 1) * (rowHeight + 2),
-                width: Metrics.width - Metrics.inset * 2, height: rowHeight
-            )))
+        let rowHeight: CGFloat = 44
+        let headerHeight: CGFloat = 28
+        let titleX = Metrics.inset + 12
+        var y = Metrics.inset
+        for group in groups {
+            let header = groupLabel(group.name)
+            header.frame = NSRect(x: titleX, y: y + 9, width: Metrics.width - titleX * 2, height: 16)
+            results.addSubview(header)
+            y += headerHeight
+            for item in group.items {
+                let row = row(for: item, at: rows.count, frame: NSRect(
+                    x: Metrics.inset, y: y, width: Metrics.width - Metrics.inset * 2, height: rowHeight
+                ))
+                results.addSubview(row)
+                rows.append(row)
+                y += rowHeight + 2
+            }
         }
+        results.frame = NSRect(x: 0, y: 0, width: Metrics.width, height: groups.isEmpty ? 0 : y + Metrics.inset)
         resize()
         picked = 0
     }
@@ -576,7 +591,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSTextFieldDelegate, N
 
     /// Moving the selection only recolours rows; rebuilding them would fetch every icon again.
     func highlightPicked() {
-        for (index, row) in results.subviews.enumerated() {
+        for (index, row) in rows.enumerated() {
             row.layer?.backgroundColor = index == picked ? NSColor.controlAccentColor.cgColor : nil
         }
     }
@@ -684,6 +699,15 @@ func step(_ index: Int, by offset: Int, count: Int) -> Int {
 func titleLabel(_ string: String) -> NSTextField {
     let label = NSTextField(labelWithString: string)
     label.font = .systemFont(ofSize: 17, weight: .semibold)
+    return label
+}
+
+/// Heads a plugin's results.
+@MainActor
+func groupLabel(_ string: String) -> NSTextField {
+    let label = NSTextField(labelWithString: string)
+    label.font = .systemFont(ofSize: 12, weight: .semibold)
+    label.textColor = .secondaryLabelColor
     return label
 }
 
