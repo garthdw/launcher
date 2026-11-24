@@ -27,8 +27,8 @@ pub struct Config {
     /// Opens the launcher.
     #[serde(deserialize_with = "hotkey")]
     pub hotkey: Hotkey,
-    /// Shows an item in the menu bar to open the launcher, reload settings, launch at login and
-    /// quit.
+    /// Shows an item in the menu bar to open the launcher or the config file, reload settings,
+    /// launch at login and quit.
     pub menu_bar: bool,
     pub plugins: EnabledPlugins,
     /// The window actions with a hotkey, in `DEFAULT_BINDINGS`' order.

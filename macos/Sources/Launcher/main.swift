@@ -360,15 +360,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSTextFieldDelegate, N
             let item = NSStatusBar.system.statusItem(withLength: NSStatusItem.squareLength)
             item.button?.image = NSImage(systemSymbolName: "command", accessibilityDescription: "Launcher")
             let menu = NSMenu()
-            for (title, action, key, target) in [
-                ("Open Launcher", #selector(openPanel), "", self),
-                ("Reload Settings", #selector(reloadSettings), "", self),
-                ("Launch at Login", #selector(toggleLaunchAtLogin), "", self),
-                ("Quit Launcher", #selector(NSApplication.terminate(_:)), "q", NSApp),
-            ] as [(String, Selector, String, AnyObject?)] {
-                menu.addItem(withTitle: title, action: action, keyEquivalent: key).target = target
+            for (title, action) in [
+                ("Open Launcher", #selector(openPanel)),
+                ("Open Settings", #selector(openSettingsFile)),
+                ("Reload Settings", #selector(reloadSettings)),
+                ("Launch at Login", #selector(toggleLaunchAtLogin)),
+            ] {
+                menu.addItem(withTitle: title, action: action, keyEquivalent: "").target = self
             }
-            menu.insertItem(.separator(), at: menu.items.count - 1)
+            menu.addItem(.separator())
+            menu.addItem(withTitle: "Quit Launcher", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q")
+                .target = NSApp
             menu.delegate = self
             item.menu = menu
             statusItem = item
@@ -415,16 +417,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSTextFieldDelegate, N
 
     @objc func toggleLaunchAtLogin() {
         let app = SMAppService.mainApp
-        let enabled = app.status == .enabled
+        let status = app.status
         do {
-            if enabled {
+            if status == .enabled {
                 try app.unregister()
-            } else if app.status != .requiresApproval {
+            } else if status != .requiresApproval {
                 try app.register()
             }
         } catch {
             log("can't change launch at login: \(error)")
-            showAlert("Can't turn \(enabled ? "off" : "on") Launch at Login", error.localizedDescription)
+            showAlert("Can't turn \(status == .enabled ? "off" : "on") Launch at Login", error.localizedDescription)
             return
         }
         // Registered, but off in System Settings, as when the user turned it off there.

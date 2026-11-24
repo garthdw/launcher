@@ -12,7 +12,7 @@
     },
     "menu_bar": {
       "type": "boolean",
-      "description": "Shows an item in the menu bar to open the launcher, reload settings, launch at login and quit. Without it, ⌘Q in the launcher quits and ⌘, opens this file.",
+      "description": "Shows an item in the menu bar to open the launcher or this file, reload settings, launch at login and quit. Either way, ⌘Q in the launcher quits and ⌘, opens this file.",
       "default": true
     },
     "plugins": {
