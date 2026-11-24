@@ -167,7 +167,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSTextFieldDelegate, N
         case let .copy(text):
             NSPasteboard.general.clearContents()
             if NSPasteboard.general.setString(text, forType: .string) {
-                launcher.ran(item: item)
+                launcher.ran(choice: item.choice)
             } else {
                 log("can't copy \(text)")
             }
@@ -178,7 +178,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSTextFieldDelegate, N
                 let failure = error?.localizedDescription
                 Task { @MainActor in
                     guard let failure else {
-                        self.launcher.ran(item: item)
+                        self.launcher.ran(choice: item.choice)
                         return
                     }
                     log("can't open \(path): \(failure)")
