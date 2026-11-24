@@ -21,8 +21,8 @@ enum Metrics {
 final class Panel: NSPanel {
     override var canBecomeKey: Bool { true }
 
-    /// The app has no main menu to route shortcuts, so the panel sends them itself: editing, ⌘Q
-    /// and ⌘,.
+    /// The app has no main menu to route shortcuts, so the panel sends them itself: editing, ⌘Q,
+    /// ⌘, and ⌘R.
     override func performKeyEquivalent(with event: NSEvent) -> Bool {
         guard event.modifierFlags.intersection(.deviceIndependentFlagsMask).subtracting(.capsLock) == .command
         else { return super.performKeyEquivalent(with: event) }
@@ -33,6 +33,7 @@ final class Panel: NSPanel {
         case "a": #selector(NSText.selectAll(_:))
         case "q": #selector(NSApplication.terminate(_:))
         case ",": #selector(AppDelegate.openSettingsFile)
+        case "r": #selector(AppDelegate.reloadSettings)
         default: nil
         }
         guard let action else { return super.performKeyEquivalent(with: event) }
@@ -248,10 +249,7 @@ final class DetailText: NSTextView {
 
 @MainActor
 final class AppDelegate: NSObject, NSApplicationDelegate, NSTextFieldDelegate, NSWindowDelegate, NSMenuDelegate {
-    lazy var launcher = Launcher(
-        listener: MainRelay { [weak self] in self?.resultsChanged() },
-        settingsListener: MainRelay { [weak self] in self?.reloadSettings() }
-    )
+    lazy var launcher = Launcher(listener: MainRelay { [weak self] in self?.resultsChanged() })
     let windows = Windows()
     // Non-activating, so the app the user was in stays frontmost: window snapping acts on it.
     let panel = Panel(
@@ -295,8 +293,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSTextFieldDelegate, N
     var statusItem: NSStatusItem?
 
     func applicationDidFinishLaunching(_: Notification) {
-        // Lazy only so the relays can reach `self`; plugins start their background work, and the
-        // config file is watched, now rather than on the first keystroke.
+        // Lazy only so the relay can reach `self`; plugins start their background work now rather
+        // than on the first keystroke.
         _ = launcher
         buildPanel()
         handleHotkeys()
@@ -731,7 +729,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSTextFieldDelegate, N
 }
 
 /// Hands the core's calls, which come on its background threads, to the main actor.
-final class MainRelay: ResultsListener, SettingsListener, Sendable {
+final class MainRelay: ResultsListener, Sendable {
     let changed: @MainActor @Sendable () -> Void
 
     init(_ changed: @escaping @MainActor @Sendable () -> Void) {
@@ -739,14 +737,6 @@ final class MainRelay: ResultsListener, SettingsListener, Sendable {
     }
 
     func resultsChanged() {
-        relay()
-    }
-
-    func settingsChanged() {
-        relay()
-    }
-
-    private func relay() {
         DispatchQueue.main.async { MainActor.assumeIsolated { self.changed() } }
     }
 }
