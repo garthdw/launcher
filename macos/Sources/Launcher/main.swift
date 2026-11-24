@@ -330,7 +330,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSTextFieldDelegate, N
             }
             let title = titleLabel(item.title)
             title.frame = NSRect(x: titleX, y: 11, width: 392 - titleX, height: 22)
-            let subtitle = hintLabel(item.subtitle)
+            // The shell names its own keys, so plugins' subtitles say only what an item is.
+            let keys = switch item.action {
+            case .copy: "↵ copies"
+            case .open: "↵ opens"
+            }
+            let subtitle = hintLabel(
+                ([item.subtitle, keys] + (item.detail.isEmpty ? [] : ["→ details"]))
+                    .filter { !$0.isEmpty }
+                    .joined(separator: " · ")
+            )
+            // Long subtitles such as app folders lose their start, not the keys.
+            subtitle.lineBreakMode = .byTruncatingHead
             subtitle.frame = NSRect(x: 396, y: 13, width: 220, height: 18)
             row.addSubview(title)
             row.addSubview(subtitle)

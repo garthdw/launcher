@@ -68,7 +68,7 @@ impl Plugin for Calc {
         }
         vec![Item {
             title: plain_text(&value, &FormatOptions::default()),
-            subtitle: "Calculator · ↵ copies · → details".into(),
+            subtitle: "Calculator".into(),
             action: Action::Copy(copied),
             detail,
         }]
