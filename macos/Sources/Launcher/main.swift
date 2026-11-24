@@ -301,6 +301,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSTextFieldDelegate, N
         apply(launcher.settings())
         // Opens the panel at launch with this query, for measuring without the hotkey.
         if let query = ProcessInfo.processInfo.environment["LAUNCHER_OPEN"] {
+            // Apps the launcher opens inherit its environment.
+            unsetenv("LAUNCHER_OPEN")
             field.stringValue = query
             refresh()
             summon(at: started)
