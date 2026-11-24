@@ -96,17 +96,27 @@ final class DetailPane: NSView {
         scroll.drawsBackground = false
         scroll.hasVerticalScroller = true
         scroll.autohidesScrollers = true
-        text.frame = NSRect(x: 0, y: 0, width: Metrics.width, height: contentHeight)
+        let document = FlippedView(frame: NSRect(x: 0, y: 0, width: Metrics.width, height: contentHeight))
+        document.autoresizingMask = [.width]
+        text.frame = document.bounds
         text.autoresizingMask = [.width]
-        scroll.documentView = text
+        document.addSubview(text.highlight)
+        document.addSubview(text)
+        scroll.documentView = document
         addSubview(title)
         addSubview(hint)
         addSubview(scroll)
+        text.placeHighlight()
     }
 
     required init?(coder: NSCoder) {
         fatalError("built in code")
     }
+}
+
+/// Top-down, like the text view it holds, so a long detail opens scrolled to its start.
+final class FlippedView: NSView {
+    override var isFlipped: Bool { true }
 }
 
 /// Read-only and selectable, so the mouse can copy any part; ↑ and ↓ step through the sections
@@ -120,13 +130,24 @@ final class DetailText: NSTextView {
         didSet {
             // Otherwise ⌘C would copy an earlier mouse selection instead of the section just picked.
             setSelectedRange(NSRange(location: sections[picked].range.location, length: 0))
-            needsDisplay = true
+            placeHighlight()
             scrollRangeToVisible(sections[picked].range)
         }
     }
 
+    /// The picked section's background: a layer's colour, not drawn by this view. Drawing in the
+    /// text view gives it a backing store and Metal state, about 8 MB while the detail shows.
+    let highlight: NSView = {
+        let highlight = NSView()
+        highlight.wantsLayer = true
+        // Translucent, unlike the list's solid highlight, so the section's text stays readable.
+        highlight.layer?.backgroundColor = NSColor.controlAccentColor.withAlphaComponent(0.25).cgColor
+        highlight.layer?.cornerRadius = Metrics.selectionRadius
+        return highlight
+    }()
+
     convenience init(sections: [Section]) {
-        // TextKit 1, for the glyph rects `drawBackground` highlights.
+        // TextKit 1, for the glyph rects `placeHighlight` reads.
         self.init(usingTextLayoutManager: false)
         isEditable = false
         drawsBackground = false
@@ -183,19 +204,17 @@ final class DetailText: NSTextView {
         }
     }
 
-    override func drawBackground(in rect: NSRect) {
-        super.drawBackground(in: rect)
-        guard let layoutManager, let textContainer, sections.indices.contains(picked) else { return }
+    /// Moves `highlight`, a sibling behind this view, onto the picked section.
+    func placeHighlight() {
+        guard let layoutManager, let textContainer, let container = highlight.superview,
+              sections.indices.contains(picked)
+        else { return }
         let glyphs = layoutManager.glyphRange(forCharacterRange: sections[picked].range, actualCharacterRange: nil)
         let box = layoutManager.boundingRect(forGlyphRange: glyphs, in: textContainer)
-        let highlight = NSRect(
+        highlight.frame = convert(NSRect(
             x: Metrics.inset, y: box.minY + textContainerOrigin.y - Metrics.inset,
             width: bounds.width - Metrics.inset * 2, height: box.height + Metrics.inset * 2
-        )
-        // Translucent, unlike the list's solid highlight, so the section's text stays readable.
-        NSColor.controlAccentColor.withAlphaComponent(0.25).setFill()
-        NSBezierPath(roundedRect: highlight, xRadius: Metrics.selectionRadius, yRadius: Metrics.selectionRadius)
-            .fill()
+        ), to: container)
     }
 }
 
