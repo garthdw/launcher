@@ -193,6 +193,18 @@ pub fn window_placement(
     action.place(window, &displays)
 }
 
+/// Where `Restore` puts `window` back to `original`, saved among the displays `saved`; `None` to
+/// restore it exactly, as while its display is still where it was.
+#[uniffi::export]
+pub fn window_restore_placement(
+    original: Rect,
+    saved: Vec<Display>,
+    window: Rect,
+    displays: Vec<Display>,
+) -> Option<Placement> {
+    launcher_window::restore_placement(original, &saved, window, &displays)
+}
+
 /// `frame` moved as little as it takes to lie within `visible`, keeping its size.
 #[uniffi::export]
 pub fn window_moved_within(frame: Rect, visible: Rect) -> Rect {

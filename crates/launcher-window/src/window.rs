@@ -45,7 +45,7 @@ pub enum WindowAction {
     /// Keeps the window's size, shrunk to fit if it must.
     Centre,
     /// Back to the frame from before the window was first laid out or moved to another display,
-    /// which the shell remembers for each window.
+    /// which the shell remembers for each window; see `restore_placement`.
     Restore,
     /// To the display on the right, keeping the window's place and size relative to the display.
     NextDisplay,
@@ -140,6 +140,30 @@ fn display_holding(window: Rect, displays: &[Display]) -> Option<usize> {
         .rev()
         .max_by(|(_, first), (_, second)| overlap(first).total_cmp(&overlap(second)))
         .map(|(index, _)| index)
+}
+
+/// Where `Restore` puts `window` back to `original`, a frame saved among the displays `saved`:
+/// `None` to restore it exactly while the display that held it is still where it was. Otherwise,
+/// as after that display was unplugged or the displays rearranged (which also shifts global
+/// coordinates when the main display changes), at the same place relative to the display holding
+/// `window` as it had to its own. Displays are told apart by frame alone, so one swapped for
+/// another of the same size in the same place counts as still there. Also `None` without
+/// displays.
+pub fn restore_placement(
+    original: Rect,
+    saved: &[Display],
+    window: Rect,
+    displays: &[Display],
+) -> Option<Placement> {
+    let held = saved.get(display_holding(original, saved)?)?;
+    if displays.iter().any(|display| display.frame == held.frame) {
+        return None;
+    }
+    let visible = displays.get(display_holding(window, displays)?)?.visible;
+    Some(Placement {
+        frame: scaled(original, held.visible, visible),
+        visible,
+    })
 }
 
 /// `window` on the display `offset` places along from `holding` in left-to-right order, wrapping
@@ -491,6 +515,73 @@ mod tests {
     #[test]
     fn restore_has_no_frame_of_its_own() {
         assert_eq!(frame(WindowAction::Restore), None);
+    }
+
+    #[test]
+    fn restore_goes_back_exactly_while_the_display_is_there() {
+        let both = [LAPTOP, EXTERNAL];
+        let on_laptop = rect(0.0, 33.0, 756.0, 949.0);
+        let on_external = rect(2000.0, -300.0, 1000.0, 800.0);
+        assert_eq!(
+            restore_placement(on_external, &both, on_laptop, &both),
+            None
+        );
+        // Left mostly below the laptop's bottom edge on purpose.
+        let low = rect(100.0, 700.0, 800.0, 700.0);
+        assert_eq!(
+            restore_placement(low, &[LAPTOP], on_laptop, &[LAPTOP]),
+            None
+        );
+        // Mostly on the laptop: the external display going leaves it overhanging, as it was.
+        let straddling = rect(1000.0, 100.0, 1000.0, 600.0);
+        assert_eq!(
+            restore_placement(straddling, &both, on_laptop, &[LAPTOP]),
+            None
+        );
+        assert_eq!(restore_placement(on_laptop, &both, on_laptop, &[]), None);
+    }
+
+    #[test]
+    fn restore_moves_to_a_remaining_display_after_its_own_is_unplugged() {
+        let on_laptop = rect(0.0, 33.0, 756.0, 949.0);
+        let restored = |original: Rect| {
+            restore_placement(original, &[LAPTOP, EXTERNAL], on_laptop, &[LAPTOP])
+                .map(|placement| placement.frame)
+        };
+        // Scaled from the external display to the laptop, as a display move would.
+        assert_eq!(
+            restored(rect(2000.0, -300.0, 1000.0, 800.0)),
+            Some(rect(288.0, 122.0, 591.0, 537.0))
+        );
+        // Mostly on the external display, hanging off its left edge onto the laptop.
+        assert_eq!(
+            restored(rect(1400.0, 100.0, 1000.0, 600.0)),
+            Some(rect(0.0, 390.0, 590.0, 403.0))
+        );
+    }
+
+    #[test]
+    fn restore_follows_its_display_when_the_main_display_changes() {
+        // The external display was main, with the laptop left of it and lower down. Unplugged,
+        // the laptop becomes main and the origin moves to its top left.
+        let main_external = display(rect(0.0, 0.0, 2560.0, 1440.0));
+        let laptop_beside = Display {
+            frame: rect(-1512.0, 458.0, 1512.0, 982.0),
+            visible: rect(-1512.0, 491.0, 1512.0, 949.0),
+        };
+        let on_laptop_before = rect(-1400.0, 500.0, 800.0, 600.0);
+        assert_eq!(
+            restore_placement(
+                on_laptop_before,
+                &[main_external, laptop_beside],
+                rect(0.0, 33.0, 756.0, 949.0),
+                &[LAPTOP],
+            ),
+            Some(Placement {
+                frame: rect(112.0, 42.0, 800.0, 600.0),
+                visible: VISIBLE,
+            })
+        );
     }
 
     fn placed(action: WindowAction, window: Rect, displays: &[Display]) -> Option<Rect> {
