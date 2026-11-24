@@ -11,6 +11,8 @@ The toolchain is pinned in `rust-toolchain.toml`. The macOS shell targets macOS 
 ```sh
 cargo fmt --check && cargo clippy --all-targets -- -D warnings && cargo test
 cargo test -p launcher-calc units            # single test, by name substring
+just                                         # bundle, stop any running copy, run in the foreground
+just run '100 N to lbf'                      # the same, opening the panel with this query
 scripts/bundle                               # macOS: Rust core, Swift bindings, signed target/release/Launcher.app
 LAUNCHER_OPEN='100 N to lbf' target/release/Launcher.app/Contents/MacOS/Launcher   # open the panel at launch
 footprint "$(pgrep -x Launcher)"             # memory, as Activity Monitor reports it
