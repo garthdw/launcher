@@ -351,7 +351,11 @@ impl Plugin for Calc {
 }
 
 /// How numbat's REPL shows a value, unlike `Display`, which writes dates as `datetime("…")`.
+/// Strings, such as `2^70 -> bin` gives, drop the REPL's quotes: they're the answer, not code.
 fn plain_text(value: &Value, options: &FormatOptions) -> String {
+    if let Value::String(text) = value {
+        return text.to_string();
+    }
     plain_text_format(&value.pretty_print_with(options), false)
         .trim()
         .to_owned()
@@ -449,6 +453,18 @@ mod tests {
                 .map(|item| (item.title, item.action))
                 .collect::<Vec<_>>(),
             [("2_000_000 m".into(), Action::Copy("2000000 m".into()))]
+        );
+    }
+
+    #[test]
+    fn strings_show_and_copy_without_quotes() {
+        let binary = format!("0b1{}", "0".repeat(70));
+        assert_eq!(
+            items("2^70 -> bin")
+                .into_iter()
+                .map(|item| (item.title, item.action))
+                .collect::<Vec<_>>(),
+            [(binary.clone(), Action::Copy(binary))]
         );
     }
 
