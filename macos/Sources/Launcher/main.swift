@@ -41,6 +41,9 @@ final class Panel: NSPanel {
 final class Row: NSView {
     var clicked: () -> Void = {}
     var hovered: () -> Void = {}
+    /// What scrolling to the row brings into view: the row with room around it, and its group's
+    /// header when it's the group's first row.
+    var reach = NSRect.zero
 
     override init(frame: NSRect) {
         super.init(frame: frame)
@@ -238,12 +241,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSTextFieldDelegate, N
     )
     let content = NSView()
     let field = NSTextField()
-    let results = FlippedView()
+    let results = NSScrollView()
+    /// The scrolled content of `results`.
+    let list = FlippedView()
     /// Shown in place of the field and list while an item's detail is open.
     var detail: DetailPane?
     /// Every group's items, in the order shown.
     var items: [Item] = []
-    /// Each item's row; group headers sit between them in `results`.
+    /// Each item's row; group headers sit between them in `list`.
     var rows: [Row] = []
     var picked = 0 {
         didSet { highlightPicked() }
@@ -301,6 +306,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSTextFieldDelegate, N
         field.autoresizingMask = [.width, .minYMargin]
         // A fixed height: `resize` reads it as the list's, so the panel growing mustn't stretch it.
         results.autoresizingMask = [.width]
+        results.drawsBackground = false
+        results.hasVerticalScroller = true
+        results.autohidesScrollers = true
+        results.documentView = list
         content.addSubview(field)
         content.addSubview(results)
         resize()
@@ -500,7 +509,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSTextFieldDelegate, N
         let kept = items.indices.contains(picked) ? (items[picked].title, items[picked].subtitle) : nil
         refresh()
         if let kept, let index = items.firstIndex(where: { ($0.title, $0.subtitle) == kept }) {
-            picked = index
+            pick(index)
         }
     }
 
@@ -513,28 +522,35 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSTextFieldDelegate, N
         let groups = launcher.query(query: field.stringValue)
         items = groups.flatMap(\.items)
         rows = []
-        results.subviews.forEach { $0.removeFromSuperview() }
+        list.subviews.forEach { $0.removeFromSuperview() }
         let rowHeight: CGFloat = 44
         let headerHeight: CGFloat = 28
+        // Eight rows under their header, and room for the next group's header to show there's more.
+        let maxHeight = Metrics.inset * 2 + headerHeight * 2 + 8 * (rowHeight + 2)
         let titleX = Metrics.inset + 12
         var y = Metrics.inset
         for group in groups {
             let header = groupLabel(group.name)
             header.frame = NSRect(x: titleX, y: y + 9, width: Metrics.width - titleX * 2, height: 16)
-            results.addSubview(header)
+            list.addSubview(header)
+            let groupTop = y
             y += headerHeight
-            for item in group.items {
+            for (place, item) in group.items.enumerated() {
                 let row = row(for: item, at: rows.count, frame: NSRect(
                     x: Metrics.inset, y: y, width: Metrics.width - Metrics.inset * 2, height: rowHeight
                 ))
-                results.addSubview(row)
+                let top = (place == 0 ? groupTop : y) - Metrics.inset
+                row.reach = NSRect(x: 0, y: top, width: Metrics.width, height: y + rowHeight + Metrics.inset - top)
+                list.addSubview(row)
                 rows.append(row)
                 y += rowHeight + 2
             }
         }
-        results.frame = NSRect(x: 0, y: 0, width: Metrics.width, height: groups.isEmpty ? 0 : y + Metrics.inset)
+        let height = groups.isEmpty ? 0 : y + Metrics.inset
+        list.frame = NSRect(x: 0, y: 0, width: Metrics.width, height: height)
+        results.frame = NSRect(x: 0, y: 0, width: Metrics.width, height: min(height, maxHeight))
         resize()
-        picked = 0
+        pick(0)
     }
 
     /// `item`'s row, the `index`th in `items`.
@@ -596,6 +612,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSTextFieldDelegate, N
         }
     }
 
+    /// Picks the `index`th item and scrolls its row into view. Hover sets `picked` alone: scrolling
+    /// under the pointer would pick the row that slides beneath it, and scroll again.
+    func pick(_ index: Int) {
+        picked = index
+        if rows.indices.contains(index) { list.scrollToVisible(rows[index].reach) }
+    }
+
     func showDetail(of index: Int) {
         let pane = DetailPane(item: items[index])
         pane.text.back = { [unowned self] in
@@ -648,9 +671,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSTextFieldDelegate, N
     func control(_: NSControl, textView: NSTextView, doCommandBy selector: Selector) -> Bool {
         switch selector {
         case #selector(NSResponder.moveDown(_:)) where !items.isEmpty:
-            picked = step(picked, by: 1, count: items.count)
+            pick(step(picked, by: 1, count: items.count))
         case #selector(NSResponder.moveUp(_:)) where !items.isEmpty:
-            picked = step(picked, by: -1, count: items.count)
+            pick(step(picked, by: -1, count: items.count))
         // Only from the end of the query, so → still moves the caret elsewhere.
         case #selector(NSResponder.moveRight(_:))
             where textView.selectedRange() == NSRange(location: (textView.string as NSString).length, length: 0)
