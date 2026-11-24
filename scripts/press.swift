@@ -4,7 +4,7 @@
 // miss it; events posted at the HID level are routed like real ones. Needs the Accessibility
 // permission for the terminal running it.
 //
-//   press right right esc cmd+c cmd+,  keys by name, with cmd+, opt+, ctrl+, shift+ modifiers
+//   press right right esc cmd+c cmd+,  keys by name, with cmd+ opt+ ctrl+ shift+ modifiers
 //   press --text '100 N to lbf'        types text
 import ApplicationServices
 import Carbon.HIToolbox

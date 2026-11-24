@@ -360,13 +360,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSTextFieldDelegate, N
             let item = NSStatusBar.system.statusItem(withLength: NSStatusItem.squareLength)
             item.button?.image = NSImage(systemSymbolName: "command", accessibilityDescription: "Launcher")
             let menu = NSMenu()
-            for (title, action) in [
-                ("Open Launcher", #selector(openPanel)),
-                ("Open Settings", #selector(openSettingsFile)),
-                ("Reload Settings", #selector(reloadSettings)),
-                ("Launch at Login", #selector(toggleLaunchAtLogin)),
+            for (title, action, key) in [
+                ("Open Launcher", #selector(openPanel), ""),
+                ("Open Settings", #selector(openSettingsFile), ","),
+                ("Reload Settings", #selector(reloadSettings), ""),
+                ("Launch at Login", #selector(toggleLaunchAtLogin), ""),
             ] {
-                menu.addItem(withTitle: title, action: action, keyEquivalent: "").target = self
+                menu.addItem(withTitle: title, action: action, keyEquivalent: key).target = self
             }
             menu.addItem(.separator())
             menu.addItem(withTitle: "Quit Launcher", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q")
@@ -431,12 +431,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSTextFieldDelegate, N
         }
         // Registered, but off in System Settings, as when the user turned it off there.
         guard app.status == .requiresApproval else { return }
-        let response = showAlert(
+        if showAlert(
             "Turn on Launcher in Login Items",
             "Launcher is in System Settings > General > Login Items, but turned off. Turn it on there to open Launcher at login.",
             buttons: ["Open Login Items", "Cancel"]
-        )
-        if response == .alertFirstButtonReturn { SMAppService.openSystemSettingsLoginItems() }
+        ) == .alertFirstButtonReturn {
+            SMAppService.openSystemSettingsLoginItems()
+        }
     }
 
     /// Its action runs when the hotkey is pressed, whichever app is frontmost. Returns why it

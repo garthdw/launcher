@@ -209,9 +209,9 @@ impl fmt::Display for SettingsFileError {
 /// with every setting commented out, as `config init` does.
 #[uniffi::export]
 pub fn settings_file() -> Result<String, SettingsFileError> {
-    let path = launcher_config::file_to_edit()
-        .map_err(|reason| SettingsFileError::Unavailable { reason })?;
-    path.into_os_string()
+    launcher_config::file_to_edit()
+        .map_err(|reason| SettingsFileError::Unavailable { reason })?
+        .into_os_string()
         .into_string()
         .map_err(|path| SettingsFileError::Unavailable {
             reason: format!("{} isn't UTF-8, so it can't be opened", path.display()),
@@ -314,7 +314,8 @@ impl Launcher {
             Some(launcher) => Settings::from(&*launcher),
             None => Settings {
                 bindings: Vec::new(),
-                menu_bar: launcher_config::Config::default().menu_bar,
+                // With no hotkeys, the panel and its ⌘Q are out of reach; the item still quits.
+                menu_bar: true,
                 problem: Some("a plugin crashed; relaunch to get the settings back".into()),
             },
         }
