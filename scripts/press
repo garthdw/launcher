@@ -1,0 +1,10 @@
+#!/bin/sh
+# Presses keys in the launcher's panel; see press.swift. Compiled on first use and when it changes.
+set -eu
+root=$(cd "$(dirname "$0")/.." && pwd)
+binary="$root/target/press"
+if [ ! -x "$binary" ] || [ "$root/scripts/press.swift" -nt "$binary" ]; then
+    mkdir -p "$root/target"
+    swiftc -O -o "$binary" "$root/scripts/press.swift"
+fi
+exec "$binary" "$@"
