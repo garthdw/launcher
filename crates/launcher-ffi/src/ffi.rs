@@ -107,6 +107,8 @@ pub enum WindowAction {
     Maximise,
     Centre,
     Restore,
+    NextDisplay,
+    PreviousDisplay,
 }
 
 #[derive(uniffi::Record)]
@@ -180,7 +182,8 @@ pub fn window_bindings() -> Vec<WindowBinding> {
         .collect()
 }
 
-/// Where `action` puts `window`, all in top-left-origin global coordinates; `None` for `Restore`.
+/// Where `action` puts `window`, all in top-left-origin global coordinates; `None` for `Restore`,
+/// for a display move with only one display, and without displays.
 #[uniffi::export]
 pub fn window_placement(
     action: WindowAction,

@@ -5,7 +5,8 @@ import ApplicationServices
 /// puts it comes from the Rust core, shared with other shells; this only reads and moves windows.
 @MainActor
 final class Windows {
-    /// Each window's frame from before its first layout since the last restore, for `.restore`.
+    /// Each window's frame from before its first layout or display move since the last restore,
+    /// for `.restore`, so restoring after a display move goes back to the original display.
     /// Kept even if the user moves the window in between: telling their move from an app adjusting
     /// the frame it was given (to a minimum size, a terminal's cell grid, late) isn't reliable.
     private var originals: [AXUIElement: CGRect] = [:]
