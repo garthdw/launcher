@@ -1,7 +1,9 @@
 #!/bin/sh
 # Bundles the app, then measures it against the budget below over several launches: summon to
 # focus, and the footprint with the panel open and after Esc hides it, as medians of the runs
-# after a warm-up. Fails when one is over budget. The footprints leave out LaunchServices' pages of its
+# after a warm-up. Each run then launches again with a token whose detail scrolls, and measures
+# the footprint with the detail open, after it's closed and the panel hidden, and that launch's
+# peak. Fails when one is over budget. The footprints leave out LaunchServices' pages of its
 # database, shown apart: they change by several MB in every app with the system's state. Raise a
 # budget only deliberately, in the commit that needs it, saying why.
 #
@@ -15,9 +17,15 @@ budget_summon_ms=100
 budget_open_kb=$((26 * 1024))
 budget_hidden_kb=$((26 * 1024 + 512))
 budget_peak_kb=$((27 * 1024))
+# A detail this tall is drawn on the GPU, which loads Metal: hence the peak.
+budget_detail_kb=$((34 * 1024 + 512))
+budget_detail_closed_kb=$((33 * 1024 + 512))
+budget_detail_peak_kb=$((107 * 1024))
 
 runs=${1:-6}
 query=${2:-100 N to lbf}
+# Unsigned, with a payload long enough that its detail scrolls.
+token=eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiIxMjM0NTY3ODkwIiwibmFtZSI6Ik1lYXN1cmUiLCJpc3MiOiJodHRwczovL2V4YW1wbGUuY29tIiwiYXVkIjoibGF1bmNoZXIiLCJpYXQiOjE3MDAwMDAwMDAsIm5iZiI6MTcwMDAwMDAwMCwiZXhwIjo0MTAwMDAwMDAwLCJzY29wZSI6InJlYWQgd3JpdGUiLCJyb2xlcyI6WyJhZG1pbiIsImVkaXRvciIsInZpZXdlciJdLCJncm91cHMiOlsib25lIiwidHdvIiwidGhyZWUiXSwiZW1haWwiOiJtZWFzdXJlQGV4YW1wbGUuY29tIiwibG9jYWxlIjoiZW4iLCJ6b25lIjoiVVRDIiwidGVuYW50IjoidDEiLCJzZXNzaW9uIjoiczEifQ.c2lnbmF0dXJl
 root=$(cd "$(dirname "$0")/.." && pwd)
 app=$root/target/release/Launcher.app/Contents/MacOS/Launcher
 work=$(mktemp -d)
@@ -113,8 +121,8 @@ quit() {
 pkill -x Launcher || true
 while pgrep -x Launcher >/dev/null; do wait_seconds 0.1; done
 
-row='%-7s %10s %10s %10s %10s %12s\n'
-printf "$row" run summon_ms open_kb hidden_kb peak_kb services_kb
+row='%-7s %10s %10s %10s %10s %10s %10s %10s %12s\n'
+printf "$row" run summon_ms open_kb hidden_kb peak_kb detail_kb closed_kb dpeak_kb services_kb
 for run in $(seq 0 "$runs"); do
     launch "$query" query
     summon=$(rg -o 'summon to focus: ([0-9.]+)' -r '$1' "$log")
@@ -129,13 +137,37 @@ $(footprints_kb "$pid")
 EOF
     quit
 
+    launch "$token" detail
+    list_height=$(shown_height "$pid")
+    # The query starts selected, and → opens the detail only from its end.
+    "$root/scripts/press" right
+    wait_seconds 0.5
+    if [ "$(shown_height "$pid")" -eq "$list_height" ]; then
+        "$root/scripts/press" right
+    fi
+    wait_seconds 2
+    expect_height "→ didn't open the detail" -ne "$list_height"
+    read -r detail_kb _ _ <<EOF
+$(footprints_kb "$pid")
+EOF
+    "$root/scripts/press" esc
+    wait_seconds 0.5
+    expect_height "Esc didn't go back from the detail to the list" -eq "$list_height"
+    "$root/scripts/press" esc
+    wait_seconds 2
+    expect_height "Esc didn't hide the panel" -eq
+    read -r closed_kb detail_peak_kb _ <<EOF
+$(footprints_kb "$pid")
+EOF
+    quit
+
     label=$run
     if [ "$run" -eq 0 ]; then
         label=warm-up
     fi
-    printf "$row" "$label" "$summon" "$open_kb" "$hidden_kb" "$peak_kb" "$services_kb"
+    printf "$row" "$label" "$summon" "$open_kb" "$hidden_kb" "$peak_kb" "$detail_kb" "$closed_kb" "$detail_peak_kb" "$services_kb"
     if [ "$run" -ne 0 ]; then
-        echo "$summon $open_kb $hidden_kb $peak_kb" >>"$work/runs"
+        echo "$summon $open_kb $hidden_kb $peak_kb $detail_kb $closed_kb $detail_peak_kb" >>"$work/runs"
     fi
 done
 
@@ -155,4 +187,7 @@ check summon 1 "$budget_summon_ms" ms
 check open 2 "$budget_open_kb" KB
 check hidden 3 "$budget_hidden_kb" KB
 check peak 4 "$budget_peak_kb" KB
+check detail 5 "$budget_detail_kb" KB
+check closed 6 "$budget_detail_closed_kb" KB
+check dpeak 7 "$budget_detail_peak_kb" KB
 exit "$over"

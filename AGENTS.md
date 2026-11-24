@@ -48,7 +48,7 @@ Settings and state live in `~/.config/launcher`, or in `LAUNCHER_CONFIG_DIR` whe
 
 ## Memory
 
-Memory is the main constraint: prefer work done on demand over state kept resident. Run `scripts/measure` before and after a change that adds a dependency or keeps state; it checks the bundled app against the budget at its top. `crates/launcher-plugins/tests/memory.rs` checks the plugins' live heap in CI. Raise either budget only deliberately, in the commit that needs it, and record what was measured in the PR.
+Memory is the main constraint: prefer work done on demand over state kept resident. Run `scripts/measure` before and after a change that adds a dependency or keeps state; it checks the bundled app against the budget at its top, with the panel open, hidden, and showing a detail long enough that Core Animation draws it on the GPU. `crates/launcher-plugins/tests/memory.rs` checks the plugins' live heap in CI. Raise either budget only deliberately, in the commit that needs it, and record what was measured in the PR.
 
 `scripts/measure` needs a screen and its numbers depend on the Mac, so compare builds side by side in one session rather than against old figures. It leaves out LaunchServices' `CoreServices` region, which swings by several MB in every app with the system's state.
 
