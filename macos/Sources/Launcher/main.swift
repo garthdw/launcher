@@ -242,14 +242,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSTextFieldDelegate, N
     var summoned: CFAbsoluteTime?
     /// A plugin's results changed while the panel was hidden or showed a detail.
     var resultsStale = false
-    var hotkey: EventHotKeyRef?
+    /// What each registered hotkey does, indexed by its Carbon hotkey ID.
+    var hotkeyActions: [() -> Void] = []
 
     func applicationDidFinishLaunching(_: Notification) {
         // Lazy only so the relay can reach `self`; plugins start their background work now, not
         // on the first keystroke.
         _ = launcher
         buildPanel()
-        registerHotkey()
+        registerHotkeys()
         // Opens the panel at launch with this query, for measuring without the hotkey.
         if let query = ProcessInfo.processInfo.environment["LAUNCHER_OPEN"] {
             field.stringValue = query
@@ -287,20 +288,42 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSTextFieldDelegate, N
         resize()
     }
 
-    func registerHotkey() {
+    func registerHotkeys() {
         var pressed = EventTypeSpec(eventClass: OSType(kEventClassKeyboard), eventKind: UInt32(kEventHotKeyPressed))
         let delegate = Unmanaged.passUnretained(self).toOpaque()
-        InstallEventHandler(GetApplicationEventTarget(), { _, _, context in
-            guard let context else { return OSStatus(eventNotHandledErr) }
+        InstallEventHandler(GetApplicationEventTarget(), { _, event, context in
+            guard let event, let context else { return OSStatus(eventNotHandledErr) }
+            var hotkeyID = EventHotKeyID()
+            let status = GetEventParameter(
+                event, EventParamName(kEventParamDirectObject), EventParamType(typeEventHotKeyID),
+                nil, MemoryLayout<EventHotKeyID>.size, nil, &hotkeyID
+            )
+            guard status == noErr else { return status }
             let delegate = Unmanaged<AppDelegate>.fromOpaque(context).takeUnretainedValue()
-            MainActor.assumeIsolated { delegate.summon(at: CFAbsoluteTimeGetCurrent()) }
-            return noErr
+            return MainActor.assumeIsolated {
+                let index = Int(hotkeyID.id)
+                guard delegate.hotkeyActions.indices.contains(index) else { return OSStatus(eventNotHandledErr) }
+                delegate.hotkeyActions[index]()
+                return noErr
+            }
         }, 1, &pressed, delegate, nil)
+        registerHotkey(code: kVK_Space, modifiers: optionKey, name: "⌥Space") { [unowned self] in
+            summon(at: CFAbsoluteTimeGetCurrent())
+        }
+    }
+
+    /// `action` runs when the hotkey is pressed, whichever app is frontmost.
+    func registerHotkey(code: Int, modifiers: Int, name: String, action: @escaping () -> Void) {
+        var hotkey: EventHotKeyRef?
         let status = RegisterEventHotKey(
-            UInt32(kVK_Space), UInt32(optionKey), EventHotKeyID(signature: 0x4C4E_4348, id: 1),
+            UInt32(code), UInt32(modifiers), EventHotKeyID(signature: 0x4C4E_4348, id: UInt32(hotkeyActions.count)),
             GetApplicationEventTarget(), 0, &hotkey
         )
-        if status != noErr { log("can't register ⌥Space: \(status)") }
+        guard status == noErr else {
+            log("can't register \(name): \(status)")
+            return
+        }
+        hotkeyActions.append(action)
     }
 
     func summon(at time: CFAbsoluteTime) {
@@ -470,14 +493,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSTextFieldDelegate, N
                     }
                     log("can't open \(path): \(failure)")
                     // The panel has already closed, so nothing else would show the failure.
-                    let alert = NSAlert()
-                    alert.messageText = "Can't open \(FileManager.default.displayName(atPath: path))"
-                    alert.informativeText = failure
-                    let previous = NSWorkspace.shared.frontmostApplication
-                    NSApp.activate()
-                    alert.runModal()
-                    // Window management acts on the frontmost app, so hand focus back.
-                    previous?.activate()
+                    showAlert("Can't open \(FileManager.default.displayName(atPath: path))", failure)
                 }
             }
         case .nothing:
@@ -545,6 +561,19 @@ func hintLabel(_ string: String) -> NSTextField {
     label.textColor = .secondaryLabelColor
     label.alignment = .right
     return label
+}
+
+/// Activates the app to show the alert, then gives focus back: window management acts on the
+/// frontmost app.
+@MainActor
+func showAlert(_ message: String, _ detail: String) {
+    let alert = NSAlert()
+    alert.messageText = message
+    alert.informativeText = detail
+    let previous = NSWorkspace.shared.frontmostApplication
+    NSApp.activate()
+    alert.runModal()
+    previous?.activate()
 }
 
 @discardableResult
