@@ -757,6 +757,7 @@ dependencies = [
  "launcher-calc",
  "launcher-core",
  "launcher-plugins",
+ "launcher-window",
  "uniffi",
 ]
 
@@ -778,6 +779,13 @@ dependencies = [
  "launcher-calc",
  "launcher-core",
  "launcher-jwt",
+]
+
+[[package]]
+name = "launcher-window"
+version = "0.1.0"
+dependencies = [
+ "launcher-core",
 ]
 
 [[package]]

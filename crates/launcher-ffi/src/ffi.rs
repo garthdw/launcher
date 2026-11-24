@@ -4,6 +4,7 @@
 use std::sync::{Arc, Mutex};
 
 use launcher_core::{Found, PluginId, Plugins};
+use launcher_window::{DEFAULT_BINDINGS, Rect, WindowAction};
 
 uniffi::setup_scaffolding!();
 
@@ -67,6 +68,123 @@ impl From<Found> for Item {
             }),
         }
     }
+}
+
+// Restated for UniFFI to derive its converters; the compiler checks they match the originals.
+#[uniffi::remote(Record)]
+pub struct Rect {
+    pub x: f64,
+    pub y: f64,
+    pub width: f64,
+    pub height: f64,
+}
+
+#[uniffi::remote(Enum)]
+pub enum WindowAction {
+    LeftHalf,
+    RightHalf,
+    TopHalf,
+    BottomHalf,
+    TopLeft,
+    TopRight,
+    BottomLeft,
+    BottomRight,
+    FirstThird,
+    CentreThird,
+    LastThird,
+    Maximise,
+    Centre,
+    Restore,
+}
+
+#[derive(uniffi::Record)]
+pub struct Hotkey {
+    pub key: Key,
+    pub control: bool,
+    pub option: bool,
+    pub command: bool,
+    pub shift: bool,
+}
+
+impl From<launcher_core::Hotkey> for Hotkey {
+    fn from(hotkey: launcher_core::Hotkey) -> Self {
+        Self {
+            key: hotkey.key.into(),
+            control: hotkey.control,
+            option: hotkey.option,
+            command: hotkey.command,
+            shift: hotkey.shift,
+        }
+    }
+}
+
+#[derive(uniffi::Enum)]
+pub enum Key {
+    Left,
+    Right,
+    Up,
+    Down,
+    Return,
+    Delete,
+    Space,
+    /// UniFFI has no `char`.
+    Character {
+        character: String,
+    },
+}
+
+impl From<launcher_core::Key> for Key {
+    fn from(key: launcher_core::Key) -> Self {
+        match key {
+            launcher_core::Key::Left => Self::Left,
+            launcher_core::Key::Right => Self::Right,
+            launcher_core::Key::Up => Self::Up,
+            launcher_core::Key::Down => Self::Down,
+            launcher_core::Key::Return => Self::Return,
+            launcher_core::Key::Delete => Self::Delete,
+            launcher_core::Key::Space => Self::Space,
+            launcher_core::Key::Character(character) => Self::Character {
+                character: character.to_string(),
+            },
+        }
+    }
+}
+
+#[derive(uniffi::Record)]
+pub struct WindowBinding {
+    pub hotkey: Hotkey,
+    pub action: WindowAction,
+}
+
+/// The window actions' global hotkeys.
+#[uniffi::export]
+pub fn window_bindings() -> Vec<WindowBinding> {
+    DEFAULT_BINDINGS
+        .iter()
+        .map(|binding| WindowBinding {
+            hotkey: binding.hotkey.into(),
+            action: binding.action,
+        })
+        .collect()
+}
+
+/// The index of the display, among `displays`' frames, whose layouts `window` uses.
+#[uniffi::export]
+pub fn window_display(window: Rect, displays: Vec<Rect>) -> Option<u32> {
+    launcher_window::display_holding(window, &displays).and_then(|index| u32::try_from(index).ok())
+}
+
+/// Where `action` puts `window` within `visible`, both in top-left-origin global coordinates;
+/// `None` for `Restore`.
+#[uniffi::export]
+pub fn window_frame(action: WindowAction, window: Rect, visible: Rect) -> Option<Rect> {
+    action.frame(window, visible)
+}
+
+/// `frame` moved as little as it takes to lie within `visible`, keeping its size.
+#[uniffi::export]
+pub fn window_moved_within(frame: Rect, visible: Rect) -> Rect {
+    launcher_window::moved_within(frame, visible)
 }
 
 #[derive(uniffi::Object)]

@@ -1,0 +1,12 @@
+[package]
+name = "launcher-window"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[lib]
+path = "src/window.rs"
+
+[dependencies]
+launcher-core.workspace = true

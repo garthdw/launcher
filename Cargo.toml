@@ -16,6 +16,7 @@ launcher-apps = { path = "crates/launcher-apps" }
 launcher-calc = { path = "crates/launcher-calc" }
 launcher-jwt = { path = "crates/launcher-jwt" }
 launcher-plugins = { path = "crates/launcher-plugins" }
+launcher-window = { path = "crates/launcher-window" }
 # The client numbat's `fetch-exchangerates` uses. That feature is off because it fetches when a
 # query first meets a currency, on the UI thread; the calculator fetches and caches rates itself.
 attohttpc = { version = "0.27.0", default-features = false, features = ["tls-rustls-webpki-roots"] }

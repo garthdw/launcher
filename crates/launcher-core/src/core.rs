@@ -25,6 +25,29 @@ pub enum Action {
     Nothing,
 }
 
+/// A global key combination, named by key position on a US layout, which the shell registers.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Hotkey {
+    pub key: Key,
+    pub control: bool,
+    pub option: bool,
+    pub command: bool,
+    pub shift: bool,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Key {
+    Left,
+    Right,
+    Up,
+    Down,
+    Return,
+    Delete,
+    Space,
+    /// A letter or digit, in lower case.
+    Character(char),
+}
+
 /// Where settings and state live: `~/.config/launcher` on every platform.
 pub fn config_directory() -> Option<PathBuf> {
     std::env::home_dir().map(|home| home.join(".config/launcher"))
