@@ -665,7 +665,8 @@ let characterKeyCodes: [String: Int] = [
 func copyToPasteboard(_ text: String) -> Bool {
     NSPasteboard.general.clearContents()
     if NSPasteboard.general.setString(text, forType: .string) { return true }
-    log("can't copy \(text)")
+    // Not the text itself: it can be a token's claims, and the log is kept on disk.
+    log("can't copy \(text.count) characters to the pasteboard")
     return false
 }
 
