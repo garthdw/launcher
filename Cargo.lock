@@ -750,10 +750,9 @@ version = "0.1.0"
 name = "launcher-ffi"
 version = "0.1.0"
 dependencies = [
- "launcher-apps",
  "launcher-calc",
  "launcher-core",
- "launcher-jwt",
+ "launcher-plugins",
  "uniffi",
 ]
 
@@ -765,6 +764,16 @@ dependencies = [
  "jiff",
  "launcher-core",
  "serde_json",
+]
+
+[[package]]
+name = "launcher-plugins"
+version = "0.1.0"
+dependencies = [
+ "launcher-apps",
+ "launcher-calc",
+ "launcher-core",
+ "launcher-jwt",
 ]
 
 [[package]]

@@ -3,10 +3,7 @@
 
 use std::sync::{Arc, Mutex};
 
-use launcher_apps::Apps;
-use launcher_calc::Calc;
-use launcher_core::{Found, Plugin, PluginId, Plugins};
-use launcher_jwt::Jwt;
+use launcher_core::{Found, PluginId, Plugins};
 
 uniffi::setup_scaffolding!();
 
@@ -76,9 +73,9 @@ pub struct Launcher {
 }
 
 impl Launcher {
-    fn with(plugins: Vec<Box<dyn Plugin + Send>>) -> Self {
+    fn with(plugins: Plugins) -> Self {
         Self {
-            plugins: Mutex::new(Plugins::new(plugins)),
+            plugins: Mutex::new(plugins),
         }
     }
 }
@@ -87,14 +84,7 @@ impl Launcher {
 impl Launcher {
     #[uniffi::constructor]
     pub fn new() -> Arc<Self> {
-        let mut plugins: Vec<Box<dyn Plugin + Send>> = Vec::new();
-        match Calc::new() {
-            Ok(calc) => plugins.push(Box::new(calc)),
-            Err(error) => eprintln!("calculator unavailable: {error}"),
-        }
-        plugins.push(Box::new(Jwt));
-        plugins.push(Box::new(Apps::start()));
-        Arc::new(Self::with(plugins))
+        Arc::new(Self::with(launcher_plugins::start()))
     }
 
     /// Called on every keystroke from the UI thread, so plugins must answer well inside a frame.
@@ -116,20 +106,16 @@ impl Launcher {
     }
 }
 
-/// Fetches exchange rates on a background thread, so the first currency query doesn't block.
-#[uniffi::export]
-pub fn prefetch_exchange_rates() {
-    std::thread::spawn(Calc::prefetch_exchange_rates);
-}
-
 #[cfg(test)]
 mod tests {
+    use launcher_calc::Calc;
+
     use super::*;
 
     #[test]
     fn query_converts_items() -> Result<(), Box<dyn std::error::Error>> {
         // Only the calculator, so installed apps can't add results.
-        let launcher = Launcher::with(vec![Box::new(Calc::new()?)]);
+        let launcher = Launcher::with(Plugins::new(vec![Box::new(Calc::new()?)]));
         let items = launcher.query("2 + 3".into());
         assert_eq!(items.len(), 1);
         assert_eq!(items[0].title, "5");

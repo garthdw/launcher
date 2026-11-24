@@ -13,6 +13,7 @@ launcher-core = { path = "crates/launcher-core" }
 launcher-apps = { path = "crates/launcher-apps" }
 launcher-calc = { path = "crates/launcher-calc" }
 launcher-jwt = { path = "crates/launcher-jwt" }
+launcher-plugins = { path = "crates/launcher-plugins" }
 base64 = "0.22.1"
 # The version numbat uses, so the app links one copy.
 jiff = "0.2.46"
