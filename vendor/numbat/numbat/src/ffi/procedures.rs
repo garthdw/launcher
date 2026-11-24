@@ -1,0 +1,160 @@
+use std::collections::HashMap;
+
+use std::sync::OnceLock;
+
+use super::macros::*;
+use crate::{
+    ast::ProcedureKind,
+    ffi::ControlFlow,
+    interpreter::{
+        RuntimeErrorKind,
+        assert_eq::{AssertEq2Error, AssertEq3Error},
+    },
+    value::Value,
+    vm::ExecutionContext,
+};
+
+use super::{Args, Callable, ForeignFunction};
+
+static FFI_PROCEDURES: OnceLock<HashMap<ProcedureKind, ForeignFunction>> = OnceLock::new();
+
+pub(crate) fn procedures() -> &'static HashMap<ProcedureKind, ForeignFunction> {
+    FFI_PROCEDURES.get_or_init(|| {
+        let mut m = HashMap::new();
+
+        m.insert(
+            ProcedureKind::Print,
+            ForeignFunction {
+                arity: 0..=1,
+                callable: Callable::Procedure(print),
+            },
+        );
+        m.insert(
+            ProcedureKind::Assert,
+            ForeignFunction {
+                arity: 1..=1,
+                callable: Callable::Procedure(assert),
+            },
+        );
+        m.insert(
+            ProcedureKind::AssertEq,
+            ForeignFunction {
+                arity: 2..=3,
+                callable: Callable::Procedure(assert_eq),
+            },
+        );
+        // Note: The 'type' procedure is missing here because it has special handling code in the compiler
+
+        m
+    })
+}
+
+fn print(ctx: &mut ExecutionContext, mut args: Args) -> ControlFlow {
+    assert!(args.len() <= 1);
+
+    if args.is_empty() {
+        (ctx.print_fn)(&crate::markup::text(""))
+    } else {
+        match arg!(args) {
+            Value::String(string) => (ctx.print_fn)(&crate::markup::text(string)), // print string without quotes
+            arg => (ctx.print_fn)(&arg.pretty_print()),
+        }
+    }
+
+    ControlFlow::Continue(())
+}
+
+fn assert(_: &mut ExecutionContext, mut args: Args) -> ControlFlow {
+    assert!(args.len() == 1);
+
+    let arg = args.pop_front().unwrap();
+    if arg.value.unsafe_as_bool() {
+        ControlFlow::Continue(())
+    } else {
+        ControlFlow::Break(RuntimeErrorKind::AssertFailed(arg.span))
+    }
+}
+
+fn assert_eq(_: &mut ExecutionContext, mut args: Args) -> ControlFlow {
+    assert!(args.len() == 2 || args.len() == 3);
+
+    let lhs_arg = args.pop_front().unwrap();
+    let rhs_arg = args.pop_front().unwrap();
+
+    if args.is_empty() {
+        let lhs = lhs_arg.value;
+        let rhs = rhs_arg.value;
+
+        let mut lhs_converted = None;
+        let mut diff = None;
+
+        let values_equal = if lhs.is_quantity() {
+            let lhs_q = lhs.clone().unsafe_as_quantity();
+            let rhs_q = rhs.clone().unsafe_as_quantity();
+
+            if let Ok(converted) = lhs_q.convert_to(rhs_q.unit()) {
+                let equal = converted == rhs_q;
+                if !equal {
+                    diff = (&converted - &rhs_q).ok().map(|d| d.abs());
+                }
+                lhs_converted = Some(converted);
+                equal
+            } else {
+                false
+            }
+        } else {
+            lhs == rhs
+        };
+
+        if values_equal {
+            ControlFlow::Continue(())
+        } else {
+            ControlFlow::Break(RuntimeErrorKind::AssertEq2Failed(AssertEq2Error {
+                span_lhs: lhs_arg.span,
+                lhs,
+                span_rhs: rhs_arg.span,
+                rhs,
+                lhs_converted,
+                diff,
+            }))
+        }
+    } else {
+        let lhs_original = lhs_arg.value.unsafe_as_quantity();
+        let rhs_original = rhs_arg.value.unsafe_as_quantity();
+        let eps = quantity_arg!(args);
+
+        let lhs_converted = lhs_original.convert_to(eps.unit());
+        let lhs_converted = match lhs_converted {
+            Err(e) => return ControlFlow::Break(RuntimeErrorKind::QuantityError(e)),
+            Ok(q) => q,
+        };
+        let rhs_converted = rhs_original.convert_to(eps.unit());
+        let rhs_converted = match rhs_converted {
+            Err(e) => return ControlFlow::Break(RuntimeErrorKind::QuantityError(e)),
+            Ok(q) => q,
+        };
+
+        let result = &lhs_converted - &rhs_converted;
+
+        match result {
+            Err(e) => ControlFlow::Break(RuntimeErrorKind::QuantityError(e)),
+            Ok(diff) => {
+                let diff_abs = diff.abs();
+                if diff_abs <= eps {
+                    ControlFlow::Continue(())
+                } else {
+                    ControlFlow::Break(RuntimeErrorKind::AssertEq3Failed(AssertEq3Error {
+                        span_lhs: lhs_arg.span,
+                        lhs_original,
+                        lhs_converted,
+                        span_rhs: rhs_arg.span,
+                        rhs_original,
+                        rhs_converted,
+                        eps,
+                        diff_abs,
+                    }))
+                }
+            }
+        }
+    }
+}
