@@ -1,10 +1,10 @@
 //! The boundary the native shells call. Its types mirror `launcher-core`'s so the core stays
 //! free of FFI derives; a Rust shell (Linux) uses the core directly.
 
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, MutexGuard};
 
-use launcher_core::{Found, PluginId, Plugins};
-use launcher_window::{DEFAULT_BINDINGS, Display, Placement, Rect, WindowAction};
+use launcher_core::{Found, PluginId};
+use launcher_window::{Display, Placement, Rect, WindowAction};
 
 uniffi::setup_scaffolding!();
 
@@ -164,22 +164,31 @@ impl From<launcher_core::Key> for Key {
     }
 }
 
+/// A global hotkey and what it does, for the shell to register.
 #[derive(uniffi::Record)]
-pub struct WindowBinding {
+pub struct HotkeyBinding {
     pub hotkey: Hotkey,
-    pub action: WindowAction,
+    /// `None` for the hotkey that opens the launcher.
+    pub action: Option<WindowAction>,
+    /// The setting that binds it and its text, as the config file writes them, for messages:
+    /// `window.left_half = "ctrl+alt+left"`.
+    pub setting: String,
 }
 
-/// The window actions' global hotkeys.
+/// The settings a shell applies itself: its global hotkeys.
+#[derive(uniffi::Record)]
+pub struct Settings {
+    pub bindings: Vec<HotkeyBinding>,
+    /// Why the config file can't be used, naming it; the settings are then the ones from before,
+    /// or the defaults.
+    pub problem: Option<String>,
+}
+
+/// Runs `config` commands, such as `config init`, before the shell starts its UI: `None` when
+/// `arguments` aren't one, else the exit status.
 #[uniffi::export]
-pub fn window_bindings() -> Vec<WindowBinding> {
-    DEFAULT_BINDINGS
-        .iter()
-        .map(|binding| WindowBinding {
-            hotkey: binding.hotkey.into(),
-            action: binding.action,
-        })
-        .collect()
+pub fn config_command(arguments: Vec<String>) -> Option<i32> {
+    launcher_config::run_command(&arguments)
 }
 
 /// Where `action` puts `window`, all in top-left-origin global coordinates; `None` for `Restore`,
@@ -212,14 +221,33 @@ pub fn window_moved_within(frame: Rect, visible: Rect) -> Rect {
 }
 
 #[derive(uniffi::Object)]
-pub struct Launcher {
-    plugins: Mutex<Plugins>,
-}
+pub struct Launcher(Mutex<launcher_plugins::Launcher>);
 
 impl Launcher {
-    fn with(plugins: Plugins) -> Self {
+    /// `None` after a plugin panicked while holding the lock.
+    fn lock(&self) -> Option<MutexGuard<'_, launcher_plugins::Launcher>> {
+        let locked = self.0.lock().ok();
+        if locked.is_none() {
+            eprintln!("a plugin panicked; the launcher is unavailable");
+        }
+        locked
+    }
+}
+
+impl From<&launcher_plugins::Launcher> for Settings {
+    fn from(launcher: &launcher_plugins::Launcher) -> Self {
         Self {
-            plugins: Mutex::new(plugins),
+            bindings: launcher
+                .config()
+                .hotkeys()
+                .into_iter()
+                .map(|setting| HotkeyBinding {
+                    hotkey: setting.hotkey.into(),
+                    action: setting.action,
+                    setting: format!("{} = \"{}\"", setting.name, setting.hotkey),
+                })
+                .collect(),
+            problem: launcher.problem().map(String::from),
         }
     }
 }
@@ -231,39 +259,70 @@ pub trait ResultsListener: Send + Sync {
     fn results_changed(&self);
 }
 
+#[uniffi::export(callback_interface)]
+pub trait SettingsListener: Send + Sync {
+    /// Called from another thread when the config file changed, for the shell to call
+    /// `Launcher::reload_settings`.
+    fn settings_changed(&self);
+}
+
 #[uniffi::export]
 impl Launcher {
+    /// Starts the plugins the config file turns on, and watches the file.
     #[uniffi::constructor]
-    pub fn new(listener: Box<dyn ResultsListener>) -> Arc<Self> {
+    pub fn new(
+        listener: Box<dyn ResultsListener>,
+        settings_listener: Box<dyn SettingsListener>,
+    ) -> Arc<Self> {
         let listener: Arc<dyn ResultsListener> = Arc::from(listener);
-        Arc::new(Self::with(launcher_plugins::start(Arc::new(move || {
-            listener.results_changed()
-        }))))
+        Arc::new(Self(Mutex::new(launcher_plugins::Launcher::start(
+            Arc::new(move || listener.results_changed()),
+            move || settings_listener.settings_changed(),
+        ))))
+    }
+
+    pub fn settings(&self) -> Settings {
+        match self.lock() {
+            Some(launcher) => Settings::from(&*launcher),
+            None => Settings {
+                bindings: Vec::new(),
+                problem: Some("a plugin crashed; relaunch to get the settings back".into()),
+            },
+        }
+    }
+
+    /// Reads the config file again: `None` when nothing changed.
+    pub fn reload_settings(&self) -> Option<Settings> {
+        let mut launcher = self.lock()?;
+        launcher.reload().then(|| Settings::from(&*launcher))
     }
 
     /// Called on every keystroke from the UI thread, so plugins must answer well inside a frame.
     pub fn query(&self, query: String) -> Vec<Item> {
-        let Ok(mut plugins) = self.plugins.lock() else {
-            eprintln!("a plugin panicked; skipping queries");
+        let Some(mut launcher) = self.lock() else {
             return Vec::new();
         };
-        plugins.query(&query).into_iter().map(Item::from).collect()
+        launcher
+            .plugins()
+            .query(&query)
+            .into_iter()
+            .map(Item::from)
+            .collect()
     }
 
     /// The shell ran an item's action successfully.
     pub fn ran(&self, choice: Arc<Choice>) {
-        let Ok(mut plugins) = self.plugins.lock() else {
-            eprintln!("a plugin panicked; not telling it {:?} ran", choice.action);
-            return;
-        };
-        plugins.ran(choice.plugin, &choice.action);
+        if let Some(mut launcher) = self.lock() {
+            launcher.plugins().ran(choice.plugin, &choice.action);
+        }
     }
 }
 
 #[cfg(test)]
 mod tests {
     use launcher_calc::Calc;
-    use launcher_core::Plugin;
+    use launcher_config::Config;
+    use launcher_core::{Plugin, Plugins};
 
     use super::*;
 
@@ -280,9 +339,42 @@ mod tests {
         }
     }
 
+    /// Without the config file.
+    fn launcher(plugins: Plugins) -> Launcher {
+        Launcher(Mutex::new(launcher_plugins::Launcher::with(
+            plugins,
+            Config::default(),
+            None,
+            Arc::new(|| {}),
+        )))
+    }
+
+    #[test]
+    fn settings_name_each_hotkey_as_the_file_does() {
+        let settings = launcher(Plugins::new(Vec::new())).settings();
+        assert_eq!(settings.bindings.len(), Config::default().window.len() + 1);
+        let named: Vec<(&str, Option<WindowAction>)> = settings
+            .bindings
+            .iter()
+            .take(2)
+            .map(|binding| (binding.setting.as_str(), binding.action))
+            .collect();
+        assert_eq!(
+            named,
+            [
+                ("hotkey = \"alt+space\"", None),
+                (
+                    "window.left_half = \"ctrl+alt+left\"",
+                    Some(WindowAction::LeftHalf)
+                ),
+            ]
+        );
+        assert_eq!(settings.problem, None);
+    }
+
     #[test]
     fn query_converts_items_without_an_action() {
-        let launcher = Launcher::with(Plugins::new(vec![Box::new(Pending)]));
+        let launcher = launcher(Plugins::new(vec![Box::new(Pending)]));
         let items = launcher.query("anything".into());
         assert!(matches!(
             items.as_slice(),
@@ -296,7 +388,7 @@ mod tests {
     #[test]
     fn query_converts_items() -> Result<(), Box<dyn std::error::Error>> {
         // Only the calculator, so installed apps can't add results.
-        let launcher = Launcher::with(Plugins::new(vec![Box::new(Calc::new()?)]));
+        let launcher = launcher(Plugins::new(vec![Box::new(Calc::new()?)]));
         let items = launcher.query("2 + 3".into());
         assert_eq!(items.len(), 1);
         assert_eq!(items[0].title, "5");

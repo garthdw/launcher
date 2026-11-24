@@ -34,7 +34,8 @@ Things that look like app bugs but aren't:
 
 - The panel opens with the query selected, so the first → only moves the caret to the end; a second → opens a detail.
 - ↵ runs the action, clears the query and hides the panel. Start a fresh `just run` for the next case rather than summoning the empty panel.
-- Another window manager (Raycast, Rectangle) may own the same ⌃⌥ window hotkeys; Carbon delivers them to both, so a window can move without this app. Check by stopping the launcher and pressing again, or bind a test build to ⌃⌥⇧ by setting `shift: true` in `control_option`. Read window frames with `osascript -e 'tell application "System Events" to tell (first process whose frontmost is true) to get {position, size} of window 1'`.
+- Another window manager (Raycast, Rectangle) may own the same ⌃⌥ window hotkeys. The launcher registers its hotkeys exclusively: an app that registered one exclusively first keeps it (the launcher's alert names the setting), and one that registered it plainly stops getting it while the launcher runs. To test while another manager runs, rebind in `~/.config/launcher/config.toml` (such as `left_half = "ctrl+alt+shift+left"`); the app reloads it on save. Back up the user's file first and restore it after. Read window frames with `osascript -e 'tell application "System Events" to tell (first process whose frontmost is true) to get {position, size} of window 1'`.
+- An alert about the settings may show without focus, since macOS lets an app take focus only when the frontmost app gives it up; `scripts/press return` then reaches the frontmost app instead. Click its button (post a mouse click with `CGEvent`).
 - System Events (`osascript … key code`) sends keys to the frontmost app, never to this non-activating panel. Use `scripts/press`, which posts at the HID level like a keyboard.
 
 ## Check the result

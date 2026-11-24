@@ -1,0 +1,141 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Launcher settings",
+  "description": "~/.config/launcher/config.toml. `Launcher config init` writes every setting, commented out at its default.",
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {
+    "hotkey": {
+      "$ref": "#/$defs/hotkey",
+      "description": "Opens the launcher.",
+      "default": "alt+space"
+    },
+    "plugins": {
+      "description": "Which plugins answer queries.",
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "calculator": {
+          "type": "boolean",
+          "description": "Arithmetic, units and currencies.",
+          "default": true
+        },
+        "jwt": {
+          "type": "boolean",
+          "description": "Decodes a pasted JSON Web Token.",
+          "default": true
+        },
+        "apps": {
+          "type": "boolean",
+          "description": "Finds and opens apps.",
+          "default": true
+        }
+      }
+    },
+    "window": {
+      "description": "Hotkeys that lay out the frontmost window; \"none\" turns one off.",
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "left_half": {
+          "$ref": "#/$defs/windowHotkey",
+          "description": "Left half of the display.",
+          "default": "ctrl+alt+left"
+        },
+        "right_half": {
+          "$ref": "#/$defs/windowHotkey",
+          "description": "Right half of the display.",
+          "default": "ctrl+alt+right"
+        },
+        "top_half": {
+          "$ref": "#/$defs/windowHotkey",
+          "description": "Top half of the display.",
+          "default": "ctrl+alt+up"
+        },
+        "bottom_half": {
+          "$ref": "#/$defs/windowHotkey",
+          "description": "Bottom half of the display.",
+          "default": "ctrl+alt+down"
+        },
+        "top_left": {
+          "$ref": "#/$defs/windowHotkey",
+          "description": "Top left quarter.",
+          "default": "ctrl+alt+u"
+        },
+        "top_right": {
+          "$ref": "#/$defs/windowHotkey",
+          "description": "Top right quarter.",
+          "default": "ctrl+alt+i"
+        },
+        "bottom_left": {
+          "$ref": "#/$defs/windowHotkey",
+          "description": "Bottom left quarter.",
+          "default": "ctrl+alt+j"
+        },
+        "bottom_right": {
+          "$ref": "#/$defs/windowHotkey",
+          "description": "Bottom right quarter.",
+          "default": "ctrl+alt+k"
+        },
+        "first_third": {
+          "$ref": "#/$defs/windowHotkey",
+          "description": "Left third.",
+          "default": "ctrl+alt+d"
+        },
+        "centre_third": {
+          "$ref": "#/$defs/windowHotkey",
+          "description": "Centre third.",
+          "default": "ctrl+alt+f"
+        },
+        "last_third": {
+          "$ref": "#/$defs/windowHotkey",
+          "description": "Right third.",
+          "default": "ctrl+alt+g"
+        },
+        "maximise": {
+          "$ref": "#/$defs/windowHotkey",
+          "description": "The whole display, less the menu bar and Dock.",
+          "default": "ctrl+alt+return"
+        },
+        "centre": {
+          "$ref": "#/$defs/windowHotkey",
+          "description": "Centred, keeping the window's size.",
+          "default": "ctrl+alt+c"
+        },
+        "restore": {
+          "$ref": "#/$defs/windowHotkey",
+          "description": "Back to where the window was before its first layout or display move.",
+          "default": "ctrl+alt+delete"
+        },
+        "next_display": {
+          "$ref": "#/$defs/windowHotkey",
+          "description": "To the display on the right, keeping the window's layout.",
+          "default": "ctrl+alt+cmd+right"
+        },
+        "previous_display": {
+          "$ref": "#/$defs/windowHotkey",
+          "description": "To the display on the left, keeping the window's layout.",
+          "default": "ctrl+alt+cmd+left"
+        }
+      }
+    }
+  },
+  "$defs": {
+    "hotkey": {
+      "description": "Modifiers and a key joined by \"+\", such as \"ctrl+alt+left\". Modifiers: ctrl, alt (or opt), cmd and shift; each hotkey needs ctrl, alt or cmd. Keys: a letter, a digit, left, right, up, down, return, delete or space, named by their place on a US keyboard.",
+      "type": "string",
+      "pattern": "^((ctrl|alt|opt|cmd|shift)\\+)+(left|right|up|down|return|delete|space|[a-z0-9])$"
+    },
+    "windowHotkey": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/hotkey"
+        },
+        {
+          "const": "none",
+          "description": "No hotkey."
+        }
+      ]
+    }
+  }
+}

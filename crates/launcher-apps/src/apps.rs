@@ -5,7 +5,7 @@ use std::io;
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::sync::{Arc, Mutex, Weak};
-use std::thread;
+use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use launcher_core::{Action, Item, Plugin, ResultsChanged, config_directory};
@@ -59,8 +59,7 @@ impl Usage {
 pub struct Apps {
     index: Arc<Mutex<Vec<App>>>,
     usage: HashMap<PathBuf, Usage>,
-    // Writes run on one thread, in order, so a later save can't land before an earlier one.
-    saver: Option<Sender<String>>,
+    saver: Option<Saver>,
     // Watching stops when this drops, which also ends the rescan thread.
     _watcher: Option<Arc<Mutex<RecommendedWatcher>>>,
 }
@@ -92,17 +91,7 @@ impl Apps {
             move || keep_index(&index, &roots, &watcher, &receiver, &*changed)
         });
         let usage = frecency_path.as_deref().map(load_usage).unwrap_or_default();
-        let saver = frecency_path.map(|path| {
-            let (sender, receiver) = mpsc::channel::<String>();
-            thread::spawn(move || {
-                for contents in receiver {
-                    if let Err(error) = save(&path, &contents) {
-                        eprintln!("can't save {}: {error}", path.display());
-                    }
-                }
-            });
-            sender
-        });
+        let saver = frecency_path.map(Saver::start);
         Self {
             index,
             usage,
@@ -153,8 +142,53 @@ impl Plugin for Apps {
         {
             self.usage.remove(&weakest);
         }
-        if saver.send(serialize_usage(&self.usage)).is_err() {
+        saver.save(serialize_usage(&self.usage));
+    }
+}
+
+/// Writes frecency on its own thread, in order, so a later save can't land before an earlier
+/// one. Dropping it waits for the saves queued, so a plugin started next, as when settings turn
+/// apps off and on again, reads them; each is a small file.
+struct Saver {
+    sender: Sender<String>,
+    thread: Option<JoinHandle<()>>,
+}
+
+impl Saver {
+    fn start(path: PathBuf) -> Self {
+        let (sender, receiver) = mpsc::channel::<String>();
+        let thread = thread::spawn(move || {
+            while let Ok(contents) = receiver.recv() {
+                // Each save is the whole history, so only the newest queued one needs writing;
+                // a drop then waits for one write at most.
+                let contents = receiver.try_iter().last().unwrap_or(contents);
+                if let Err(error) = save(&path, &contents) {
+                    eprintln!("can't save {}: {error}", path.display());
+                }
+            }
+        });
+        Self {
+            sender,
+            thread: Some(thread),
+        }
+    }
+
+    fn save(&self, contents: String) {
+        if self.sender.send(contents).is_err() {
             eprintln!("the frecency writer stopped; not saving");
+        }
+    }
+}
+
+impl Drop for Saver {
+    fn drop(&mut self) {
+        // Swapping in an unconnected sender closes the channel, which ends the thread once it
+        // has written what's queued.
+        self.sender = mpsc::channel().0;
+        if let Some(thread) = self.thread.take()
+            && thread.join().is_err()
+        {
+            eprintln!("the frecency writer panicked");
         }
     }
 }
@@ -867,6 +901,22 @@ mod tests {
         plugin.ran(&Action::Open(safari.into()));
         assert!(plugin.usage.contains_key(safari));
         assert_eq!(plugin.usage.len(), MAX_REMEMBERED);
+        Ok(())
+    }
+
+    #[test]
+    fn a_restarted_plugin_sees_the_last_open_before_it() -> io::Result<()> {
+        let folder = tempfile::tempdir()?;
+        let path = folder.path().join("frecency");
+        let safari = PathBuf::from("/Applications/Safari.app");
+        // As when settings turn apps off and straight back on.
+        for opens in 1..=20 {
+            let mut plugin = Apps::watching(Vec::new(), Some(path.clone()), quiet());
+            plugin.ran(&Action::Open(safari.clone()));
+            drop(plugin);
+            let count = load_usage(&path).get(&safari).map(|usage| usage.count);
+            assert_eq!(count, Some(opens));
+        }
         Ok(())
     }
 

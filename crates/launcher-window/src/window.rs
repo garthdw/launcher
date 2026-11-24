@@ -53,6 +53,28 @@ pub enum WindowAction {
 }
 
 impl WindowAction {
+    /// As settings name it.
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::LeftHalf => "left_half",
+            Self::RightHalf => "right_half",
+            Self::TopHalf => "top_half",
+            Self::BottomHalf => "bottom_half",
+            Self::TopLeft => "top_left",
+            Self::TopRight => "top_right",
+            Self::BottomLeft => "bottom_left",
+            Self::BottomRight => "bottom_right",
+            Self::FirstThird => "first_third",
+            Self::CentreThird => "centre_third",
+            Self::LastThird => "last_third",
+            Self::Maximise => "maximise",
+            Self::Centre => "centre",
+            Self::Restore => "restore",
+            Self::NextDisplay => "next_display",
+            Self::PreviousDisplay => "previous_display",
+        }
+    }
+
     /// Where this action puts `window`, laid out on the display holding it; `None` for `Restore`,
     /// which has no frame of its own, for a display move with only one display, and without
     /// displays.
@@ -290,7 +312,8 @@ pub struct Binding {
 }
 
 /// Rectangle's defaults: ⌃⌥ with arrows for halves, U I J K for quarters, D F G for thirds, and
-/// ⌃⌥⌘ with arrows for the next and previous display.
+/// ⌃⌥⌘ with arrows for the next and previous display. Every action has one, so settings list the
+/// actions in this order.
 pub const DEFAULT_BINDINGS: &[Binding] = &[
     control_option(Key::Left, WindowAction::LeftHalf),
     control_option(Key::Right, WindowAction::RightHalf),
@@ -714,6 +737,7 @@ mod tests {
             for other in &DEFAULT_BINDINGS[index + 1..] {
                 assert_ne!(binding.hotkey, other.hotkey);
                 assert_ne!(binding.action, other.action);
+                assert_ne!(binding.action.name(), other.action.name());
             }
         }
     }
