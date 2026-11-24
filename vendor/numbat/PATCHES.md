@@ -36,3 +36,13 @@ truncates them again, whether the code succeeded or not. It refuses any statemen
 expression or procedure call with the new `ResolverError::Definition`, as a definition or import
 would outlive the call while referring to what it dropped. The resolver's files are a `SourceFiles`
 instead of codespan's `SimpleFiles`, which can't be truncated; it implements the same `Files` trait.
+
+## 4. `interpret_and_forget` copies nothing and suggests no names (`numbat/src/{lib.rs,typechecker/mod.rs}`)
+
+`interpret` clones the prefix transformer, typechecker and interpreter on every call, to restore
+them on error; profiling the launcher put those clones and their drops at about 45% of a
+keystroke. An expression leaves them as they were (only `ans` changes, replaced by the next
+expression before use), and patch 3 drops what it compiled, so `interpret_and_forget` runs the
+three stages directly, without on-demand currency loading. It also sets the typechecker's new
+`skip_suggestions`, since computing "did you mean" against every identifier for each unknown word
+was another 34%, for errors the caller doesn't show.

@@ -712,7 +712,9 @@ impl Context {
     /// Interprets `code` that defines nothing, such as an expression, then drops what it compiled
     /// and the source kept for diagnostics, so a context answering many queries stays the same
     /// size. Definitions and imports are refused: they would outlive the call, referring to
-    /// what it dropped. Its errors can't be shown with `print_diagnostic`.
+    /// what it dropped. As nothing is kept, nothing is copied to restore on error, which
+    /// `interpret` does on every call. Currencies aren't loaded on demand. Its errors suggest no
+    /// names and can't be shown with `print_diagnostic`.
     pub fn interpret_and_forget<'a>(
         &mut self,
         code: &'a str,
@@ -728,12 +730,10 @@ impl Context {
                     )
                 }) =>
             {
-                self.interpret_resolved(
-                    &mut InterpreterSettings::default(),
-                    statements,
-                    code,
-                    code_source,
-                )
+                self.typechecker.skip_suggestions = true;
+                let result = self.interpret_expressions(statements);
+                self.typechecker.skip_suggestions = false;
+                result
             }
             Ok(_) => Err(Box::new(NumbatError::ResolverError(
                 ResolverError::Definition,
@@ -742,6 +742,32 @@ impl Context {
         };
         self.truncate(kept);
         result
+    }
+
+    /// Statements that define nothing leave the transformer and typechecker as they were, apart
+    /// from the type of `ans`, which the next expression replaces before it's used.
+    fn interpret_expressions<'a>(
+        &mut self,
+        statements: Vec<ast::Statement<'a>>,
+    ) -> Result<(Vec<typed_ast::Statement<'a>>, InterpreterResult)> {
+        let statements = self
+            .prefix_transformer
+            .transform(statements)
+            .map_err(NumbatError::NameResolutionError)?;
+        let typed_statements = self
+            .typechecker
+            .check(&statements)
+            .map_err(|error| NumbatError::TypeCheckError(*error))?;
+        let result = self
+            .interpreter
+            .interpret_statements(
+                &mut InterpreterSettings::default(),
+                &typed_statements,
+                &self.prefix_transformer,
+                &self.typechecker,
+            )
+            .map_err(|error| NumbatError::RuntimeError(*error))?;
+        Ok((typed_statements, result))
     }
 
     fn lengths(&self) -> Lengths {
@@ -766,18 +792,7 @@ impl Context {
             .resolver
             .resolve(code, code_source.clone())
             .map_err(NumbatError::ResolverError)?;
-        self.interpret_resolved(settings, statements, code, code_source)
-    }
 
-    /// `code` and `code_source` are those `statements` were resolved from, interpreted again
-    /// after loading currencies on demand.
-    fn interpret_resolved<'a>(
-        &mut self,
-        settings: &mut InterpreterSettings,
-        statements: Vec<ast::Statement<'a>>,
-        code: &'a str,
-        code_source: CodeSource,
-    ) -> Result<(Vec<typed_ast::Statement<'a>>, InterpreterResult)> {
         let prefix_transformer_old = self.prefix_transformer.clone();
 
         let result = self
@@ -954,6 +969,48 @@ mod tests {
             };
             assert_eq!(value.to_string(), "42 m");
         }
+    }
+
+    #[test]
+    fn interpret_and_forget_answers_after_errors() {
+        let mut context = prelude();
+        for failing in ["3 m + 2 s", "1 / 0", "unknown_word", "2 +"] {
+            context
+                .interpret_and_forget(failing, CodeSource::Text)
+                .expect_err(failing);
+            let (_, result) = context
+                .interpret_and_forget("2 * 21 m", CodeSource::Text)
+                .expect(failing);
+            let InterpreterResult::Value(value) = result else {
+                panic!("no value after {failing}");
+            };
+            assert_eq!(value.to_string(), "42 m", "{failing}");
+        }
+    }
+
+    #[test]
+    fn interpret_and_forget_suggests_no_names() {
+        let mut context = prelude();
+        let error = context
+            .interpret_and_forget("metr", CodeSource::Text)
+            .expect_err("unknown");
+        assert!(
+            matches!(
+                *error,
+                NumbatError::TypeCheckError(TypeCheckError::UnknownIdentifier(_, _, None))
+            ),
+            "{error:?}"
+        );
+        let error = context
+            .interpret("metr", CodeSource::Text)
+            .expect_err("unknown");
+        assert!(
+            matches!(
+                *error,
+                NumbatError::TypeCheckError(TypeCheckError::UnknownIdentifier(_, _, Some(_)))
+            ),
+            "{error:?}"
+        );
     }
 
     #[test]
