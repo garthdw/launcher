@@ -24,3 +24,25 @@ So the app links one jiff, shared with its own crates, numbat depends on `jiff` 
 0.2. jiff 1.0 renamed `Zoned` to `ZonedDateTime` and `to_zoned` to `to_zoned_datetime`; nothing
 else needed changing. `js` still exists in 1.0 and only matters on wasm, so it stays. numbat's
 tests give the same results as before this patch.
+
+## 3. `Context::interpret_and_forget` (`numbat/src/{lib,vm,bytecode_interpreter,resolver,diagnostic}.rs`)
+
+Upstream keeps everything a `Context` compiles: each `interpret` appends its bytecode and spans to
+the VM's main chunk, its numbers to the constant table, and its source to the resolver's files.
+`add_constant` asserts there are at most 65,535 constants, so a context answering every keystroke
+panics after about 32,000 queries, slowing down and growing on the way, since the constants are
+cloned on every call. `interpret_and_forget` records the lengths of those tables, interprets, and
+truncates them again, whether the code succeeded or not. It refuses any statement other than an
+expression or procedure call with the new `ResolverError::Definition`, as a definition or import
+would outlive the call while referring to what it dropped. The resolver's files are a `SourceFiles`
+instead of codespan's `SimpleFiles`, which can't be truncated; it implements the same `Files` trait.
+
+## 4. `interpret_and_forget` copies nothing and suggests no names (`numbat/src/{lib.rs,typechecker/mod.rs}`)
+
+`interpret` clones the prefix transformer, typechecker and interpreter on every call, to restore
+them on error; profiling the launcher put those clones and their drops at about 45% of a
+keystroke. An expression leaves them as they were (only `ans` changes, replaced by the next
+expression before use), and patch 3 drops what it compiled, so `interpret_and_forget` runs the
+three stages directly, without on-demand currency loading. It also sets the typechecker's new
+`skip_suggestions`, since computing "did you mean" against every identifier for each unknown word
+was another 34%, for errors the caller doesn't show.

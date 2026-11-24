@@ -37,13 +37,7 @@ impl Place {
                     log!("no home folder, so exchange rates are cached in the temporary folder");
                     std::env::temp_dir()
                 });
-                match Calc::start(rates_directory, changed.clone()) {
-                    Ok(calc) => Some(Box::new(calc)),
-                    Err(error) => {
-                        log!("calculator unavailable: {error}");
-                        None
-                    }
-                }
+                Some(Box::new(Calc::start(rates_directory, changed.clone())))
             }
             Self::Jwt => Some(Box::new(Jwt)),
             Self::Apps => Some(Box::new(Apps::start(changed.clone()))),

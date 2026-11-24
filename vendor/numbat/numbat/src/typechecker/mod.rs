@@ -190,6 +190,10 @@ pub struct TypeChecker {
 
     name_generator: NameGenerator,
     constraints: ConstraintSet,
+
+    /// Leaves "did you mean" out of unknown identifier errors, as comparing the name with every
+    /// identifier costs more than checking the rest of a short expression.
+    pub(crate) skip_suggestions: bool,
 }
 
 struct ElaborationDefinitionArgs<'a, 'b> {
@@ -332,14 +336,18 @@ impl TypeChecker {
 
     fn identifier_type(&self, span: Span, name: &str) -> Result<TypeScheme> {
         Ok(self.env.get_identifier_type(name).ok_or_else(|| {
-            let suggestion = suggestion::did_you_mean(
-                self.env
-                    .iter_identifiers()
-                    .map(|k| k.as_str())
-                    .chain(["true", "false"]) // These are parsed as keywords, but can act like identifiers
-                    .chain(ffi::procedures().keys().map(|p| p.name())),
-                name,
-            );
+            let suggestion = if self.skip_suggestions {
+                None
+            } else {
+                suggestion::did_you_mean(
+                    self.env
+                        .iter_identifiers()
+                        .map(|k| k.as_str())
+                        .chain(["true", "false"]) // These are parsed as keywords, but can act like identifiers
+                        .chain(ffi::procedures().keys().map(|p| p.name())),
+                    name,
+                )
+            };
             TypeCheckError::UnknownIdentifier(span, name.into(), suggestion)
         })?)
     }

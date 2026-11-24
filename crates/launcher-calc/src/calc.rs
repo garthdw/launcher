@@ -1,7 +1,7 @@
 mod rates;
 
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, LazyLock, Mutex};
+use std::sync::{Arc, LazyLock, Mutex, Weak};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -27,11 +27,17 @@ const CALCULATION: u8 = 90;
 const CONSTANT: u8 = 80;
 
 pub struct Calc {
-    context: Context,
+    numbat: Numbat,
     rates: Rates,
-    /// The newest update not yet taken. One slot rather than a queue, so contexts don't pile up
-    /// while no query comes to take them.
-    pending: Arc<Mutex<Option<Update>>>,
+    pending: Arc<Mutex<Pending>>,
+}
+
+/// numbat's context, built in the background.
+enum Numbat {
+    Building,
+    Ready(Box<Context>),
+    /// The prelude didn't build, which only a broken numbat does.
+    Failed,
 }
 
 /// What the calculator has of exchange rates.
@@ -41,63 +47,61 @@ enum Rates {
     Loaded(Date),
 }
 
-/// From the thread that keeps exchange rates current.
-enum Update {
-    /// A context with currencies at the rates of the date.
-    Loaded(Box<Context>, Date),
+/// From the thread that keeps exchange rates current, not yet taken.
+#[derive(Default)]
+struct Pending {
+    /// The newest context, with currencies at the rates of the date if any. Only the newest, so
+    /// contexts don't pile up while no query comes to take them.
+    context: Option<(Box<Context>, Option<Date>)>,
     /// No rates could be fetched or found in the cache.
-    Unavailable,
+    rates_unavailable: bool,
+    /// The first context didn't build.
+    numbat_failed: bool,
 }
 
 impl Calc {
     /// A calculator without exchange rates: currencies say rates are loading.
     pub fn new() -> Result<Self, Box<NumbatError>> {
         Ok(Self {
-            context: context(false)?,
+            numbat: Numbat::Ready(Box::new(context(false)?)),
             rates: Rates::Loading,
             pending: Arc::default(),
         })
     }
 
-    /// Loads exchange rates in the background, from the cache in `directory` or the ECB, and
-    /// keeps them a day old at most, calling `changed` whenever currencies change.
-    pub fn start(directory: PathBuf, changed: ResultsChanged) -> Result<Self, Box<NumbatError>> {
-        // Rates under a day old load now, so launch builds one context rather than two.
-        let calc = match rates::fresh(&directory) {
-            Some((xml, date)) => {
-                Context::set_exchange_rates(&xml);
-                Self {
-                    context: context(true)?,
-                    rates: Rates::Loaded(date),
-                    pending: Arc::default(),
-                }
-            }
-            None => Self::new()?,
-        };
-        let loaded = match calc.rates {
-            Rates::Loaded(date) => Some(date),
-            Rates::Loading | Rates::Unavailable => None,
+    /// Builds the calculator in the background, as numbat's prelude takes a good part of
+    /// launch, then loads exchange rates, from the cache in `directory` or the ECB, and keeps
+    /// them a day old at most. Calls `changed` whenever the answers change.
+    pub fn start(directory: PathBuf, changed: ResultsChanged) -> Self {
+        let calc = Self {
+            numbat: Numbat::Building,
+            rates: Rates::Loading,
+            pending: Arc::default(),
         };
         let pending = Arc::downgrade(&calc.pending);
-        thread::spawn(move || keep_rates_current(&directory, loaded, &pending, &*changed));
-        Ok(calc)
+        thread::spawn(move || keep_rates_current(&directory, &pending, &*changed));
+        calc
     }
 
     fn take_update(&mut self) {
-        let update = match self.pending.lock() {
-            Ok(mut pending) => pending.take(),
+        let pending = match self.pending.lock() {
+            Ok(mut pending) => std::mem::take(&mut *pending),
             Err(_) => {
                 log!("the exchange rates thread panicked; keeping the rates there are");
-                None
+                return;
             }
         };
-        match update {
-            Some(Update::Loaded(context, date)) => {
-                self.context = *context;
+        if pending.rates_unavailable {
+            self.rates = Rates::Unavailable;
+        }
+        if pending.numbat_failed {
+            self.numbat = Numbat::Failed;
+        }
+        if let Some((context, date)) = pending.context {
+            self.numbat = Numbat::Ready(context);
+            if let Some(date) = date {
                 self.rates = Rates::Loaded(date);
             }
-            Some(Update::Unavailable) => self.rates = Rates::Unavailable,
-            None => {}
         }
     }
 
@@ -108,14 +112,19 @@ impl Calc {
             Rates::Unavailable => "Exchange rates unavailable",
             Rates::Loaded(_) => return None,
         };
-        mentions_currency(query).then(|| Item {
-            title: title.into(),
-            subtitle: String::new(),
-            icon: Icon::Calculator,
-            action: Action::Nothing,
-            detail: Vec::new(),
-            relevance: CALCULATION,
-        })
+        mentions_currency(query).then(|| notice(title))
+    }
+}
+
+/// A muted row saying why a calculation has no answer.
+fn notice(title: &str) -> Item {
+    Item {
+        title: title.into(),
+        subtitle: String::new(),
+        icon: Icon::Calculator,
+        action: Action::Nothing,
+        detail: Vec::new(),
+        relevance: CALCULATION,
     }
 }
 
@@ -135,22 +144,49 @@ fn context(currencies: bool) -> Result<Context, Box<NumbatError>> {
     Ok(context)
 }
 
-/// Leaves `update` for the calculator to take, replacing any it hasn't.
-fn publish(pending: &Mutex<Option<Update>>, update: Update) {
+/// Leaves `update` in `pending` for the calculator to take.
+fn publish(pending: &Mutex<Pending>, update: impl FnOnce(&mut Pending)) {
     match pending.lock() {
-        Ok(mut pending) => *pending = Some(update),
-        Err(_) => log!("the calculator panicked; not updating exchange rates"),
+        Ok(mut pending) => update(&mut pending),
+        Err(_) => log!("the calculator panicked; not updating it"),
     }
 }
 
-/// Runs until the calculator, which holds `pending`, is gone. `loaded` is the date of the rates
-/// it started with, if any.
-fn keep_rates_current(
-    directory: &Path,
-    mut loaded: Option<Date>,
-    pending: &std::sync::Weak<Mutex<Option<Update>>>,
+/// Publishes `update` and says the answers changed; false once the calculator is gone.
+fn deliver(
+    pending: &Weak<Mutex<Pending>>,
     changed: &dyn Fn(),
-) {
+    update: impl FnOnce(&mut Pending),
+) -> bool {
+    let Some(pending) = pending.upgrade() else {
+        return false;
+    };
+    publish(&pending, update);
+    changed();
+    true
+}
+
+/// Builds the first context, then runs until the calculator, which holds `pending`, is gone.
+fn keep_rates_current(directory: &Path, pending: &Weak<Mutex<Pending>>, changed: &dyn Fn()) {
+    // Rates under a day old load with the prelude, so launch builds one context rather than two.
+    let mut loaded = rates::fresh(directory).map(|(xml, date)| {
+        Context::set_exchange_rates(&xml);
+        date
+    });
+    match context(loaded.is_some()) {
+        Ok(context) => {
+            if !deliver(pending, changed, |pending| {
+                pending.context = Some((Box::new(context), loaded));
+            }) {
+                return;
+            }
+        }
+        Err(error) => {
+            log!("calculator unavailable: {error}");
+            deliver(pending, changed, |pending| pending.numbat_failed = true);
+            return;
+        }
+    }
     let mut told_unavailable = false;
     loop {
         // Before fetching, and again before building a context, as fetching takes a while: the
@@ -162,7 +198,7 @@ fn keep_rates_current(
         if pending.strong_count() == 0 {
             return;
         }
-        let update = match current {
+        let delivered = match current {
             Some((xml, date)) if loaded != Some(date) => {
                 let started = Instant::now();
                 Context::set_exchange_rates(&xml);
@@ -173,27 +209,25 @@ fn keep_rates_current(
                             started.elapsed().as_millis()
                         );
                         loaded = Some(date);
-                        Some(Update::Loaded(Box::new(context), date))
+                        deliver(pending, changed, |pending| {
+                            pending.context = Some((Box::new(context), loaded));
+                        })
                     }
                     Err(error) => {
                         log!("could not load exchange rates: {error}");
-                        None
+                        true
                     }
                 }
             }
             // Only before any loaded: older rates beat none.
             None if loaded.is_none() && !told_unavailable => {
                 told_unavailable = true;
-                Some(Update::Unavailable)
+                deliver(pending, changed, |pending| pending.rates_unavailable = true)
             }
-            _ => None,
+            _ => true,
         };
-        if let Some(update) = update {
-            let Some(pending) = pending.upgrade() else {
-                return;
-            };
-            publish(&pending, update);
-            changed();
+        if !delivered {
+            return;
         }
         thread::sleep(if loaded.is_some() {
             RATES_CHECK
@@ -275,24 +309,24 @@ impl Plugin for Calc {
         if !has_number && query.chars().nth(1).is_none() {
             return Vec::new();
         }
-        // Imports and definitions stay in the context for good: `let x = 3` would leave `x` in
-        // later answers, before rates load the currency module would keep NaN rates, and
-        // `use all` would hold every module in memory. `ans` and `_` name the last result,
-        // which every keystroke replaces, so they'd answer with a half-typed query's.
+        // numbat refuses imports, but only after `use all` has parsed every module. `ans` and `_`
+        // name the last result, which every keystroke replaces, so they'd answer with a
+        // half-typed query's.
         if query
             .split(|c: char| !c.is_alphanumeric() && c != '_')
-            .any(|word| {
-                matches!(
-                    word,
-                    "use" | "let" | "fn" | "unit" | "dimension" | "struct" | "ans" | "_"
-                )
-            })
+            .any(|word| matches!(word, "use" | "ans" | "_"))
         {
             return Vec::new();
         }
+        let context = match &mut self.numbat {
+            Numbat::Ready(context) => context,
+            Numbat::Building => return Vec::new(),
+            Numbat::Failed if has_number => return vec![notice("Calculator unavailable")],
+            Numbat::Failed => return Vec::new(),
+        };
         let rewritten = x_as_times(query);
         let Ok((statements, InterpreterResult::Value(value))) =
-            self.context.interpret(&rewritten, CodeSource::Text)
+            context.interpret_and_forget(&rewritten, CodeSource::Text)
         else {
             if !has_number {
                 return Vec::new();
@@ -567,7 +601,7 @@ mod tests {
             titles("100 parsecs + 2 usd2").is_empty(),
             "nor is every error one"
         );
-        publish(&calc.pending, Update::Unavailable);
+        publish(&calc.pending, |pending| pending.rates_unavailable = true);
         assert_eq!(
             shown(&mut calc, "100 USD to EUR"),
             [("Exchange rates unavailable".into(), String::new())]
@@ -576,11 +610,21 @@ mod tests {
     }
 
     #[test]
-    fn fresh_cached_rates_load_at_start() -> Result<(), Box<dyn std::error::Error>> {
+    fn fresh_cached_rates_load_in_the_background() -> Result<(), Box<dyn std::error::Error>> {
         let _turn = RATES.lock();
         let cache = tempfile::tempdir()?;
         std::fs::write(cache.path().join(RATES_FILE), ECB_XML)?;
-        let mut calc = Calc::start(cache.path().to_path_buf(), Arc::new(|| {}))?;
+        let (built, wait) = std::sync::mpsc::channel();
+        let built = Mutex::new(built);
+        let mut calc = Calc::start(
+            cache.path().to_path_buf(),
+            Arc::new(move || {
+                if let Ok(built) = built.lock() {
+                    built.send(()).ok();
+                }
+            }),
+        );
+        wait.recv_timeout(Duration::from_secs(10))?;
         assert_eq!(
             shown(&mut calc, "100 USD to EUR"),
             [("80 €".into(), "ECB rates of 21 Nov".into())]
@@ -594,15 +638,51 @@ mod tests {
     }
 
     #[test]
+    fn a_calculator_that_failed_to_build_says_so() {
+        let mut calc = Calc {
+            numbat: Numbat::Building,
+            rates: Rates::Loading,
+            pending: Arc::default(),
+        };
+        publish(&calc.pending, |pending| pending.numbat_failed = true);
+        assert_eq!(
+            shown(&mut calc, "2 + 2"),
+            [("Calculator unavailable".into(), String::new())]
+        );
+        assert_eq!(shown(&mut calc, "pi"), [], "words may be app names");
+    }
+
+    #[test]
+    fn unavailable_rates_keep_a_context_not_yet_taken() -> Result<(), Box<NumbatError>> {
+        let mut calc = Calc {
+            numbat: Numbat::Building,
+            rates: Rates::Loading,
+            pending: Arc::default(),
+        };
+        assert_eq!(shown(&mut calc, "2 m"), [], "no context yet");
+        let first = context(false)?;
+        publish(&calc.pending, |pending| {
+            pending.context = Some((Box::new(first), None));
+        });
+        publish(&calc.pending, |pending| pending.rates_unavailable = true);
+        assert_eq!(shown(&mut calc, "2 m"), [("2 m".into(), String::new())]);
+        assert_eq!(
+            shown(&mut calc, "100 USD to EUR"),
+            [("Exchange rates unavailable".into(), String::new())]
+        );
+        Ok(())
+    }
+
+    #[test]
     fn replaced_rates_reach_a_new_context() -> Result<(), Box<dyn std::error::Error>> {
         let _turn = RATES.lock();
         let date = jiff::civil::date(2026, 11, 21);
         Context::set_exchange_rates(ECB_XML);
         let mut calc = Calc::new()?;
-        publish(
-            &calc.pending,
-            Update::Loaded(Box::new(context(true)?), date),
-        );
+        let current = context(true)?;
+        publish(&calc.pending, |pending| {
+            pending.context = Some((Box::new(current), Some(date)));
+        });
         assert_eq!(
             shown(&mut calc, "100 USD to EUR"),
             [("80 €".into(), "ECB rates of 21 Nov".into())]
@@ -614,11 +694,13 @@ mod tests {
             "a context keeps the rates it loaded"
         );
         let outdated = context(false)?;
-        publish(&calc.pending, Update::Loaded(Box::new(outdated), date));
-        publish(
-            &calc.pending,
-            Update::Loaded(Box::new(context(true)?), date),
-        );
+        publish(&calc.pending, |pending| {
+            pending.context = Some((Box::new(outdated), Some(date)));
+        });
+        let newest = context(true)?;
+        publish(&calc.pending, |pending| {
+            pending.context = Some((Box::new(newest), Some(date)));
+        });
         assert_eq!(
             shown(&mut calc, "100 USD to EUR"),
             [("50 €".into(), "ECB rates of 21 Nov".into())],

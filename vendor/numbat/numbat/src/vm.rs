@@ -293,6 +293,18 @@ pub struct FfiCallArgs {
     pub return_type: Option<TypeScheme>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub(crate) struct VmLengths {
+    functions: usize,
+    main: usize,
+    constants: usize,
+    struct_infos: usize,
+    prefixes: usize,
+    strings: usize,
+    unit_information: usize,
+    ffi_call_args: usize,
+}
+
 #[derive(Clone)]
 pub struct Vm {
     /// The actual code and spans of the program, structured by function name. The code
@@ -441,6 +453,37 @@ impl Vm {
         let (bytecode, _spans) = self.current_chunk_mut();
         bytecode[offset] = (arg & 0xff) as u8;
         bytecode[offset + 1] = ((arg >> 8) & 0xff) as u8;
+    }
+
+    pub(crate) fn lengths(&self) -> VmLengths {
+        VmLengths {
+            functions: self.bytecode.len(),
+            main: self.bytecode[0].1.len(),
+            constants: self.constants.len(),
+            struct_infos: self.struct_infos.len(),
+            prefixes: self.prefixes.len(),
+            strings: self.strings.len(),
+            unit_information: self.unit_information.len(),
+            ffi_call_args: self.ffi_call_args.len(),
+        }
+    }
+
+    /// Drops what was compiled since `lengths` were taken, and continues from there.
+    pub(crate) fn truncate(&mut self, lengths: VmLengths) {
+        self.bytecode.truncate(lengths.functions);
+        let (_, code, spans) = &mut self.bytecode[0];
+        code.truncate(lengths.main);
+        spans.truncate(lengths.main);
+        self.current_chunk_index = 0;
+        self.constants.truncate(lengths.constants);
+        self.struct_infos.truncate(lengths.struct_infos);
+        self.prefixes.truncate(lengths.prefixes);
+        self.strings.truncate(lengths.strings);
+        self.unit_information.truncate(lengths.unit_information);
+        self.ffi_call_args.truncate(lengths.ffi_call_args);
+        self.frames.clear();
+        self.frames.push(CallFrame::root());
+        self.frames[0].ip = lengths.main;
     }
 
     pub fn add_constant(&mut self, constant: Constant) -> u16 {

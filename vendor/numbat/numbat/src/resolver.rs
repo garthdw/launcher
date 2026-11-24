@@ -4,7 +4,7 @@ use crate::{
     ParseError, ast::Statement, module_importer::ModuleImporter, parser::parse, span::Span,
 };
 
-use codespan_reporting::files::SimpleFiles;
+use codespan_reporting::files::{Error as FilesError, Files, SimpleFile};
 use compact_str::{CompactString, ToCompactString};
 use thiserror::Error;
 
@@ -43,14 +43,75 @@ pub enum ResolverError {
 
     #[error("{}", .0.iter().map(|e| e.to_string()).collect::<Vec<_>>().join("\n"))]
     ParseErrors(Vec<ParseError>),
+
+    #[error(
+        "Definitions and imports can't be forgotten, so only expressions are interpreted here."
+    )]
+    Definition,
 }
 
 type Result<T> = std::result::Result<T, ResolverError>;
 
+/// codespan's `SimpleFiles`, which can't be truncated.
+#[derive(Clone, Default)]
+pub struct SourceFiles(Vec<SimpleFile<String, String>>);
+
+impl SourceFiles {
+    fn add(&mut self, name: String, source: String) -> usize {
+        self.0.push(SimpleFile::new(name, source));
+        self.0.len() - 1
+    }
+
+    pub fn get(
+        &self,
+        file_id: usize,
+    ) -> std::result::Result<&SimpleFile<String, String>, FilesError> {
+        self.0.get(file_id).ok_or(FilesError::FileMissing)
+    }
+}
+
+impl<'a> Files<'a> for SourceFiles {
+    type FileId = usize;
+    type Name = String;
+    type Source = &'a str;
+
+    fn name(&self, file_id: usize) -> std::result::Result<String, FilesError> {
+        Ok(self.get(file_id)?.name().clone())
+    }
+
+    fn source(&self, file_id: usize) -> std::result::Result<&str, FilesError> {
+        Ok(self.get(file_id)?.source())
+    }
+
+    fn line_index(
+        &self,
+        file_id: usize,
+        byte_index: usize,
+    ) -> std::result::Result<usize, FilesError> {
+        self.get(file_id)?.line_index((), byte_index)
+    }
+
+    fn line_range(
+        &self,
+        file_id: usize,
+        line_index: usize,
+    ) -> std::result::Result<std::ops::Range<usize>, FilesError> {
+        self.get(file_id)?.line_range((), line_index)
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub(crate) struct ResolverLengths {
+    files: usize,
+    text_code_source_count: usize,
+    internal_code_source_count: usize,
+    imported_modules: usize,
+}
+
 #[derive(Clone)]
 pub struct Resolver {
     importer: Arc<dyn ModuleImporter>,
-    pub files: SimpleFiles<String, String>,
+    pub files: SourceFiles,
     text_code_source_count: usize,
     internal_code_source_count: usize,
     pub imported_modules: Vec<ModulePath>,
@@ -61,7 +122,7 @@ impl Resolver {
     pub(crate) fn new(importer: impl ModuleImporter + 'static) -> Self {
         Self {
             importer: Arc::new(importer),
-            files: SimpleFiles::new(),
+            files: SourceFiles::default(),
             text_code_source_count: 0,
             internal_code_source_count: 0,
             imported_modules: vec![],
@@ -94,6 +155,26 @@ impl Resolver {
         self.codesources.insert(id, code_source);
 
         id
+    }
+
+    pub(crate) fn lengths(&self) -> ResolverLengths {
+        ResolverLengths {
+            files: self.files.0.len(),
+            text_code_source_count: self.text_code_source_count,
+            internal_code_source_count: self.internal_code_source_count,
+            imported_modules: self.imported_modules.len(),
+        }
+    }
+
+    /// Forgets the code sources and imports added since `lengths` were taken.
+    pub(crate) fn truncate(&mut self, lengths: ResolverLengths) {
+        for id in lengths.files..self.files.0.len() {
+            self.codesources.remove(&id);
+        }
+        self.files.0.truncate(lengths.files);
+        self.text_code_source_count = lengths.text_code_source_count;
+        self.internal_code_source_count = lengths.internal_code_source_count;
+        self.imported_modules.truncate(lengths.imported_modules);
     }
 
     pub fn get_code_source(&self, id: usize) -> CodeSource {
