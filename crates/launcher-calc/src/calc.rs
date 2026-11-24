@@ -145,7 +145,16 @@ fn keep_rates_current(
 ) {
     let mut told_unavailable = false;
     loop {
-        let update = match rates::current(directory) {
+        // Before fetching, and again before building a context, as fetching takes a while: the
+        // calculator may have gone, as when settings turn it off.
+        if pending.strong_count() == 0 {
+            return;
+        }
+        let current = rates::current(directory);
+        if pending.strong_count() == 0 {
+            return;
+        }
+        let update = match current {
             Some((xml, date)) if loaded != Some(date) => {
                 let started = Instant::now();
                 Context::set_exchange_rates(&xml);
