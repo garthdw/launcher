@@ -20,6 +20,8 @@ pub struct Section {
 pub enum Action {
     Copy(String),
     Open(PathBuf),
+    /// The item only says something, such as that work is under way; the shell draws it muted.
+    Nothing,
 }
 
 /// Where settings and state live: `~/.config/launcher` on every platform.

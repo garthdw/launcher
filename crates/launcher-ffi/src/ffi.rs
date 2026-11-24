@@ -36,6 +36,7 @@ impl From<launcher_core::Section> for Section {
 pub enum Action {
     Copy { text: String },
     Open { path: String },
+    Nothing,
 }
 
 /// Which plugin an item came from, and its action as the plugin made it: paths stay `PathBuf`s
@@ -53,6 +54,7 @@ impl From<Found> for Item {
             launcher_core::Action::Open(path) => Action::Open {
                 path: path.to_string_lossy().into_owned(),
             },
+            launcher_core::Action::Nothing => Action::Nothing,
         };
         Self {
             title: found.item.title,
@@ -109,8 +111,35 @@ impl Launcher {
 #[cfg(test)]
 mod tests {
     use launcher_calc::Calc;
+    use launcher_core::Plugin;
 
     use super::*;
+
+    struct Pending;
+
+    impl Plugin for Pending {
+        fn query(&mut self, _query: &str) -> Vec<launcher_core::Item> {
+            vec![launcher_core::Item {
+                title: "Loading…".into(),
+                subtitle: String::new(),
+                action: launcher_core::Action::Nothing,
+                detail: Vec::new(),
+            }]
+        }
+    }
+
+    #[test]
+    fn query_converts_items_without_an_action() {
+        let launcher = Launcher::with(Plugins::new(vec![Box::new(Pending)]));
+        let items = launcher.query("anything".into());
+        assert!(matches!(
+            items.as_slice(),
+            [Item {
+                action: Action::Nothing,
+                ..
+            }]
+        ));
+    }
 
     #[test]
     fn query_converts_items() -> Result<(), Box<dyn std::error::Error>> {

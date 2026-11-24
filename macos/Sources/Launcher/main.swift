@@ -347,9 +347,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSTextFieldDelegate, N
             }
             let title = titleLabel(item.title)
             // The shell names its own keys, so plugins' subtitles say only what an item is.
-            let keys = switch item.action {
-            case .copy: "↵ copies"
-            case .open: "↵ opens"
+            var keys = ""
+            switch item.action {
+            case .copy: keys = "↵ copies"
+            case .open: keys = "↵ opens"
+            case .nothing: title.textColor = .secondaryLabelColor
             }
             let subtitle = hintLabel(
                 ([item.subtitle, keys] + (item.detail.isEmpty ? [] : ["→ details"]))
@@ -415,7 +417,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSTextFieldDelegate, N
     }
 
     func choose(_ index: Int) {
-        if index < items.count { run(items[index]) }
+        if index < items.count {
+            if case .nothing = items[index].action { return }
+            run(items[index])
+        }
         field.stringValue = ""
         refresh()
         hide()
@@ -447,6 +452,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSTextFieldDelegate, N
                     previous?.activate()
                 }
             }
+        case .nothing:
+            break
         }
     }
 
