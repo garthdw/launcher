@@ -19,7 +19,8 @@ jiff = "0.2.46"
 notify = "8.2.2"
 objc2-core-foundation = { version = "0.3.2", default-features = false, features = ["std", "CFError", "CFString", "CFURL"] }
 numbat = { version = "1.24.0", default-features = false, features = ["fetch-exchangerates"] }
-serde_json = "1.0.154"
+# `preserve_order`, so a decoded JWT shows its claims in the token's order.
+serde_json = { version = "1.0.154", features = ["preserve_order"] }
 tempfile = "3.27.0"
 uniffi = "0.32.2"
 

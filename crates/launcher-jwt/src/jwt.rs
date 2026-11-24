@@ -1,7 +1,7 @@
 use base64::Engine;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
-use jiff::Timestamp;
 use jiff::tz::TimeZone;
+use jiff::{SignedDuration, Timestamp};
 use launcher_core::{Action, Item, Plugin, Section};
 use serde_json::{Map, Value};
 
@@ -19,9 +19,13 @@ impl Plugin for Jwt {
     }
 }
 
-/// A token's header and payload, with or without a `Bearer` prefix.
+/// A token's header and payload. It may come as a copied header line, `Authorization: Bearer …`.
 fn claims(query: &str) -> Option<(Map<String, Value>, Map<String, Value>)> {
-    let token = match query.split_once(' ') {
+    let query = match query.split_at_checked("authorization:".len()) {
+        Some((name, value)) if name.eq_ignore_ascii_case("authorization:") => value.trim_start(),
+        _ => query,
+    };
+    let token = match query.split_once(char::is_whitespace) {
         Some((scheme, token)) if scheme.eq_ignore_ascii_case("bearer") => token.trim(),
         _ => query,
     };
@@ -31,12 +35,14 @@ fn claims(query: &str) -> Option<(Map<String, Value>, Map<String, Value>)> {
     else {
         return None;
     };
-    // `eyJ` is `{"` encoded, so anything else can't be a token and is rejected before decoding.
-    if !header.starts_with("eyJ")
-        || !payload.starts_with("eyJ")
-        || !signature
-            .bytes()
+    // Rejects most other queries before decoding anything.
+    let base64url = |part: &str| {
+        part.bytes()
             .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-' || byte == b'_')
+    };
+    if header.is_empty()
+        || payload.is_empty()
+        || ![header, payload, signature].into_iter().all(base64url)
     {
         return None;
     }
@@ -50,38 +56,53 @@ fn item(
     now: Timestamp,
     zone: &TimeZone,
 ) -> Item {
-    let name = payload
-        .get("sub")
-        .and_then(Value::as_str)
-        .or_else(|| header.get("alg").and_then(Value::as_str))
-        .unwrap_or("JWT");
+    let name = match payload.get("sub") {
+        Some(Value::String(subject)) if !subject.is_empty() => subject.clone(),
+        Some(Value::Number(subject)) => subject.to_string(),
+        _ => header
+            .get("alg")
+            .and_then(Value::as_str)
+            .unwrap_or("JWT")
+            .to_owned(),
+    };
+    // `None` when the claim is absent; its raw JSON when it isn't seconds since the epoch, as
+    // when an issuer wrongly writes milliseconds.
     let time = |claim| {
-        payload
-            .get(claim)
-            .and_then(Value::as_f64)
-            .and_then(|seconds| Timestamp::from_second(seconds as i64).ok())
+        let value = payload.get(claim)?;
+        Some(
+            value
+                .as_f64()
+                .and_then(|seconds| SignedDuration::try_from_secs_f64(seconds).ok())
+                .and_then(|since_epoch| Timestamp::from_duration(since_epoch).ok())
+                .ok_or_else(|| value.to_string()),
+        )
     };
-    // Seconds from the claim's time to now: negative while it's still ahead.
-    let elapsed = |time: Timestamp| now.duration_since(time).as_secs();
-    let status = match (time("nbf").map(elapsed), time("exp").map(elapsed)) {
-        (Some(elapsed), _) if elapsed < 0 => format!("not valid for {}", span(-elapsed)),
-        (_, Some(elapsed)) if elapsed >= 0 => format!("expired {} ago", span(elapsed)),
-        (_, Some(elapsed)) => format!("valid for {}", span(-elapsed)),
-        _ => "no expiry".into(),
+    let status = match (time("exp"), time("nbf")) {
+        (Some(Ok(exp)), _) if exp <= now => {
+            format!("expired {} ago", span(now.duration_since(exp)))
+        }
+        (_, Some(Ok(nbf))) if nbf > now => {
+            format!("not valid for {}", span(nbf.duration_since(now)))
+        }
+        (Some(Ok(exp)), _) => format!("valid for {}", span(exp.duration_since(now))),
+        (Some(Err(_)), _) => "unreadable expiry".into(),
+        (None, _) => "no expiry".into(),
     };
-    let title = format!("{name} · {status}");
     let times: Vec<String> = ["exp", "iat", "nbf"]
         .into_iter()
         .filter_map(|claim| {
-            let time = time(claim)?;
-            let elapsed = elapsed(time);
-            let relative = if elapsed >= 0 {
-                format!("{} ago", span(elapsed))
-            } else {
-                format!("in {}", span(-elapsed))
-            };
-            let local = time.to_zoned(zone.clone()).strftime("%Y-%m-%d %H:%M:%S %Z");
-            Some(format!("{claim}  {local}  ({relative})"))
+            Some(match time(claim)? {
+                Ok(time) => {
+                    let relative = if time <= now {
+                        format!("{} ago", span(now.duration_since(time)))
+                    } else {
+                        format!("in {}", span(time.duration_since(now)))
+                    };
+                    let local = time.to_zoned(zone.clone()).strftime("%Y-%m-%d %H:%M:%S %Z");
+                    format!("{claim}  {local}  ({relative})")
+                }
+                Err(raw) => format!("{claim}  {raw}  (unreadable)"),
+            })
         })
         .collect();
 
@@ -103,7 +124,7 @@ fn item(
         });
     }
     Item {
-        title,
+        title: format!("{name} · {status}"),
         subtitle: "JWT".into(),
         action: Action::Copy(payload),
         detail,
@@ -111,7 +132,8 @@ fn item(
 }
 
 /// A duration in its largest whole unit, as in "3 h" or "12 min".
-fn span(seconds: i64) -> String {
+fn span(duration: SignedDuration) -> String {
+    let seconds = duration.as_secs();
     if seconds < 60 {
         format!("{seconds} s")
     } else if seconds < 3_600 {
@@ -155,7 +177,7 @@ mod tests {
             panic!("{token} didn't decode");
         };
         assert_eq!(item.title, "ada · valid for 12 min");
-        let payload = "{\n  \"exp\": 1800000720,\n  \"iat\": 1799996400,\n  \"sub\": \"ada\"\n}";
+        let payload = "{\n  \"sub\": \"ada\",\n  \"iat\": 1799996400,\n  \"exp\": 1800000720\n}";
         assert_eq!(item.action, Action::Copy(payload.into()));
         assert_eq!(
             item.detail
@@ -202,7 +224,85 @@ mod tests {
         let token = token(json!({"alg": "HS256"}), json!({"sub": "ada"}));
         assert_eq!(decoded(&format!("Bearer {token}")), decoded(&token));
         assert_eq!(decoded(&format!("bearer  {token}")), decoded(&token));
+        assert_eq!(decoded(&format!("Bearer\t{token}")), decoded(&token));
+        assert_eq!(
+            decoded(&format!("Authorization: Bearer {token}")),
+            decoded(&token)
+        );
         assert!(decoded(&token).is_some());
+    }
+
+    #[test]
+    fn json_that_does_not_encode_to_eyj() {
+        // `{"$` encodes to `eyIk` and `{ "` to `eyAi`, not the usual `eyJ`.
+        let header = URL_SAFE_NO_PAD.encode(r#"{"$alg":"HS256"}"#);
+        let payload = URL_SAFE_NO_PAD.encode(r#"{ "sub": "ada"}"#);
+        assert_eq!(
+            decoded(&format!("{header}.{payload}.sig")).map(|item| item.title),
+            Some("ada · no expiry".into())
+        );
+    }
+
+    #[test]
+    fn unreadable_expiry_is_not_no_expiry() {
+        let Some(item) = decoded(&token(json!({"alg": "HS256"}), json!({"exp": NOW * 1_000})))
+        else {
+            panic!("didn't decode");
+        };
+        assert_eq!(item.title, "HS256 · unreadable expiry");
+        assert_eq!(
+            item.detail.last().map(|section| section.text.as_str()),
+            Some("exp  1800000000000  (unreadable)")
+        );
+        assert_eq!(
+            title(json!({"alg": "HS256"}), json!({"exp": "soon"})),
+            Some("HS256 · unreadable expiry".into())
+        );
+    }
+
+    #[test]
+    fn expiry_outranks_not_before() {
+        assert_eq!(
+            title(
+                json!({"alg": "HS256"}),
+                json!({"nbf": NOW + 300, "exp": NOW - 60})
+            ),
+            Some("HS256 · expired 1 min ago".into())
+        );
+    }
+
+    #[test]
+    fn expiry_within_the_last_second_is_still_valid() {
+        assert_eq!(
+            title(json!({"alg": "HS256"}), json!({"exp": NOW as f64 + 0.4})),
+            Some("HS256 · valid for 0 s".into())
+        );
+    }
+
+    #[test]
+    fn subject_names() {
+        assert_eq!(
+            title(json!({"alg": "HS256"}), json!({"sub": 12345})),
+            Some("12345 · no expiry".into())
+        );
+        assert_eq!(
+            title(json!({"alg": "HS256"}), json!({"sub": ""})),
+            Some("HS256 · no expiry".into())
+        );
+    }
+
+    #[test]
+    fn payload_keeps_the_token_order() {
+        let Some(item) = decoded(&token(
+            json!({"alg": "HS256"}),
+            json!({"sub": "ada", "aud": "launcher"}),
+        )) else {
+            panic!("didn't decode");
+        };
+        assert_eq!(
+            item.action,
+            Action::Copy("{\n  \"sub\": \"ada\",\n  \"aud\": \"launcher\"\n}".into())
+        );
     }
 
     #[test]
