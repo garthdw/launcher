@@ -137,7 +137,8 @@ impl Plugin for Apps {
         let usage = self.usage.entry(path.to_path_buf()).or_default();
         usage.count = usage.count.saturating_add(1);
         usage.last_opened = now;
-        if self.usage.len() > MAX_REMEMBERED
+        // A loop: a loaded history can already be over the cap.
+        while self.usage.len() > MAX_REMEMBERED
             && let Some(weakest) = self
                 .usage
                 .iter()
@@ -195,8 +196,10 @@ fn keep_index(
                 Err(_) => eprintln!("the app folder watcher is poisoned; not watching new folders"),
             }
         }
+        // Scan before locking: `query` takes the same lock on every keystroke.
+        let apps = scan(roots);
         match index.lock() {
-            Ok(mut index) => *index = scan(roots),
+            Ok(mut index) => *index = apps,
             Err(_) => eprintln!("the app index is poisoned; not refreshing it"),
         }
     };
@@ -798,6 +801,21 @@ mod tests {
         stop.store(true, Ordering::Relaxed);
         assert!(writer.join().is_ok_and(|result| result.is_ok()));
         assert!(found);
+        Ok(())
+    }
+
+    #[test]
+    fn opening_trims_an_overfull_history_to_the_cap() -> io::Result<()> {
+        let folder = tempfile::tempdir()?;
+        let mut plugin = Apps::watching(Vec::new(), Some(folder.path().join("frecency")));
+        plugin.usage = (0..MAX_REMEMBERED * 2)
+            .map(|index| {
+                let path = PathBuf::from(format!("/Applications/{index}.app"));
+                (path, Usage::default())
+            })
+            .collect();
+        plugin.ran(&Action::Open("/Applications/Safari.app".into()));
+        assert_eq!(plugin.usage.len(), MAX_REMEMBERED);
         Ok(())
     }
 

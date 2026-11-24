@@ -225,8 +225,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSTextFieldDelegate, N
                     let alert = NSAlert()
                     alert.messageText = "Can't open \(FileManager.default.displayName(atPath: path))"
                     alert.informativeText = failure
+                    let previous = NSWorkspace.shared.frontmostApplication
                     NSApp.activate()
                     alert.runModal()
+                    // Window management acts on the frontmost app, so hand focus back.
+                    previous?.activate()
                 }
             }
         }
