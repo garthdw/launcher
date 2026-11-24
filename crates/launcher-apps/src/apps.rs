@@ -418,7 +418,7 @@ fn rank<'a>(
     if query.is_empty() {
         return Vec::new();
     }
-    let mut ranked: Vec<(i32, &App)> = apps
+    let mut ranked: Vec<(i32, &App, u8)> = apps
         .iter()
         .filter_map(|app| {
             let score = score(&app.name, &query)?;
@@ -428,19 +428,21 @@ fn rank<'a>(
                 .map_or(0, |usage| {
                     ((usage.weight(now).ln_1p() * 8.0) as i32).min(MAX_FRECENCY_BONUS)
                 });
-            Some((score + bonus, app))
+            // Frecency orders apps among themselves, but says nothing of how well the name
+            // matches, which other plugins' results are weighed against.
+            Some((score + bonus, app, relevance(score, query.len())))
         })
         .collect();
-    ranked.sort_by_key(|(score, _)| Reverse(*score));
+    ranked.sort_by_key(|(score, _, _)| Reverse(*score));
     ranked
         .into_iter()
-        .map(|(score, app)| (app, relevance(score, query.len())))
+        .map(|(_, app, relevance)| (app, relevance))
         .collect()
 }
 
 /// A score as a share of the best `score` gives a query of `length` letters, its start of a name
 /// with nothing after: 100 for that, about 90 for the start of a short name, lower for gaps and
-/// mid-word letters. Word starts past the first and frecency can push past 100; they're capped.
+/// mid-word letters. Word starts past the first can push past 100; they're capped.
 fn relevance(score: i32, length: usize) -> u8 {
     let consecutive = i32::try_from(length.saturating_sub(1)).unwrap_or(i32::MAX);
     let best = consecutive
@@ -629,17 +631,24 @@ mod tests {
     }
 
     #[test]
-    fn frecency_cant_push_relevance_past_100() {
-        let installed = apps(&["Safari"]);
+    fn frecency_orders_apps_but_leaves_relevance_alone() {
+        let installed = apps(&["Notes", "TextEdit"]);
         let usage = HashMap::from([(
-            PathBuf::from("/Applications/Safari.app"),
+            PathBuf::from("/Applications/Notes.app"),
             Usage {
                 count: 10_000,
                 last_opened: 1_000_000,
             },
         )]);
-        let ranked = rank(&installed, &usage, "safari", 1_000_000);
-        assert_eq!(ranked.first().map(|(_, relevance)| *relevance), Some(100));
+        let ranked: Vec<(&str, u8)> = rank(&installed, &usage, "e", 1_000_000)
+            .into_iter()
+            .map(|(app, relevance)| (app.name.as_str(), relevance))
+            .collect();
+        assert_eq!(
+            ranked,
+            [("Notes", 50), ("TextEdit", 85)],
+            "a mid-word match stays below the calculator, however often it's opened"
+        );
     }
 
     fn matches(name: &str, query: &str) -> Option<i32> {
