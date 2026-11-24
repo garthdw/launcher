@@ -1,0 +1,123 @@
+# value_of
+
+assert_eq(value_of(0),            0)
+
+assert_eq(value_of(1),            1)
+assert_eq(value_of(1.2345),       1.2345)
+
+assert_eq(value_of(1 m),          1)
+assert_eq(value_of(1.2345 m),     1.2345)
+
+assert_eq(value_of(1 m^2/s),      1)
+assert_eq(value_of(1.2345 m^2/s), 1.2345)
+
+# unit_of
+
+assert_eq(unit_of(1),            1)
+assert_eq(unit_of(1.2345),       1)
+
+assert_eq(unit_of(1 m),          m)
+assert_eq(unit_of(1.2345 m),     m)
+
+assert_eq(unit_of(1 m^2/s),      m^2/s)
+assert_eq(unit_of(1.2345 m^2/s), m^2/s)
+
+# has_unit
+
+assert(has_unit(1 m, m))
+assert(has_unit(2 m, m))
+
+assert(!has_unit(1 m, cm))
+assert(!has_unit(1 m, km))
+assert(!has_unit(1 m, ft))
+
+assert(has_unit(0, m))
+assert(has_unit(0, cm))
+assert(has_unit(0, s))
+
+# is_dimensionless
+
+assert(is_dimensionless(0))
+assert(is_dimensionless(1))
+assert(is_dimensionless(1 nm/m))
+assert(!is_dimensionless(1 m))
+assert(!is_dimensionless(1 m/s))
+
+# unit_name
+
+assert_eq(unit_name(0), "")
+assert_eq(unit_name(1), "")
+assert_eq(unit_name(1 m), "m")
+assert_eq(unit_name(1 m^2/s), "m²/s")
+
+# quantity_cast
+
+assert_eq(quantity_cast(1 m, m), 1 m)
+assert_eq(quantity_cast(1 nm, m), 1 nm)
+assert_eq(quantity_cast(0, m), 0)
+
+# round, round_in
+
+assert_eq(round(1.234), 1)
+
+assert_eq(1.234 m |> round_in(m), 1 m)
+assert_eq(1.234 m |> round_in(cm), 123 cm)
+assert_eq(1.234 m |> round_in(mm), 1234 mm)
+
+assert_eq(1.234 m |> round_in(10 m), 0)
+assert_eq(1.234 m |> round_in(1 m), 1 m)
+assert_eq(1.234 m |> round_in(0.1 m), 1.2 m, 1e-9 m)
+assert_eq(1.234 m |> round_in(0.01 m), 1.23 m, 1e-9 m)
+
+assert_eq(1234 |> round_in(1000), 1000)
+assert_eq(1234 |> round_in(100), 1200)
+assert_eq(1234 |> round_in(10), 1230)
+assert_eq(1234 |> round_in(1), 1234)
+assert_eq(1234 |> round_in(0.1), 1234)
+
+# floor, floor_in
+
+assert_eq(floor(1.2), 1)
+assert_eq(floor(1.8), 1)
+assert_eq(floor(-1.2), -2)
+
+assert_eq(1.8 m |> floor_in(m), 1 m)
+assert_eq(1.8 m |> floor_in(cm), 180 cm)
+
+# ceil, ceil_in
+
+assert_eq(ceil(1.2), 2)
+assert_eq(ceil(-1.2), -1)
+
+assert_eq(1.2 m |> ceil_in(m), 2 m)
+assert_eq(1.2 m |> ceil_in(cm), 120 cm)
+
+# trunc, trunc_in, fract
+
+assert_eq(trunc(1.2), 1)
+assert_eq(trunc(1.8), 1)
+assert_eq(trunc(-1.2), -1)
+assert_eq(trunc(-1.8), -1)
+
+assert_eq(1.8 m |> trunc_in(m), 1 m)
+assert_eq(1.8 m |> trunc_in(cm), 180 cm)
+
+assert_eq(fract(1.2), 0.2, 1e-12)
+assert_eq(fract(1.8), 0.8, 1e-12)
+assert_eq(fract(0), 0)
+assert_eq(fract(1), 0)
+assert_eq(fract(1e10), 0)
+assert_eq(fract(-1.2), -0.2, 1e-12)
+assert_eq(fract(-1.8), -0.8, 1e-12)
+assert(is_nan(fract(NaN)))
+assert(is_nan(fract(inf)))
+
+# factorial and multi-factorial
+
+assert_eq(7!!, 7 * 5 * 3)
+assert_eq((7)!!!, 7 * 4)
+assert_eq((7!!!!), 7 * 3)
+
+assert_eq(8!!, 8 * 6 * 4 * 2)
+assert_eq(8.0!!!, 8 * 5 * 2)
+assert_eq( 8 !!!!, 8 * 4)

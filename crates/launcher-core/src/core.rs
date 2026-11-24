@@ -1,4 +1,5 @@
 use std::path::PathBuf;
+use std::sync::Arc;
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct Item {
@@ -20,12 +21,29 @@ pub struct Section {
 pub enum Action {
     Copy(String),
     Open(PathBuf),
+    /// The item only says something, such as that work is under way; the shell draws it muted.
+    Nothing,
 }
 
 /// Where settings and state live: `~/.config/launcher` on every platform.
 pub fn config_directory() -> Option<PathBuf> {
     std::env::home_dir().map(|home| home.join(".config/launcher"))
 }
+
+/// Where downloads that can be fetched again live: the platform's cache folder, which backups
+/// skip. On macOS it is named for the bundle identifier, as `scripts/bundle` sets it.
+pub fn cache_directory() -> Option<PathBuf> {
+    let home = std::env::home_dir()?;
+    Some(if cfg!(target_os = "macos") {
+        home.join("Library/Caches/dev.dewet.launcher")
+    } else {
+        home.join(".cache/launcher")
+    })
+}
+
+/// Called from a plugin's background work when it may have changed the plugin's results, so the
+/// shell asks again for the query it shows. Any thread may call it.
+pub type ResultsChanged = Arc<dyn Fn() + Send + Sync>;
 
 pub trait Plugin {
     /// Runs on the UI thread for every keystroke, so it must stay well under a frame.

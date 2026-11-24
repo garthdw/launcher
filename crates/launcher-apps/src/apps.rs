@@ -8,7 +8,7 @@ use std::sync::{Arc, Mutex, Weak};
 use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-use launcher_core::{Action, Item, Plugin, config_directory};
+use launcher_core::{Action, Item, Plugin, ResultsChanged, config_directory};
 use notify::{RecommendedWatcher, RecursiveMode, Watcher};
 
 const MAX_RESULTS: usize = 8;
@@ -67,17 +67,21 @@ pub struct Apps {
 
 impl Apps {
     /// Indexes the app folders in the background and keeps the index current, with frecency
-    /// kept in the config directory.
-    pub fn start() -> Self {
+    /// kept in the config directory. Calls `changed` when a scan changes the index.
+    pub fn start(changed: ResultsChanged) -> Self {
         let frecency_path = config_directory().map(|directory| directory.join("frecency"));
         if frecency_path.is_none() {
             eprintln!("no home folder, so apps are ranked without frecency");
         }
-        Self::watching(app_folders(), frecency_path)
+        Self::watching(app_folders(), frecency_path, changed)
     }
 
     /// Without a `frecency_path`, apps are ranked by match alone.
-    fn watching(roots: Vec<PathBuf>, frecency_path: Option<PathBuf>) -> Self {
+    fn watching(
+        roots: Vec<PathBuf>,
+        frecency_path: Option<PathBuf>,
+        changed: ResultsChanged,
+    ) -> Self {
         let roots: Vec<PathBuf> = roots.iter().map(|root| resolve(root)).collect();
         let index = Arc::new(Mutex::new(Vec::new()));
         let (sender, receiver) = mpsc::channel();
@@ -85,7 +89,7 @@ impl Apps {
         thread::spawn({
             let index = index.clone();
             let watcher = watcher.as_ref().map_or_else(Weak::new, Arc::downgrade);
-            move || keep_index(&index, &roots, &watcher, &receiver)
+            move || keep_index(&index, &roots, &watcher, &receiver, &*changed)
         });
         let usage = frecency_path.as_deref().map(load_usage).unwrap_or_default();
         let saver = frecency_path.map(|path| {
@@ -178,6 +182,7 @@ fn keep_index(
     roots: &[PathBuf],
     watcher: &Weak<Mutex<RecommendedWatcher>>,
     changes: &Receiver<()>,
+    changed: &dyn Fn(),
 ) {
     let mut watched = vec![false; roots.len()];
     let mut refresh = || {
@@ -199,9 +204,21 @@ fn keep_index(
         }
         // Scan before locking: `query` takes the same lock on every keystroke.
         let apps = scan(roots);
-        match index.lock() {
-            Ok(mut index) => *index = apps,
-            Err(_) => eprintln!("the app index is poisoned; not refreshing it"),
+        // Updates write inside bundles in bursts that change nothing here, and every call
+        // rebuilds the shown rows.
+        let replaced = match index.lock() {
+            Ok(mut index) if *index != apps => {
+                *index = apps;
+                true
+            }
+            Ok(_) => false,
+            Err(_) => {
+                eprintln!("the app index is poisoned; not refreshing it");
+                false
+            }
+        };
+        if replaced {
+            changed();
         }
     };
     refresh();
@@ -541,6 +558,10 @@ mod tests {
             .collect()
     }
 
+    fn quiet() -> ResultsChanged {
+        Arc::new(|| {})
+    }
+
     fn eventually(mut condition: impl FnMut() -> bool) -> bool {
         for _ in 0..100 {
             if condition() {
@@ -689,7 +710,7 @@ mod tests {
     fn opening_records_usage() -> io::Result<()> {
         let folder = tempfile::tempdir()?;
         let path = folder.path().join("frecency");
-        let mut plugin = Apps::watching(Vec::new(), Some(path.clone()));
+        let mut plugin = Apps::watching(Vec::new(), Some(path.clone()), quiet());
         let safari = Path::new("/Applications/Safari.app");
         let open = Action::Open(safari.into());
         plugin.ran(&open);
@@ -756,13 +777,21 @@ mod tests {
     }
 
     #[test]
-    fn new_apps_appear_without_restart() -> io::Result<()> {
+    fn new_apps_appear_and_tell_the_shell() -> Result<(), Box<dyn std::error::Error>> {
         let root = tempfile::tempdir()?;
         fs::create_dir(root.path().join("Safari.app"))?;
-        let mut plugin = Apps::watching(vec![root.path().to_path_buf()], None);
-        assert!(eventually(|| titles(&mut plugin, "saf") == ["Safari"]));
+        let (sender, receiver) = mpsc::channel();
+        let changed: ResultsChanged = Arc::new(move || {
+            if sender.send(()).is_err() {
+                eprintln!("the test stopped listening");
+            }
+        });
+        let mut plugin = Apps::watching(vec![root.path().to_path_buf()], None, changed);
+        receiver.recv_timeout(Duration::from_secs(5))?;
+        assert_eq!(titles(&mut plugin, "saf"), ["Safari"]);
         fs::create_dir(root.path().join("Zed.app"))?;
-        assert!(eventually(|| titles(&mut plugin, "zed") == ["Zed"]));
+        receiver.recv_timeout(Duration::from_secs(10))?;
+        assert_eq!(titles(&mut plugin, "zed"), ["Zed"]);
         Ok(())
     }
 
@@ -770,7 +799,7 @@ mod tests {
     fn app_folders_created_later_are_watched() -> io::Result<()> {
         let home = tempfile::tempdir()?;
         let applications = home.path().join("Applications");
-        let mut plugin = Apps::watching(vec![applications.clone()], None);
+        let mut plugin = Apps::watching(vec![applications.clone()], None, quiet());
         fs::create_dir_all(applications.join("Zed.app"))?;
         assert!(eventually(|| titles(&mut plugin, "zed") == ["Zed"]));
         fs::create_dir(applications.join("Yak.app"))?;
@@ -784,7 +813,7 @@ mod tests {
         let vendor = root.path().join("Vendor");
         fs::create_dir(&vendor)?;
         fs::create_dir(root.path().join("Safari.app"))?;
-        let mut plugin = Apps::watching(vec![root.path().to_path_buf()], None);
+        let mut plugin = Apps::watching(vec![root.path().to_path_buf()], None, quiet());
         assert!(eventually(|| titles(&mut plugin, "saf") == ["Safari"]));
         let stop = Arc::new(AtomicBool::new(false));
         let writer = thread::spawn({
@@ -808,7 +837,7 @@ mod tests {
     #[test]
     fn opening_trims_an_overfull_history_to_the_cap() -> io::Result<()> {
         let folder = tempfile::tempdir()?;
-        let mut plugin = Apps::watching(Vec::new(), Some(folder.path().join("frecency")));
+        let mut plugin = Apps::watching(Vec::new(), Some(folder.path().join("frecency")), quiet());
         plugin.usage = (0..MAX_REMEMBERED * 2)
             .map(|index| {
                 let path = PathBuf::from(format!("/Applications/{index}.app"));
@@ -823,7 +852,7 @@ mod tests {
     #[test]
     fn opening_a_new_app_when_full_keeps_it() -> io::Result<()> {
         let folder = tempfile::tempdir()?;
-        let mut plugin = Apps::watching(Vec::new(), Some(folder.path().join("frecency")));
+        let mut plugin = Apps::watching(Vec::new(), Some(folder.path().join("frecency")), quiet());
         let now = now();
         plugin.usage = (0..MAX_REMEMBERED)
             .map(|index| {

@@ -1,0 +1,8 @@
+---
+source: numbat/tests/example_snapshots.rs
+expression: output
+input_file: examples/workhours.nbt
+---
+500 workday
+300 workday
+5.0 FTE

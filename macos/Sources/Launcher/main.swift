@@ -220,7 +220,9 @@ final class DetailText: NSTextView {
 
 @MainActor
 final class AppDelegate: NSObject, NSApplicationDelegate, NSTextFieldDelegate, NSWindowDelegate {
-    let launcher = Launcher()
+    lazy var launcher = Launcher(listener: ResultsRelay { [weak self] in
+        DispatchQueue.main.async { MainActor.assumeIsolated { self?.resultsChanged() } }
+    })
     // Non-activating, so the app the user was in stays frontmost: window snapping acts on it.
     let panel = Panel(
         contentRect: NSRect(x: 0, y: 0, width: Metrics.width, height: Metrics.headerHeight),
@@ -238,9 +240,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSTextFieldDelegate, N
         didSet { highlightPicked() }
     }
     var summoned: CFAbsoluteTime?
+    /// A plugin's results changed while the panel was hidden or showed a detail.
+    var resultsStale = false
     var hotkey: EventHotKeyRef?
 
     func applicationDidFinishLaunching(_: Notification) {
+        // Lazy only so the relay can reach `self`; plugins start their background work now, not
+        // on the first keystroke.
+        _ = launcher
         buildPanel()
         registerHotkey()
         // Opens the panel at launch with this query, for measuring without the hotkey.
@@ -300,6 +307,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSTextFieldDelegate, N
         summoned = time
         // ⌥Space while the panel is still key comes here without hiding it first.
         closeDetail()
+        refreshIfStale()
         if let screen = NSScreen.main {
             let frame = screen.visibleFrame
             panel.setFrameTopLeftPoint(NSPoint(x: frame.midX - panel.frame.width / 2, y: frame.maxY - 180))
@@ -323,7 +331,26 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSTextFieldDelegate, N
         hide()
     }
 
+    /// A plugin's background work finished, so the shown query may have other results now.
+    func resultsChanged() {
+        guard panel.isVisible, detail == nil else {
+            resultsStale = true
+            return
+        }
+        // Rows may come and go, so the selection follows the item rather than its position.
+        let kept = items.indices.contains(picked) ? (items[picked].title, items[picked].subtitle) : nil
+        refresh()
+        if let kept, let index = items.firstIndex(where: { ($0.title, $0.subtitle) == kept }) {
+            picked = index
+        }
+    }
+
+    func refreshIfStale() {
+        if resultsStale { refresh() }
+    }
+
     func refresh() {
+        resultsStale = false
         items = launcher.query(query: field.stringValue)
         let rowHeight: CGFloat = 44
         let listHeight = items.isEmpty ? 0 : CGFloat(items.count) * (rowHeight + 2) + Metrics.inset * 2
@@ -346,20 +373,25 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSTextFieldDelegate, N
                 titleX = 46
             }
             let title = titleLabel(item.title)
-            title.frame = NSRect(x: titleX, y: 11, width: 392 - titleX, height: 22)
             // The shell names its own keys, so plugins' subtitles say only what an item is.
-            let keys = switch item.action {
-            case .copy: "↵ copies"
-            case .open: "↵ opens"
+            var keys = ""
+            switch item.action {
+            case .copy: keys = "↵ copies"
+            case .open: keys = "↵ opens"
+            case .nothing: title.textColor = .secondaryLabelColor
             }
             let subtitle = hintLabel(
                 ([item.subtitle, keys] + (item.detail.isEmpty ? [] : ["→ details"]))
                     .filter { !$0.isEmpty }
                     .joined(separator: " · ")
             )
-            // Long subtitles such as app folders lose their start, not the keys.
+            // Long subtitles such as app folders lose their start, not the keys. A subtitle may
+            // take room a short title leaves, but never squeezes a long title further.
             subtitle.lineBreakMode = .byTruncatingHead
-            subtitle.frame = NSRect(x: 396, y: 13, width: 220, height: 18)
+            let end = row.frame.width - 12
+            let subtitleX = min(396, max(titleX + title.fittingSize.width + 4, end - subtitle.fittingSize.width))
+            subtitle.frame = NSRect(x: subtitleX, y: 13, width: end - subtitleX, height: 18)
+            title.frame = NSRect(x: titleX, y: 11, width: subtitleX - 4 - titleX, height: 22)
             row.addSubview(title)
             row.addSubview(subtitle)
             results.addSubview(row)
@@ -392,6 +424,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSTextFieldDelegate, N
         let pane = DetailPane(item: items[index])
         pane.text.back = { [unowned self] in
             closeDetail()
+            refreshIfStale()
             panel.makeFirstResponder(field)
             field.currentEditor()?.moveToEndOfDocument(nil)
         }
@@ -412,7 +445,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSTextFieldDelegate, N
     }
 
     func choose(_ index: Int) {
-        if index < items.count { run(items[index]) }
+        if index < items.count {
+            if case .nothing = items[index].action { return }
+            run(items[index])
+        }
         field.stringValue = ""
         refresh()
         hide()
@@ -444,6 +480,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSTextFieldDelegate, N
                     previous?.activate()
                 }
             }
+        case .nothing:
+            break
         }
     }
 
@@ -472,6 +510,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSTextFieldDelegate, N
             return false
         }
         return true
+    }
+}
+
+/// Hands `results_changed` calls, which come on plugins' threads, to the app delegate.
+final class ResultsRelay: ResultsListener, Sendable {
+    let changed: @Sendable () -> Void
+
+    init(_ changed: @escaping @Sendable () -> Void) {
+        self.changed = changed
+    }
+
+    func resultsChanged() {
+        changed()
     }
 }
 
