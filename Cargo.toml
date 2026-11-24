@@ -21,7 +21,7 @@ launcher-plugins = { path = "crates/launcher-plugins" }
 attohttpc = { version = "0.27.0", default-features = false, features = ["tls-rustls-webpki-roots"] }
 base64 = "0.22.1"
 # The version numbat uses, so the app links one copy.
-jiff = "0.2.46"
+jiff = "1.0.2"
 notify = "8.2.2"
 objc2-core-foundation = { version = "0.3.2", default-features = false, features = ["std", "CFError", "CFString", "CFURL"] }
 numbat = { version = "1.24.0", default-features = false }

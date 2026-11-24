@@ -98,7 +98,9 @@ fn item(
                     } else {
                         format!("in {}", span(time.duration_since(now)))
                     };
-                    let local = time.to_zoned(zone.clone()).strftime("%Y-%m-%d %H:%M:%S %Z");
+                    let local = time
+                        .to_zoned_datetime(zone.clone())
+                        .strftime("%Y-%m-%d %H:%M:%S %Z");
                     format!("{claim}  {local}  ({relative})")
                 }
                 Err(raw) => format!("{claim}  {raw}  (unreadable)"),
