@@ -1,0 +1,15 @@
+[package]
+name = "launcher-plugins"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[lib]
+path = "src/plugins.rs"
+
+[dependencies]
+launcher-apps.workspace = true
+launcher-calc.workspace = true
+launcher-core.workspace = true
+launcher-jwt.workspace = true

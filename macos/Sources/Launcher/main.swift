@@ -241,7 +241,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSTextFieldDelegate, N
     var hotkey: EventHotKeyRef?
 
     func applicationDidFinishLaunching(_: Notification) {
-        prefetchExchangeRates()
         buildPanel()
         registerHotkey()
         // Opens the panel at launch with this query, for measuring without the hotkey.

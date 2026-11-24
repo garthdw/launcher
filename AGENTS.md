@@ -25,9 +25,11 @@ cargo build --profile profiling              # release with full symbols, for sa
 
 ## Architecture
 
-- `crates/launcher-core` (`core.rs`): the `Plugin` trait, `Item` and `Action`. No FFI or UI dependencies.
+- `crates/launcher-core` (`core.rs`): the `Plugin` trait, `Item`, `Action` and an item's detail `Section`s. No FFI or UI dependencies.
+- `crates/launcher-plugins` (`plugins.rs`): `start()` builds every plugin in result order and starts their background work. Shells call it rather than choosing plugins, so they stay thin: they draw results, name the keys and run actions.
 - `crates/launcher-apps` (`apps.rs`): app search. Indexes `.app` bundles in the macOS app folders on a background thread and rescans when `notify` reports a change; a small fuzzy matcher favouring word starts, plus frecency kept in `~/.config/launcher/frecency`. The shell opens results (`Action::Open`) and draws their icons.
 - `crates/launcher-calc` (`calc.rs`): numbat for arithmetic, units and currency. Exchange rates come from the ECB, fetched once in the background at launch.
+- `crates/launcher-jwt` (`jwt.rs`): decodes a pasted JSON Web Token (signature not verified) into its claims and expiry, with the header, payload and times as its detail.
 - `crates/launcher-ffi` (`ffi.rs`): the UniFFI boundary the Swift shell calls: a `Launcher` object holding the plugins, and records mirroring the core's types, so the core stays free of FFI derives. Built as a static library linked into the app.
 - `crates/uniffi-bindgen`: the bindgen CLI, pinned to the same `uniffi` as the FFI crate.
 - `macos/`: the SwiftPM package for the AppKit shell. A non-activating `NSPanel`, so the app the user was in stays frontmost (window management acts on it); the global hotkey (⌥Space) through Carbon's `RegisterEventHotKey`; `LSUIElement`, so no Dock icon.
