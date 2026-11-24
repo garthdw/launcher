@@ -33,8 +33,10 @@ target/release/Launcher.app/Contents/MacOS/Launcher config init
 
 Hotkeys are modifiers and a key joined by `+`, such as `"ctrl+alt+left"` or `"cmd+shift+k"`. The
 launcher reloads the file when it's saved. If the file has a mistake, the launcher keeps the
-settings it had and says what's wrong; if another app holds a hotkey, it says which setting it
-can't use. Editors that read `#:schema` lines
+settings it had and says what's wrong; if another app holds a hotkey exclusively, it says which
+setting it can't use. Apps that registered a hotkey without exclusivity lose it to the launcher
+while it runs, and clashes with macOS's own shortcuts (such as Spotlight's ⌘Space) can't be
+detected. Editors that read `#:schema` lines
 (Taplo, the Even Better TOML extension) check and complete the file against
 [`config.schema.json`](crates/launcher-config/config.schema.json).
 

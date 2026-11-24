@@ -352,15 +352,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSTextFieldDelegate, N
         var registered: EventHotKeyRef?
         let id = nextHotkeyID
         nextHotkeyID &+= 1
-        // Exclusive, so registering fails while another app holds the hotkey rather than both
-        // acting on it.
+        // Exclusive, so the hotkey isn't acted on twice: registering fails while another app
+        // holds it exclusively, and apps that registered it plainly stop getting it.
         let status = RegisterEventHotKey(
             UInt32(keyCode), UInt32(binding.hotkey.carbonModifiers),
             EventHotKeyID(signature: 0x4C4E_4348, id: id),
             GetApplicationEventTarget(), OptionBits(kEventHotKeyExclusive), &registered
         )
         guard status == noErr, let registered else {
-            let reason = status == eventHotKeyExistsErr ? "another app already uses this hotkey" : "error \(status)"
+            let reason = status == eventHotKeyExistsErr ? "another app holds this hotkey exclusively" : "error \(status)"
             return "\(binding.setting): \(reason)."
         }
         hotkeys[id] = (registered, { [unowned self, action = binding.action] in
