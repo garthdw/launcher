@@ -21,8 +21,8 @@ enum Metrics {
 final class Panel: NSPanel {
     override var canBecomeKey: Bool { true }
 
-    /// The app has no main menu to route shortcuts, so the panel sends them itself: editing, ⌘Q
-    /// and ⌘,.
+    /// The app has no main menu to route shortcuts, so the panel sends them itself: editing, ⌘Q,
+    /// ⌘, and ⌘R.
     override func performKeyEquivalent(with event: NSEvent) -> Bool {
         guard event.modifierFlags.intersection(.deviceIndependentFlagsMask).subtracting(.capsLock) == .command
         else { return super.performKeyEquivalent(with: event) }
@@ -33,6 +33,7 @@ final class Panel: NSPanel {
         case "a": #selector(NSText.selectAll(_:))
         case "q": #selector(NSApplication.terminate(_:))
         case ",": #selector(AppDelegate.openSettingsFile)
+        case "r": #selector(AppDelegate.reloadSettings)
         default: nil
         }
         guard let action else { return super.performKeyEquivalent(with: event) }
