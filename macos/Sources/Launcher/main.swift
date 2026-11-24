@@ -772,9 +772,12 @@ func log(_ message: String) {
 
 // `Launcher config init` and `Launcher login on`, from the app's own binary, so there's no separate
 // tool to build and sign.
-let arguments = Array(CommandLine.arguments.dropFirst())
-if let status = loginCommand(arguments) ?? configCommand(arguments: arguments) {
-    exit(status)
+do {
+    // A block, so `arguments` stays local rather than a global every file could see.
+    let arguments = Array(CommandLine.arguments.dropFirst())
+    if let status = loginCommand(arguments) ?? configCommand(arguments: arguments) {
+        exit(status)
+    }
 }
 
 MainActor.assumeIsolated {

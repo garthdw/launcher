@@ -208,8 +208,8 @@ fn read(path: &Path) -> Result<Config, String> {
     }
 }
 
-/// Runs `config` commands, the launcher's only command-line use: the shell hands over its
-/// arguments before starting its UI. `None` when they aren't a command, so the UI starts; else
+/// Runs `config` commands, which every shell shares: the shell hands over its arguments, after
+/// trying its own commands (macOS's `login`), before starting its UI. `None` when they aren't a command, so the UI starts; else
 /// the exit status.
 pub fn run_command(arguments: &[String]) -> Option<i32> {
     let arguments: Vec<&str> = arguments.iter().map(String::as_str).collect();

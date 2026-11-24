@@ -35,8 +35,9 @@ target/release/Launcher.app/Contents/MacOS/Launcher config init
 The menu bar item, off by default since it takes about 2 MB (`menu_bar = true` shows it), opens
 the launcher or the settings file, reloads the settings, quits, and turns Launch at Login on or
 off. Launch at Login isn't in the file, since macOS keeps it: System Settings › General › Login
-Items changes it too. Without the item, set it from a terminal; it registers the copy of the app
-you run, so run the one you keep, not a `target/release` build that the next bundle replaces:
+Items changes it too, and it stays as set when the item is hidden. Without the item, set it from
+a terminal. It registers the copy of the app you run, so copy the app where you keep it (such as
+`~/Applications`) and run that one, not a `target/release` build that the next bundle replaces:
 
 ```sh
 ~/Applications/Launcher.app/Contents/MacOS/Launcher login on   # or off, or status
