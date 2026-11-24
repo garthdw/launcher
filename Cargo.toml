@@ -10,8 +10,12 @@ publish = false
 
 [workspace.dependencies]
 launcher-core = { path = "crates/launcher-core" }
+launcher-apps = { path = "crates/launcher-apps" }
 launcher-calc = { path = "crates/launcher-calc" }
+notify = "8.2.2"
+objc2-core-foundation = { version = "0.3.2", default-features = false, features = ["std", "CFError", "CFString", "CFURL"] }
 numbat = { version = "1.24.0", default-features = false, features = ["fetch-exchangerates"] }
+tempfile = "3.27.0"
 uniffi = "0.32.2"
 
 [profile.release]
