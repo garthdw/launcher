@@ -398,7 +398,7 @@ mod tests {
                 ),
             ]
         );
-        assert!(settings.menu_bar);
+        assert!(!settings.menu_bar);
         assert_eq!(settings.problem, None);
     }
 

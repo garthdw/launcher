@@ -46,7 +46,7 @@ impl Default for Config {
                 command: false,
                 shift: false,
             },
-            menu_bar: true,
+            menu_bar: false,
             plugins: EnabledPlugins::default(),
             window: DEFAULT_BINDINGS.to_vec(),
         }
@@ -372,7 +372,7 @@ mod tests {
         let config = parse(
             r#"
             hotkey = "cmd+space"
-            menu_bar = false
+            menu_bar = true
             [plugins]
             jwt = false
             [window]
@@ -384,7 +384,7 @@ mod tests {
             panic!("{config:?}");
         };
         assert_eq!(config.hotkey, parsed("cmd+space"));
-        assert!(!config.menu_bar);
+        assert!(config.menu_bar);
         assert_eq!(
             config.plugins,
             EnabledPlugins {

@@ -12,8 +12,8 @@
     },
     "menu_bar": {
       "type": "boolean",
-      "description": "Shows an item in the menu bar to open the launcher or this file, reload settings, launch at login and quit. Either way, ⌘Q in the launcher quits and ⌘, opens this file.",
-      "default": true
+      "description": "Shows an item in the menu bar to open the launcher or this file, reload settings, launch at login and quit. Off by default, since showing it takes about 2 MB; Launch at Login stays as set after hiding it. Either way, ⌘Q in the launcher quits and ⌘, opens this file.",
+      "default": false
     },
     "plugins": {
       "description": "Which plugins answer queries.",
