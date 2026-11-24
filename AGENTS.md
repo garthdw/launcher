@@ -28,7 +28,7 @@ cargo build --profile profiling              # release with full symbols, for sa
 - `crates/launcher-core` (`core.rs`): the `Plugin` trait, `Item`, `Action` and an item's detail `Section`s. No FFI or UI dependencies.
 - `crates/launcher-plugins` (`plugins.rs`): `start()` builds every plugin in result order and starts their background work. Shells call it rather than choosing plugins, so they stay thin: they draw results, name the keys and run actions.
 - `crates/launcher-apps` (`apps.rs`): app search. Indexes `.app` bundles in the macOS app folders on a background thread and rescans when `notify` reports a change; a small fuzzy matcher favouring word starts, plus frecency kept in `~/.config/launcher/frecency`. The shell opens results (`Action::Open`) and draws their icons.
-- `crates/launcher-calc` (`calc.rs`): numbat for arithmetic, units and currency. Exchange rates come from the ECB, fetched once in the background at launch.
+- `crates/launcher-calc` (`calc.rs`): numbat for arithmetic, units and currency. Exchange rates come from the ECB, cached on disk and fetched again in the background at launch when a day old; numbat's own fetch is off, since it would run on the UI thread.
 - `crates/launcher-jwt` (`jwt.rs`): decodes a pasted JSON Web Token (signature not verified) into its claims and expiry, with the header, payload and times as its detail.
 - `crates/launcher-ffi` (`ffi.rs`): the UniFFI boundary the Swift shell calls: a `Launcher` object holding the plugins, and records mirroring the core's types, so the core stays free of FFI derives. Built as a static library linked into the app.
 - `crates/uniffi-bindgen`: the bindgen CLI, pinned to the same `uniffi` as the FFI crate.
@@ -38,7 +38,7 @@ Plugins answer `query` synchronously on the UI thread for every keystroke, so th
 
 Memory is the main constraint. Check `footprint` before and after a change that adds a dependency or keeps state, and prefer work done on demand over state kept resident. The bundled app used about 15 MB with the panel open and 12 MB hidden, about 8 MB of which is numbat. Moving to macOS 26 and Liquid Glass (`NSGlassEffectView`) from `NSVisualEffectView` added about 3 MB. The app index and its watcher add about 0.1 MB for ~100 apps; showing app rows with icons adds about 1 MB.
 
-Settings and state live in `~/.config/launcher` on every platform (`launcher_core::config_directory`).
+Settings and state live in `~/.config/launcher` on every platform (`launcher_core::config_directory`). Downloads that can be fetched again, such as exchange rates, live in the platform's cache folder: `~/Library/Caches/dev.dewet.launcher` on macOS, `~/.cache/launcher` elsewhere (`launcher_core::cache_directory`).
 
 ## Rust coding guidelines
 

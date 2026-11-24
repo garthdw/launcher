@@ -27,6 +27,17 @@ pub fn config_directory() -> Option<PathBuf> {
     std::env::home_dir().map(|home| home.join(".config/launcher"))
 }
 
+/// Where downloads that can be fetched again live: the platform's cache folder, which backups
+/// skip. On macOS it is named for the bundle identifier, as `scripts/bundle` sets it.
+pub fn cache_directory() -> Option<PathBuf> {
+    let home = std::env::home_dir()?;
+    Some(if cfg!(target_os = "macos") {
+        home.join("Library/Caches/dev.dewet.launcher")
+    } else {
+        home.join(".cache/launcher")
+    })
+}
+
 pub trait Plugin {
     /// Runs on the UI thread for every keystroke, so it must stay well under a frame.
     fn query(&mut self, query: &str) -> Vec<Item>;

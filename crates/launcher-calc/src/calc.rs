@@ -1,3 +1,11 @@
+use std::error::Error;
+use std::fs;
+use std::io::ErrorKind;
+use std::path::Path;
+use std::sync::OnceLock;
+use std::time::Duration;
+
+use jiff::civil::Date;
 use launcher_core::{Action, Item, Plugin, Section};
 use numbat::markup::plain_text_format;
 use numbat::module_importer::BuiltinModuleImporter;
@@ -6,6 +14,15 @@ use numbat::resolver::CodeSource;
 use numbat::value::Value;
 use numbat::{Context, FormatOptions, InterpreterResult, NumbatError};
 
+const ECB_URL: &str = "https://www.ecb.europa.eu/stats/eurofxref/eurofxref-daily.xml";
+const RATES_FILE: &str = "eurofxref-daily.xml";
+/// The ECB publishes once per weekday, around 16:00 CET.
+const RATES_LIFETIME: Duration = Duration::from_secs(24 * 60 * 60);
+
+/// The date of the rates numbat holds. numbat keeps them in a process-wide `OnceLock` that
+/// panics when set twice, so they load once per process, and only through `use_rates`.
+static RATES_DATE: OnceLock<Date> = OnceLock::new();
+
 pub struct Calc {
     context: Context,
 }
@@ -13,17 +30,107 @@ pub struct Calc {
 impl Calc {
     pub fn new() -> Result<Self, Box<NumbatError>> {
         let mut context = Context::new(BuiltinModuleImporter::default());
-        context.load_currency_module_on_demand(true);
         context
             .interpret("use prelude", CodeSource::Internal)
             .map(drop)?;
         Ok(Self { context })
     }
 
-    /// Blocking ECB fetch. Without it, the first currency query fetches on the UI thread.
-    pub fn prefetch_exchange_rates() {
-        Context::prefetch_exchange_rates();
+    /// Loads the ECB rates cached in `directory` when they are under a day old. Otherwise
+    /// fetches fresh ones in the background, falling back to the old cache if that fails, since
+    /// rates load only once per process.
+    pub fn load_exchange_rates(directory: &Path) {
+        let path = directory.join(RATES_FILE);
+        match read_cache(&path) {
+            Some((xml, true)) => {
+                use_rates(&xml);
+            }
+            stale => {
+                let directory = directory.to_path_buf();
+                std::thread::spawn(move || {
+                    if let Err(error) = refresh_exchange_rates(&directory, &path) {
+                        eprintln!("could not fetch exchange rates: {error}");
+                        if let Some((xml, _)) = stale {
+                            use_rates(&xml);
+                        }
+                    }
+                });
+            }
+        }
     }
+}
+
+/// The cached rates file, if it holds rates, and whether it is under a day old.
+fn read_cache(path: &Path) -> Option<(String, bool)> {
+    let xml = match fs::read_to_string(path) {
+        Ok(xml) => xml,
+        Err(error) if error.kind() == ErrorKind::NotFound => return None,
+        Err(error) => {
+            eprintln!("could not read {}: {error}", path.display());
+            return None;
+        }
+    };
+    if rates_date(&xml).is_none() {
+        eprintln!("no exchange rates in {}", path.display());
+        return None;
+    }
+    let fresh = fs::metadata(path)
+        .and_then(|metadata| metadata.modified())
+        .ok()
+        .and_then(|modified| modified.elapsed().ok())
+        .is_some_and(|age| age < RATES_LIFETIME);
+    Some((xml, fresh))
+}
+
+fn refresh_exchange_rates(directory: &Path, path: &Path) -> Result<(), Box<dyn Error>> {
+    let xml = attohttpc::get(ECB_URL)
+        .timeout(Duration::from_secs(15))
+        .send()?
+        .error_for_status()?
+        .text()?;
+    if !use_rates(&xml) {
+        return Err(format!("no rates in the response from {ECB_URL}").into());
+    }
+    fs::create_dir_all(directory)?;
+    // Renamed into place, so a write cut short never leaves a cache that looks fresh.
+    let partial = path.with_extension("partial");
+    fs::write(&partial, &xml)?;
+    fs::rename(&partial, path)?;
+    Ok(())
+}
+
+/// Hands valid rates to numbat, unless it holds some already.
+fn use_rates(xml: &str) -> bool {
+    let Some(date) = rates_date(xml) else {
+        return false;
+    };
+    RATES_DATE.get_or_init(|| {
+        Context::set_exchange_rates(xml);
+        date
+    });
+    true
+}
+
+/// The date of the rates in an ECB reference rates file, if it holds any rates.
+fn rates_date(xml: &str) -> Option<Date> {
+    if numbat_exchange_rates::parse_exchange_rates(xml).is_none_or(|rates| rates.is_empty()) {
+        return None;
+    }
+    let (_, after) = xml.split_once("time=")?;
+    after.get(1..11)?.parse().ok()
+}
+
+/// Whether `value` is in money, whose base unit is the euro.
+fn is_money(value: &Value) -> bool {
+    let Value::Quantity(quantity) = value else {
+        return false;
+    };
+    quantity
+        .unit()
+        .to_base_unit_representation()
+        .0
+        .iter()
+        .any(|factor| factor.unit_id.name == "euro")
 }
 
 impl Plugin for Calc {
@@ -33,6 +140,19 @@ impl Plugin for Calc {
         if !query.chars().any(|c| c.is_ascii_digit()) {
             return Vec::new();
         }
+        // The prelude has all a launcher needs, and importing the currency module before rates
+        // load would leave numbat without them for good.
+        if query
+            .split(|c: char| !c.is_alphanumeric() && c != '_')
+            .any(|word| word == "use")
+        {
+            return Vec::new();
+        }
+        let rates_date = RATES_DATE.get();
+        // Meeting a currency makes numbat look its rates up. Before they load, that lookup would
+        // leave numbat without rates for good.
+        self.context
+            .load_currency_module_on_demand(rates_date.is_some());
         let query = x_as_times(query);
         let Ok((statements, InterpreterResult::Value(value))) =
             self.context.interpret(&query, CodeSource::Text)
@@ -66,9 +186,13 @@ impl Plugin for Calc {
                 text: precise,
             });
         }
+        let subtitle = match rates_date {
+            Some(date) if is_money(&value) => format!("ECB rates of {}", date.strftime("%-d %b")),
+            _ => "Calculator".into(),
+        };
         vec![Item {
             title: plain_text(&value, &FormatOptions::default()),
-            subtitle: "Calculator".into(),
+            subtitle,
             action: Action::Copy(copied),
             detail,
         }]
@@ -207,14 +331,74 @@ mod tests {
         assert!(titles("100 N to lbf")[0].ends_with("lbf"));
     }
 
+    const ECB_XML: &str = "<?xml version=\"1.0\" encoding=\"UTF-8\"?>
+<gesmes:Envelope xmlns:gesmes=\"http://www.gesmes.org/xml/2002-08-01\" xmlns=\"http://www.ecb.int/vocabulary/2002-08-01/eurofxref\">
+	<gesmes:subject>Reference rates</gesmes:subject>
+	<Cube>
+		<Cube time='2026-11-21'>
+			<Cube currency='USD' rate='1.25'/>
+			<Cube currency='JPY' rate='160'/>
+		</Cube>
+	</Cube>
+</gesmes:Envelope>";
+
     #[test]
-    fn currency() {
-        Context::use_test_exchange_rates();
-        assert!(
-            titles("100 USD to EUR")[0].ends_with('€'),
-            "{:?}",
-            titles("100 USD to EUR")
+    fn currency_uses_cached_rates() -> Result<(), Box<dyn std::error::Error>> {
+        let cache = tempfile::tempdir()?;
+        std::fs::write(cache.path().join(RATES_FILE), ECB_XML)?;
+        Calc::load_exchange_rates(cache.path());
+        assert_eq!(
+            items("100 USD to EUR")
+                .into_iter()
+                .map(|item| (item.title, item.subtitle))
+                .collect::<Vec<_>>(),
+            [("80 €".into(), "ECB rates of 21 Nov".into())]
         );
+        assert_eq!(
+            items("2 m")
+                .into_iter()
+                .map(|item| item.subtitle)
+                .collect::<Vec<_>>(),
+            ["Calculator"],
+            "only money is dated"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn cache_is_used_only_when_valid_and_says_when_stale() -> Result<(), Box<dyn std::error::Error>>
+    {
+        let cache = tempfile::tempdir()?;
+        let path = cache.path().join(RATES_FILE);
+        assert_eq!(read_cache(&path), None, "missing");
+        std::fs::write(&path, "<Cube time='2026-11")?;
+        assert_eq!(
+            read_cache(&path),
+            None,
+            "a cut-short write is fetched again"
+        );
+        std::fs::write(&path, ECB_XML)?;
+        assert_eq!(read_cache(&path), Some((ECB_XML.into(), true)));
+        std::fs::File::options()
+            .write(true)
+            .open(&path)?
+            .set_modified(std::time::SystemTime::now() - RATES_LIFETIME)?;
+        assert_eq!(read_cache(&path), Some((ECB_XML.into(), false)));
+        Ok(())
+    }
+
+    #[test]
+    fn ignores_imports() {
+        // Importing the currency module before rates load would leave numbat without them.
+        assert!(titles("use units::currencies; 1").is_empty());
+        assert!(titles("use all; 2").is_empty());
+    }
+
+    #[test]
+    fn rejects_responses_without_rates() {
+        assert_eq!(rates_date(ECB_XML), Some(jiff::civil::date(2026, 11, 21)));
+        assert_eq!(rates_date("<html><body>Sign in</body></html>"), None);
+        assert_eq!(rates_date("<Cube time='2026-11-21'></Cube>"), None);
     }
 
     #[test]
