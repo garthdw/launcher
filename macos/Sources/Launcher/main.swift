@@ -270,8 +270,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSTextFieldDelegate, N
     /// Each item's row; group headers sit between them in `list`.
     var rows: [Row] = []
     var picked = 0 {
-        didSet { highlightPicked() }
+        didSet {
+            highlightPicked()
+            selectionMoved = true
+        }
     }
+    /// The selection moved since `refresh` picked the top result, so a refresh for the same
+    /// query keeps it on its item.
+    var selectionMoved = false
     var summoned: CFAbsoluteTime?
     /// A plugin's results changed while the panel was hidden or showed a detail.
     var resultsStale = false
@@ -523,16 +529,22 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSTextFieldDelegate, N
             resultsStale = true
             return
         }
-        // Rows may come and go, so the selection follows the item rather than its position.
-        let kept = items.indices.contains(picked) ? (items[picked].title, items[picked].subtitle) : nil
+        refreshKeepingSelection()
+    }
+
+    func refreshIfStale() {
+        if resultsStale { refreshKeepingSelection() }
+    }
+
+    /// Rebuilds the rows for the same query. A selection the user moved follows their item, as
+    /// rows may come and go; otherwise the new top result is picked, as for a new query.
+    func refreshKeepingSelection() {
+        let kept = selectionMoved && items.indices.contains(picked)
+            ? (items[picked].title, items[picked].subtitle) : nil
         refresh()
         if let kept, let index = items.firstIndex(where: { ($0.title, $0.subtitle) == kept }) {
             pick(index)
         }
-    }
-
-    func refreshIfStale() {
-        if resultsStale { refresh() }
     }
 
     func refresh() {
@@ -572,6 +584,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSTextFieldDelegate, N
         results.frame = NSRect(x: 0, y: 0, width: Metrics.width, height: min(height, maxHeight))
         resize()
         pick(0)
+        selectionMoved = false
     }
 
     /// `item`'s row, the `index`th in `items`.
@@ -641,6 +654,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSTextFieldDelegate, N
     }
 
     func showDetail(of index: Int) {
+        // Going back after a refresh returns to the item the detail showed.
+        selectionMoved = true
         let pane = DetailPane(item: items[index])
         pane.text.back = { [unowned self] in
             closeDetail()
