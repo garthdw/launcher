@@ -1,3 +1,6 @@
 allow-private-module-inception = true
 avoid-breaking-exported-api = false
 ignore-interior-mutability = []
+disallowed-macros = [
+  { path = "std::eprintln", reason = "panics when the log file can't be written; use launcher_core::log!" },
+]

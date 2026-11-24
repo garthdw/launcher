@@ -8,7 +8,7 @@ use std::sync::{Arc, Mutex, Weak};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-use launcher_core::{Action, Item, Plugin, ResultsChanged, config_directory};
+use launcher_core::{Action, Item, Plugin, ResultsChanged, config_directory, log};
 use notify::{RecommendedWatcher, RecursiveMode, Watcher};
 
 const MAX_RESULTS: usize = 8;
@@ -70,7 +70,7 @@ impl Apps {
     pub fn start(changed: ResultsChanged) -> Self {
         let frecency_path = config_directory().map(|directory| directory.join("frecency"));
         if frecency_path.is_none() {
-            eprintln!("no home folder, so apps are ranked without frecency");
+            log!("no home folder, so apps are ranked without frecency");
         }
         Self::watching(app_folders(), frecency_path, changed)
     }
@@ -104,7 +104,7 @@ impl Apps {
 impl Plugin for Apps {
     fn query(&mut self, query: &str) -> Vec<Item> {
         let Ok(index) = self.index.lock() else {
-            eprintln!("the app index thread panicked; skipping apps");
+            log!("the app index thread panicked; skipping apps");
             return Vec::new();
         };
         rank(&index, &self.usage, query, now())
@@ -163,7 +163,7 @@ impl Saver {
                 // a drop then waits for one write at most.
                 let contents = receiver.try_iter().last().unwrap_or(contents);
                 if let Err(error) = save(&path, &contents) {
-                    eprintln!("can't save {}: {error}", path.display());
+                    log!("can't save {}: {error}", path.display());
                 }
             }
         });
@@ -175,7 +175,7 @@ impl Saver {
 
     fn save(&self, contents: String) {
         if self.sender.send(contents).is_err() {
-            eprintln!("the frecency writer stopped; not saving");
+            log!("the frecency writer stopped; not saving");
         }
     }
 }
@@ -188,7 +188,7 @@ impl Drop for Saver {
         if let Some(thread) = self.thread.take()
             && thread.join().is_err()
         {
-            eprintln!("the frecency writer panicked");
+            log!("the frecency writer panicked");
         }
     }
 }
@@ -229,11 +229,11 @@ fn keep_index(
                         }
                         match watcher.watch(root, RecursiveMode::Recursive) {
                             Ok(()) => *watched = true,
-                            Err(error) => eprintln!("can't watch {}: {error}", root.display()),
+                            Err(error) => log!("can't watch {}: {error}", root.display()),
                         }
                     }
                 }
-                Err(_) => eprintln!("the app folder watcher is poisoned; not watching new folders"),
+                Err(_) => log!("the app folder watcher is poisoned; not watching new folders"),
             }
         }
         // Scan before locking: `query` takes the same lock on every keystroke.
@@ -247,7 +247,7 @@ fn keep_index(
             }
             Ok(_) => false,
             Err(_) => {
-                eprintln!("the app index is poisoned; not refreshing it");
+                log!("the app index is poisoned; not refreshing it");
                 false
             }
         };
@@ -273,16 +273,16 @@ fn watch(roots: &[PathBuf], changes: Sender<()>) -> Option<RecommendedWatcher> {
     let handler = move |result: notify::Result<notify::Event>| match result {
         Ok(event) if event.paths.iter().any(&relevant) => {
             if changes.send(()).is_err() {
-                eprintln!("the app index thread stopped; ignoring folder changes");
+                log!("the app index thread stopped; ignoring folder changes");
             }
         }
         Ok(_) => {}
-        Err(error) => eprintln!("app folder watcher: {error}"),
+        Err(error) => log!("app folder watcher: {error}"),
     };
     let mut watcher = match notify::recommended_watcher(handler) {
         Ok(watcher) => watcher,
         Err(error) => {
-            eprintln!("can't watch app folders, so new apps need a restart: {error}");
+            log!("can't watch app folders, so new apps need a restart: {error}");
             return None;
         }
     };
@@ -293,7 +293,7 @@ fn watch(roots: &[PathBuf], changes: Sender<()>) -> Option<RecommendedWatcher> {
         .filter(|parent| parent.is_dir());
     for parent in missing_parents {
         if let Err(error) = watcher.watch(parent, RecursiveMode::NonRecursive) {
-            eprintln!("can't watch {}: {error}", parent.display());
+            log!("can't watch {}: {error}", parent.display());
         }
     }
     Some(watcher)
@@ -371,7 +371,7 @@ fn collect_apps(folder: &Path, depth: usize, apps: &mut Vec<App>) {
         Ok(entries) => entries,
         Err(error) if error.kind() == io::ErrorKind::NotFound => return,
         Err(error) => {
-            eprintln!("can't list {}: {error}", folder.display());
+            log!("can't list {}: {error}", folder.display());
             return;
         }
     };
@@ -379,7 +379,7 @@ fn collect_apps(folder: &Path, depth: usize, apps: &mut Vec<App>) {
         let entry = match entry {
             Ok(entry) => entry,
             Err(error) => {
-                eprintln!("can't list {}: {error}", folder.display());
+                log!("can't list {}: {error}", folder.display());
                 continue;
             }
         };
@@ -509,7 +509,7 @@ fn load_usage(path: &Path) -> HashMap<PathBuf, Usage> {
         Ok(contents) => parse_usage(&contents),
         Err(error) if error.kind() == io::ErrorKind::NotFound => HashMap::new(),
         Err(error) => {
-            eprintln!("can't read {}: {error}", path.display());
+            log!("can't read {}: {error}", path.display());
             HashMap::new()
         }
     }
@@ -522,7 +522,7 @@ fn parse_usage(contents: &str) -> HashMap<PathBuf, Usage> {
         .filter_map(|line| {
             let parsed = parse_usage_line(line);
             if parsed.is_none() {
-                eprintln!("skipping unreadable frecency line: {line:?}");
+                log!("skipping unreadable frecency line: {line:?}");
             }
             parsed
         })
@@ -817,7 +817,7 @@ mod tests {
         let (sender, receiver) = mpsc::channel();
         let changed: ResultsChanged = Arc::new(move || {
             if sender.send(()).is_err() {
-                eprintln!("the test stopped listening");
+                log!("the test stopped listening");
             }
         });
         let mut plugin = Apps::watching(vec![root.path().to_path_buf()], None, changed);

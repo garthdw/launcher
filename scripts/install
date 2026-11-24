@@ -1,0 +1,55 @@
+#!/usr/bin/env bash
+# Bundles the app with scripts/bundle, installs it as ~/Applications/Launcher.app and starts it.
+# Any running copy is quit first, the installed one or a dev build, since only one can hold ⌥Space.
+# Set MAC_APP_SIGN (see the README), or macOS asks again for the Accessibility permission after
+# every install.
+set -euo pipefail
+cd "$(dirname "$0")/.."
+
+scripts/bundle
+installed=~/Applications/Launcher.app
+mkdir -p ~/Applications
+# Staged beside the installed copy, on the same volume, so the swap is two renames and an
+# interrupted install never leaves a half-copied app, or none if it stops between them.
+staging=$(mktemp -d ~/Applications/.Launcher-install.XXXXXX)
+clean_up() {
+  if [[ ! -e $installed && -e $staging/previous.app ]]; then mv "$staging/previous.app" "$installed"; fi
+  rm -rf "$staging"
+}
+trap clean_up EXIT
+ditto target/release/Launcher.app "$staging/Launcher.app"
+
+# NSRunningApplication's terminate asks the app to quit like the Quit menu item would, and,
+# unlike AppleScript's `quit`, needs no Automation permission. A copy that doesn't quit fails the
+# wait below, whatever terminate returned.
+running=$(osascript -l JavaScript -e "ObjC.import('AppKit');
+function run() {
+  const apps = \$.NSRunningApplication.runningApplicationsWithBundleIdentifier('dev.dewet.launcher');
+  const quitting = [];
+  for (let index = 0; index < apps.count; index++) {
+    const app = apps.objectAtIndex(index);
+    // Read before quitting: a copy that has quit has no executable URL.
+    const name = app.executableURL.path?.js ?? 'Launcher (pid ' + app.processIdentifier + ')';
+    app.terminate;
+    quitting.push(app.processIdentifier + ' ' + name);
+  }
+  return quitting.join('\n');
+}")
+while read -r pid executable; do
+  [[ -n $pid ]] || continue
+  echo "quitting $executable"
+  for _ in {1..100}; do
+    kill -0 "$pid" &>/dev/null || continue 2
+    sleep 0.1
+  done
+  echo "Launcher (pid $pid) didn't quit within 10 s; not installing" >&2
+  exit 1
+done <<<"$running"
+
+if [[ -e $installed ]]; then mv "$installed" "$staging/previous.app"; fi
+mv "$staging/Launcher.app" "$installed"
+# `open` passes on this shell's environment, so start the app with only what a Finder launch
+# gets, keeping variables like LAUNCHER_OPEN out of it.
+env -i HOME="$HOME" USER="$USER" LOGNAME="${LOGNAME:-$USER}" ${TMPDIR:+TMPDIR="$TMPDIR"} \
+  PATH=/usr/bin:/bin:/usr/sbin:/sbin open "$installed"
+echo "installed $installed; its log is ~/Library/Logs/launcher.log"

@@ -4,7 +4,7 @@
 use launcher_apps::Apps;
 use launcher_calc::Calc;
 use launcher_config::{Config, EnabledPlugins};
-use launcher_core::{Plugin, Plugins, ResultsChanged, cache_directory};
+use launcher_core::{Plugin, Plugins, ResultsChanged, cache_directory, log};
 use launcher_jwt::Jwt;
 use notify::RecommendedWatcher;
 
@@ -34,15 +34,13 @@ impl Place {
         match self {
             Self::Calculator => {
                 let rates_directory = cache_directory().unwrap_or_else(|| {
-                    eprintln!(
-                        "no home folder, so exchange rates are cached in the temporary folder"
-                    );
+                    log!("no home folder, so exchange rates are cached in the temporary folder");
                     std::env::temp_dir()
                 });
                 match Calc::start(rates_directory, changed.clone()) {
                     Ok(calc) => Some(Box::new(calc)),
                     Err(error) => {
-                        eprintln!("calculator unavailable: {error}");
+                        log!("calculator unavailable: {error}");
                         None
                     }
                 }

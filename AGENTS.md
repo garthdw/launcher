@@ -14,6 +14,7 @@ cargo test -p launcher-calc units            # single test, by name substring
 just                                         # bundle, stop any running copy, run in the foreground
 just run '100 N to lbf'                      # the same, opening the panel with this query
 scripts/bundle                               # macOS: Rust core, Swift bindings, signed target/release/Launcher.app
+scripts/install                              # bundle, install as ~/Applications/Launcher.app, quit any running copy and open it
 LAUNCHER_OPEN='100 N to lbf' target/release/Launcher.app/Contents/MacOS/Launcher   # open the panel at launch
 target/release/Launcher.app/Contents/MacOS/Launcher config init   # write ~/.config/launcher/config.toml, every setting commented out
 target/release/Launcher.app/Contents/MacOS/Launcher login status   # launch at login: on, off or status; registers this copy of the app
@@ -22,6 +23,8 @@ cargo build --profile profiling              # release with full symbols, for sa
 ```
 
 `scripts/bundle` signs with the identity in `MAC_APP_SIGN`, or ad hoc without one, in which case macOS asks again for the Accessibility permission after every build. It writes the UniFFI bindings into `macos/Sources/launcher_ffiFFI` and `macos/Sources/Launcher/Generated` (both ignored), so run it before `swift build --package-path macos`.
+
+The app logs to stderr (`log(…)` in Swift, `launcher_core::log!` in Rust). When stderr is `/dev/null`, as it is when launched by Finder or `open`, `Log.swift` points it at `~/Library/Logs/launcher.log` and rotates that to `launcher.log.1` at launch past 1 MB. Each launch logs whether it has the Accessibility permission.
 
 `.cargo/config.toml` sets `MACOSX_DEPLOYMENT_TARGET` to the app's minimum macOS, so C code in dependencies links into the Swift binary without warnings.
 
@@ -52,6 +55,7 @@ Settings and state live in `~/.config/launcher` on every platform (`launcher_cor
 - Prefer implementing functionality in existing files unless it is a new logical component. Avoid creating many small files.
 - Avoid using functions that panic like `unwrap()`, instead use mechanisms like `?` to propagate errors.
 - Be careful with operations like indexing which may panic if the indexes are out of bounds.
+- Log with `launcher_core::log!`, not `eprintln!`: the installed app's stderr is a file, and `eprintln!` panics when a write to it fails. Clippy enforces it; only the `config` command, writing to its terminal, is exempt.
 - Never silently discard errors with `let _ =` on fallible operations. Always handle errors appropriately:
   - Propagate errors with `?` when the calling function should handle them
   - Use `.log_err()` or similar when you need to ignore errors but want visibility

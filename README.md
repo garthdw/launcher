@@ -17,8 +17,34 @@ scripts/bundle    # or just builds target/release/Launcher.app
 open target/release/Launcher.app
 ```
 
-Set `MAC_APP_SIGN` to a codesigning identity (`security find-identity -v -p codesigning` lists
-yours) to keep macOS permissions across rebuilds; without it the app is signed ad hoc.
+## Install
+
+```sh
+scripts/install   # or `just install`
+```
+
+This builds the app, installs it as `~/Applications/Launcher.app`, quits any running copy (only
+one can hold ⌥Space) and starts the installed one. Started from Finder, `open` or at login, the app
+logs to `~/Library/Logs/launcher.log`, rotating it to `launcher.log.1` at launch once it passes
+1 MB; started from a terminal, it logs there instead.
+
+### Signing
+
+macOS ties the Accessibility permission, which moving windows needs, to the app's code signature.
+Without a signing identity the app is signed ad hoc, which gives every build a new identity, so
+macOS asks for the permission again after each build and install. To keep it, sign with a
+certificate, such as the free Apple Development one Xcode creates when you sign in under Settings
+› Accounts. List your identities:
+
+```sh
+security find-identity -v -p codesigning
+```
+
+and set `MAC_APP_SIGN` to one, by its name or hash, in your shell's profile:
+
+```sh
+export MAC_APP_SIGN='Apple Development: Jane Doe (ABCDE12345)'
+```
 
 ## Settings
 
