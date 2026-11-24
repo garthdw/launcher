@@ -665,12 +665,15 @@ let characterKeyCodes: [String: Int] = [
 func copyToPasteboard(_ text: String) -> Bool {
     NSPasteboard.general.clearContents()
     if NSPasteboard.general.setString(text, forType: .string) { return true }
-    log("can't copy \(text)")
+    // Not the text itself: it can be a token's claims, and the log is kept on disk.
+    log("can't copy \(text.count) characters to the pasteboard")
     return false
 }
 
 func log(_ message: String) {
-    FileHandle.standardError.write(Data((message + "\n").utf8))
+    // The non-throwing `write` raises when stderr is a file a full disk refuses, and there's
+    // nowhere left to report that.
+    try? FileHandle.standardError.write(contentsOf: Data((message + "\n").utf8))
 }
 
 // `Launcher config init`, from the app's own binary, so there's no separate tool to build and sign.
@@ -678,6 +681,7 @@ if let status = configCommand(arguments: Array(CommandLine.arguments.dropFirst()
     exit(status)
 }
 
+startLog()
 MainActor.assumeIsolated {
     let app = NSApplication.shared
     app.setActivationPolicy(.accessory)

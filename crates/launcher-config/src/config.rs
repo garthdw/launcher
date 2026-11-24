@@ -9,7 +9,7 @@ use std::sync::mpsc;
 use std::thread;
 use std::time::Duration;
 
-use launcher_core::{Hotkey, Key, config_directory};
+use launcher_core::{Hotkey, Key, config_directory, log};
 use launcher_window::{Binding, DEFAULT_BINDINGS, WindowAction};
 use notify::{RecommendedWatcher, RecursiveMode, Watcher};
 use serde::Deserialize;
@@ -207,6 +207,10 @@ fn read(path: &Path) -> Result<Config, String> {
 /// Runs `config` commands, the launcher's only command-line use: the shell hands over its
 /// arguments before starting its UI. `None` when they aren't a command, so the UI starts; else
 /// the exit status.
+#[expect(
+    clippy::disallowed_macros,
+    reason = "a command's messages go to its terminal, not the log"
+)]
 pub fn run_command(arguments: &[String]) -> Option<i32> {
     let arguments: Vec<&str> = arguments.iter().map(String::as_str).collect();
     let ["config", command @ ..] = arguments.as_slice() else {
@@ -290,11 +294,11 @@ pub fn watch(
                         .any(|name| names.iter().any(|watched| watched == name)) =>
             {
                 if sender.send(()).is_err() {
-                    eprintln!("the config reload thread stopped; ignoring changes");
+                    log!("the config reload thread stopped; ignoring changes");
                 }
             }
             Ok(_) => {}
-            Err(error) => eprintln!("config watcher: {error}"),
+            Err(error) => log!("config watcher: {error}"),
         })?;
     watcher.watch(directory, RecursiveMode::NonRecursive)?;
     if let Some(target_directory) = target_directory {
@@ -481,7 +485,7 @@ mod tests {
         let (sender, receiver) = mpsc::channel();
         let _watcher = watch(&path, move || {
             if sender.send(()).is_err() {
-                eprintln!("the test stopped listening");
+                log!("the test stopped listening");
             }
         })?;
         let wait = Duration::from_secs(5);
@@ -512,7 +516,7 @@ mod tests {
         let (sender, receiver) = mpsc::channel();
         let _watcher = watch(&path, move || {
             if sender.send(()).is_err() {
-                eprintln!("the test stopped listening");
+                log!("the test stopped listening");
             }
         })?;
         // Events from making the link can arrive late; only the save counts.
