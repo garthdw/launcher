@@ -2,7 +2,7 @@ use std::sync::Arc;
 
 use compact_str::{CompactString, ToCompactString};
 use itertools::Itertools;
-use jiff::Zoned;
+use jiff::ZonedDateTime;
 
 use crate::{
     list::NumbatList,
@@ -37,7 +37,7 @@ pub enum Value {
     Boolean(bool),
     String(CompactString),
     /// A DateTime with an associated offset used when pretty printing
-    DateTime(Zoned),
+    DateTime(ZonedDateTime),
     FunctionReference(FunctionReference),
     FormatSpecifiers(Option<CompactString>),
     StructInstance(Arc<StructInfo>, Vec<Value>),
@@ -73,7 +73,7 @@ impl Value {
     }
 
     #[track_caller]
-    pub fn unsafe_as_datetime(self) -> jiff::Zoned {
+    pub fn unsafe_as_datetime(self) -> jiff::ZonedDateTime {
         if let Value::DateTime(dt) = self {
             dt
         } else {

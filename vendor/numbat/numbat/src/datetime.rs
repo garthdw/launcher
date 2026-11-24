@@ -1,5 +1,5 @@
 use compact_str::CompactString;
-use jiff::{Timestamp, Zoned, civil::DateTime, fmt::rfc2822, tz::TimeZone};
+use jiff::{Timestamp, ZonedDateTime, civil::DateTime, fmt::rfc2822, tz::TimeZone};
 use std::str::FromStr;
 
 use crate::pretty_print::FormatOptions;
@@ -11,14 +11,14 @@ pub fn get_local_timezone_or_utc() -> TimeZone {
     TimeZone::system()
 }
 
-pub fn parse_datetime(input: &str) -> Result<Zoned, jiff::Error> {
-    if let zoned @ Ok(_) = Zoned::from_str(input) {
+pub fn parse_datetime(input: &str) -> Result<ZonedDateTime, jiff::Error> {
+    if let zoned @ Ok(_) = ZonedDateTime::from_str(input) {
         return zoned;
     }
 
     // RFC 3339
     if let Ok(timestamp) = DateTime::strptime("%Y-%m-%dT%H:%M:%S%.fZ", input)
-        && let zoned @ Ok(_) = timestamp.to_zoned(TimeZone::UTC)
+        && let zoned @ Ok(_) = timestamp.to_zoned_datetime(TimeZone::UTC)
     {
         return zoned;
     }
@@ -43,7 +43,7 @@ pub fn parse_datetime(input: &str) -> Result<Zoned, jiff::Error> {
 
     for format in FORMATS {
         // Try to match the given format plus an additional UTC offset (%z)
-        if let Ok(dt) = Zoned::strptime(format!("{format} %z"), input) {
+        if let Ok(dt) = ZonedDateTime::strptime(format!("{format} %z"), input) {
             return Ok(dt);
         }
 
@@ -61,19 +61,19 @@ pub fn parse_datetime(input: &str) -> Result<Zoned, jiff::Error> {
             && let Ok(tz) = TimeZone::get(potential_timezone_name)
             && let Ok(datetime) = DateTime::strptime(format, rest)
         {
-            return datetime.to_zoned(tz);
+            return datetime.to_zoned_datetime(tz);
         }
 
         // Without timezone/offset
         if let Ok(dt) = DateTime::strptime(format, input) {
-            return dt.to_zoned(get_local_timezone_or_utc());
+            return dt.to_zoned_datetime(get_local_timezone_or_utc());
         }
     }
 
-    Timestamp::from_str(input).map(|ts| ts.to_zoned(get_local_timezone_or_utc()))
+    Timestamp::from_str(input).map(|ts| ts.to_zoned_datetime(get_local_timezone_or_utc()))
 }
 
-pub fn to_string(dt: &Zoned, options: &FormatOptions) -> CompactString {
+pub fn to_string(dt: &ZonedDateTime, options: &FormatOptions) -> CompactString {
     let tz = dt.time_zone();
 
     if dt.time_zone() == &TimeZone::UTC {

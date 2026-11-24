@@ -653,7 +653,7 @@ impl Vm {
     }
 
     #[track_caller]
-    fn pop_datetime(&mut self) -> jiff::Zoned {
+    fn pop_datetime(&mut self) -> jiff::ZonedDateTime {
         match self.pop() {
             Value::DateTime(q) => q,
             _ => panic!("Expected datetime to be on the top of the stack"),

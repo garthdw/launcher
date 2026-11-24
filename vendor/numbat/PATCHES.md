@@ -17,3 +17,10 @@ launcher runs for weeks and refreshes rates daily, so `set_from_xml` assigns thr
 inside the lock instead. The signature is unchanged, and so is the rest: XML that doesn't parse
 still leaves no rates (the launcher checks XML before passing it), and the lock is unwrapped as
 everywhere else in `currency.rs`.
+
+## 2. jiff 1.0 (`numbat/Cargo.toml`, `numbat/src/{datetime,value,vm}.rs`, `numbat/src/ffi/datetime.rs`)
+
+So the app links one jiff, shared with its own crates, numbat depends on `jiff` 1.0 instead of
+0.2. jiff 1.0 renamed `Zoned` to `ZonedDateTime` and `to_zoned` to `to_zoned_datetime`; nothing
+else needed changing. `js` still exists in 1.0 and only matters on wasm, so it stays. numbat's
+tests give the same results as before this patch.

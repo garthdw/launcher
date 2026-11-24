@@ -1,7 +1,7 @@
 use compact_str::CompactString;
 use jiff::Span;
 use jiff::Timestamp;
-use jiff::Zoned;
+use jiff::ZonedDateTime;
 use jiff::fmt::StdFmtWrite;
 use jiff::fmt::strtime::BrokenDownTime;
 use num_traits::ToPrimitive;
@@ -22,7 +22,7 @@ pub fn now(
     _args: Args,
     _return_type: &TypeScheme,
 ) -> Result<Value, Box<RuntimeErrorKind>> {
-    return_datetime!(Zoned::now())
+    return_datetime!(ZonedDateTime::now())
 }
 
 pub fn datetime(
@@ -101,7 +101,7 @@ pub fn from_unixtime_us(
 
     let dt = Timestamp::from_microsecond(us)
         .map_err(|_| RuntimeErrorKind::DateTimeOutOfRange)?
-        .to_zoned(datetime::get_local_timezone_or_utc());
+        .to_zoned_datetime(datetime::get_local_timezone_or_utc());
 
     return_datetime!(dt)
 }
