@@ -1,7 +1,9 @@
 use launcher_core::{Action, Item, Plugin};
+use numbat::markup::plain_text_format;
 use numbat::module_importer::BuiltinModuleImporter;
 use numbat::resolver::CodeSource;
-use numbat::{Context, InterpreterResult, NumbatError};
+use numbat::value::Value;
+use numbat::{Context, FormatOptions, InterpreterResult, NumbatError};
 
 pub struct Calc {
     context: Context,
@@ -36,13 +38,26 @@ impl Plugin for Calc {
         else {
             return Vec::new();
         };
-        let result = value.to_string();
         vec![Item {
-            title: result.clone(),
+            title: plain_text(&value, &FormatOptions::default()),
             subtitle: "Calculator · ↵ copies".into(),
-            action: Action::Copy(result),
+            // Digit separators read well but break pasting into most other apps.
+            action: Action::Copy(plain_text(
+                &value,
+                &FormatOptions {
+                    digit_separator: String::new(),
+                    ..FormatOptions::default()
+                },
+            )),
         }]
     }
+}
+
+/// How numbat's REPL shows a value, unlike `Display`, which writes dates as `datetime("…")`.
+fn plain_text(value: &Value, options: &FormatOptions) -> String {
+    plain_text_format(&value.pretty_print_with(options), false)
+        .trim()
+        .to_owned()
 }
 
 /// People type `x` for multiplication ("2 x 3", "4x5"), but numbat reads only `*` and `×` and
@@ -101,6 +116,27 @@ mod tests {
     #[test]
     fn arithmetic() {
         assert_eq!(titles("2 + 3 * 4"), ["14"]);
+    }
+
+    #[test]
+    fn copies_large_numbers_without_separators() {
+        let mut calc = Calc::new().expect("prelude loads");
+        let items = calc.query("2 x 1000000 m");
+        assert_eq!(
+            items
+                .iter()
+                .map(|item| (item.title.as_str(), &item.action))
+                .collect::<Vec<_>>(),
+            [("2_000_000 m", &Action::Copy("2000000 m".into()))]
+        );
+    }
+
+    #[test]
+    fn dates_read_as_dates() {
+        assert_eq!(
+            titles("datetime(\"2026-01-02 03:04:05 UTC\")"),
+            ["2026-01-02 03:04:05 UTC"]
+        );
     }
 
     #[test]
