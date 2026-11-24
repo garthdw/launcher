@@ -6,7 +6,6 @@ use launcher_calc::Calc;
 use launcher_config::{Config, EnabledPlugins};
 use launcher_core::{Plugin, Plugins, ResultsChanged, cache_directory, log};
 use launcher_jwt::Jwt;
-use notify::RecommendedWatcher;
 
 /// The plugins, in the order their results show when equally relevant; each has a place in
 /// `Plugins`, empty while it's off.
@@ -54,49 +53,24 @@ pub struct Launcher {
     problem: Option<String>,
     /// Handed to plugins restarted when the settings turn them on or off.
     results_changed: ResultsChanged,
-    /// Watching the config file stops when this drops.
-    _watcher: Option<RecommendedWatcher>,
 }
 
 impl Launcher {
-    /// Starts the plugins the config file turns on, and calls `settings_changed` from another
-    /// thread whenever the file changes, for the shell to call `reload`.
-    pub fn start(
-        results_changed: ResultsChanged,
-        settings_changed: impl Fn() + Send + 'static,
-    ) -> Self {
-        // Watching before reading, so a save in between still reloads.
-        let watched = launcher_config::path().and_then(|path| {
-            launcher_config::watch(&path, settings_changed).map_err(|error| {
-                format!(
-                    "can't watch {}, so changes need a relaunch: {error}",
-                    path.display()
-                )
-            })
-        });
-        let (config, load_problem) = match launcher_config::load() {
+    /// Starts the plugins the config file turns on. The file is read again only on `reload`.
+    pub fn start(results_changed: ResultsChanged) -> Self {
+        let (config, problem) = match launcher_config::load() {
             Ok(config) => (config, None),
             Err(problem) => (Config::default(), Some(problem)),
         };
-        let (watcher, watch_problem) = match watched {
-            Ok(watcher) => (Some(watcher), None),
-            Err(problem) => (None, Some(problem)),
-        };
-        let problems: Vec<String> = load_problem.into_iter().chain(watch_problem).collect();
-        let problem = (!problems.is_empty()).then(|| problems.join("\n\n"));
         let mut plugins = Plugins::empty(PLACES.len());
         for (index, place) in PLACES.into_iter().enumerate() {
             if place.enabled(config.plugins) {
                 plugins.set(index, place.start(&results_changed));
             }
         }
-        Self {
-            _watcher: watcher,
-            ..Self::with(plugins, config, problem, results_changed)
-        }
+        Self::with(plugins, config, problem, results_changed)
     }
 
-    /// Without watching the config file.
     pub fn with(
         plugins: Plugins,
         config: Config,
@@ -108,7 +82,6 @@ impl Launcher {
             config,
             problem,
             results_changed,
-            _watcher: None,
         }
     }
 

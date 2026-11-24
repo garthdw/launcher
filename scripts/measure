@@ -1,7 +1,8 @@
 #!/bin/sh
 # Bundles the app, then measures it against the budget below over several launches: summon to
 # focus, and the footprint with the panel open and after Esc hides it, as medians of the runs
-# after a warm-up. Fails when one is over budget. Raise a budget only deliberately, in the commit
+# after a warm-up. Fails when one is over budget. The footprints leave out LaunchServices' pages of
+# its database, shown apart: they change by several MB in every app with the system's state. Raise a budget only deliberately, in the commit
 # that needs it, saying why.
 #
 # Usage: scripts/measure [runs] [query]
@@ -43,17 +44,23 @@ wait_seconds() {
     osascript -e "delay $1"
 }
 
-# vmmap's figures, such as 24.5M or 980K, in KB; footprint rounds to whole MB.
-footprint_kb() {
-    vmmap -summary "$1" | awk -v field="$2" '
-        index($0, "Physical footprint" field ":") == 1 {
-            value = $NF
+# The footprint now and at its peak less LaunchServices' pages, and those pages, in KB from
+# vmmap's figures such as 24.5M or 980K; footprint rounds to whole MB. The pages are the
+# CoreServices region's dirty and swapped sizes, which together count towards the footprint.
+footprints_kb() {
+    vmmap -summary "$1" | awk '
+        function kb(value, unit, number) {
             unit = substr(value, length(value))
             number = substr(value, 1, length(value) - 1)
-            if (unit == "M") number *= 1024
-            else if (unit == "G") number *= 1048576
-            printf "%d\n", number
-        }'
+            if (unit == "G") return number * 1048576
+            if (unit == "M") return number * 1024
+            if (unit == "K") return number
+            return number / 1024
+        }
+        index($0, "Physical footprint:") == 1 { now = kb($NF) }
+        index($0, "Physical footprint (peak):") == 1 { peak = kb($NF) }
+        $1 == "CoreServices" && $2 ~ /^[0-9]/ { services = kb($4) + kb($5) }
+        END { printf "%d %d %d\n", now - services, peak - services, services }'
 }
 
 # On-screen windows the process owns, so the panel's state is known without the Accessibility
@@ -71,7 +78,7 @@ median() {
 pkill -x Launcher || true
 while pgrep -x Launcher >/dev/null; do wait_seconds 0.1; done
 
-printf '%-6s %10s %10s %10s %10s\n' run summon_ms open_kb hidden_kb peak_kb
+printf '%-7s %10s %10s %10s %10s %12s\n' run summon_ms open_kb hidden_kb peak_kb services_kb
 for run in $(seq 0 "$runs"); do
     log=$work/run-$run.log
     LAUNCHER_OPEN=$query "$app" 2>"$log" &
@@ -92,22 +99,25 @@ for run in $(seq 0 "$runs"); do
         echo "run $run: the panel isn't on screen" >&2
         exit 1
     fi
-    open_kb=$(footprint_kb "$pid" "")
+    read -r open_kb _ _ <<EOF
+$(footprints_kb "$pid")
+EOF
     "$root/scripts/press" esc
     wait_seconds 2
     if [ "$(windows "$pid")" -ne 0 ]; then
         echo "run $run: Esc didn't hide the panel" >&2
         exit 1
     fi
-    hidden_kb=$(footprint_kb "$pid" "")
-    peak_kb=$(footprint_kb "$pid" " (peak)")
+    read -r hidden_kb peak_kb services_kb <<EOF
+$(footprints_kb "$pid")
+EOF
     kill "$pid"
     wait "$pid" 2>/dev/null || true
     if [ "$run" -eq 0 ]; then
-        printf '%-6s %10s %10s %10s %10s\n' warm-up "$summon" "$open_kb" "$hidden_kb" "$peak_kb"
+        printf '%-7s %10s %10s %10s %10s %12s\n' warm-up "$summon" "$open_kb" "$hidden_kb" "$peak_kb" "$services_kb"
         continue
     fi
-    printf '%-6s %10s %10s %10s %10s\n' "$run" "$summon" "$open_kb" "$hidden_kb" "$peak_kb"
+    printf '%-7s %10s %10s %10s %10s %12s\n' "$run" "$summon" "$open_kb" "$hidden_kb" "$peak_kb" "$services_kb"
     echo "$summon $open_kb $hidden_kb $peak_kb" >>"$work/runs"
 done
 

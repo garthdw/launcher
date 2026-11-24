@@ -14,7 +14,7 @@ let keys: [String: Int] = [
     "return": kVK_Return, "enter": kVK_Return, "esc": kVK_Escape, "tab": kVK_Tab,
     "space": kVK_Space, "delete": kVK_Delete, "left": kVK_LeftArrow, "right": kVK_RightArrow,
     "up": kVK_UpArrow, "down": kVK_DownArrow,
-    "a": kVK_ANSI_A, "c": kVK_ANSI_C, "v": kVK_ANSI_V, "x": kVK_ANSI_X, "z": kVK_ANSI_Z,
+    "a": kVK_ANSI_A, "c": kVK_ANSI_C, "r": kVK_ANSI_R, "v": kVK_ANSI_V, "x": kVK_ANSI_X, "z": kVK_ANSI_Z,
     "q": kVK_ANSI_Q, ",": kVK_ANSI_Comma,
     // The window layouts' hotkeys.
     "d": kVK_ANSI_D, "f": kVK_ANSI_F, "g": kVK_ANSI_G,
