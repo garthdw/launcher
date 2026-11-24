@@ -268,16 +268,13 @@ fn is_bundle(path: &Path) -> bool {
 /// Finder's name for the app: localized, and often not the bundle's file name ("Find My" for
 /// `FindMy.app`). Info.plist names don't match Finder's either, so ask the system.
 #[cfg(target_os = "macos")]
-fn display_name(path: &Path) -> Option<String> {
+fn localized_name(path: &Path) -> Option<String> {
     use std::ffi::c_void;
     use std::ptr::{self, NonNull};
 
     use objc2_core_foundation::{CFRetained, CFString, CFType, CFURL, kCFURLLocalizedNameKey};
 
-    let fallback = || Some(path.file_stem()?.to_string_lossy().into_owned());
-    let Some(url) = CFURL::from_file_path(path) else {
-        return fallback();
-    };
+    let url = CFURL::from_file_path(path)?;
     let mut name: *const CFType = ptr::null();
     // SAFETY: the key is CoreFoundation's own constant, and on success `name` holds a +1 retained
     // CFString, which `CFRetained::from_raw` takes ownership of.
@@ -288,21 +285,19 @@ fn display_name(path: &Path) -> Option<String> {
             ptr::null_mut(),
         )
     };
-    let Some(name) = NonNull::new(name.cast_mut()).filter(|_| found) else {
-        return fallback();
-    };
-    let name = unsafe { CFRetained::from_raw(name) };
-    let Ok(name) = name.downcast::<CFString>() else {
-        return fallback();
-    };
+    if !found {
+        return None;
+    }
+    let name = unsafe { CFRetained::from_raw(NonNull::new(name.cast_mut())?) };
+    let name = name.downcast::<CFString>().ok()?;
     // The name keeps `.app` when the user has chosen to show all extensions.
     let name = name.to_string();
     Some(name.strip_suffix(".app").map(str::to_owned).unwrap_or(name))
 }
 
 #[cfg(not(target_os = "macos"))]
-fn display_name(path: &Path) -> Option<String> {
-    Some(path.file_stem()?.to_string_lossy().into_owned())
+fn localized_name(_path: &Path) -> Option<String> {
+    None
 }
 
 fn scan(roots: &[PathBuf]) -> Vec<App> {
@@ -342,7 +337,8 @@ fn collect_apps(folder: &Path, depth: usize, apps: &mut Vec<App>) {
             continue;
         }
         if is_bundle(&path)
-            && let Some(name) = display_name(&path)
+            && let Some(name) = localized_name(&path)
+                .or_else(|| Some(path.file_stem()?.to_string_lossy().into_owned()))
         {
             apps.push(App { name, path });
         } else if depth > 0 {
@@ -704,10 +700,16 @@ mod tests {
     #[cfg(target_os = "macos")]
     fn apps_take_finders_name() {
         // Finder shows "Find My" or a translation, never the bundle's file name.
-        let path = PathBuf::from("/System/Applications/FindMy.app");
+        let path = Path::new("/System/Applications/FindMy.app");
         let apps = scan(&[PathBuf::from("/System/Applications")]);
-        let find_my = apps.iter().find(|app| app.path == path);
-        assert!(find_my.is_some_and(|app| app.name != "FindMy"));
+        let name = apps
+            .iter()
+            .find(|app| app.path == path)
+            .map(|app| &app.name);
+        assert!(
+            name.is_some_and(|name| name != "FindMy"),
+            "FindMy.app scanned as {name:?}"
+        );
     }
 
     #[test]
