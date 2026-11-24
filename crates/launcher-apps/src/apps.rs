@@ -367,6 +367,11 @@ fn scan(roots: &[PathBuf]) -> Vec<App> {
         // One level of plain folders, for vendor folders such as `/Applications/Adobe …/`.
         collect_apps(root, 1, &mut apps);
     }
+    distinguish(apps)
+}
+
+/// `apps` in name order, without the copies overlapping roots find twice.
+fn distinguish(mut apps: Vec<App>) -> Vec<App> {
     apps.sort();
     apps.dedup();
     apps
