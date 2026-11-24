@@ -22,6 +22,9 @@ const RATES_RETRY: Duration = Duration::from_secs(60);
 /// A query with a number is almost surely a calculation. Only an app whose name starts with it,
 /// as "1Password" does with "1pass", ranks higher.
 const CALCULATION: u8 = 90;
+/// A word such as `pi` or `e` may as well be the start of an app's name: below an app with a word
+/// starting with it (Pixelmator, TextEdit), above looser matches (Preview, Notes).
+const CONSTANT: u8 = 80;
 
 pub struct Calc {
     context: Context,
@@ -266,11 +269,7 @@ impl Plugin for Calc {
 
     fn query(&mut self, query: &str) -> Vec<Item> {
         self.take_update();
-        // Bare words such as an app name are valid numbat identifiers ("m", "day"), but echoing
-        // them back as "1 m" is noise in a launcher.
-        if !query.chars().any(|c| c.is_ascii_digit()) {
-            return Vec::new();
-        }
+        let has_number = query.chars().any(|c| c.is_ascii_digit());
         // Imports and definitions stay in the context for good: `let x = 3` would leave `x` in
         // later answers, before rates load the currency module would keep NaN rates, and
         // `use all` would hold every module in memory.
@@ -284,7 +283,17 @@ impl Plugin for Calc {
         let Ok((statements, InterpreterResult::Value(value))) =
             self.context.interpret(&rewritten, CodeSource::Text)
         else {
+            if !has_number {
+                return Vec::new();
+            }
             return self.rates_missing(query).into_iter().collect();
+        };
+        // Bare words such as an app name are often valid numbat ("m", "day"), but echoing them
+        // back as "1 m" is noise in a launcher. Only a plain number, as `pi` is, says something.
+        let relevance = match &value {
+            _ if has_number => CALCULATION,
+            Value::Quantity(quantity) if quantity.unit().is_scalar() => CONSTANT,
+            _ => return Vec::new(),
         };
         // Digit separators read well but break pasting into most other apps.
         let unseparated = FormatOptions {
@@ -324,7 +333,7 @@ impl Plugin for Calc {
             subtitle,
             action: Action::Copy(copied),
             detail,
-            relevance: CALCULATION,
+            relevance,
         }]
     }
 }
@@ -589,6 +598,25 @@ mod tests {
     fn ignores_imports() {
         assert!(titles("use units::currencies; 1").is_empty());
         assert!(titles("2; use all").is_empty());
+    }
+
+    #[test]
+    fn words_answer_only_with_a_plain_number() {
+        let answer = |query| {
+            items(query)
+                .into_iter()
+                .map(|item| (item.title, item.relevance))
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(answer("pi"), [("3.14159".into(), CONSTANT)]);
+        assert_eq!(answer("e"), [("2.71828".into(), CONSTANT)]);
+        assert_eq!(answer("pi * e"), [("8.53973".into(), CONSTANT)]);
+        assert_eq!(answer("2 pi"), [("6.28319".into(), CALCULATION)]);
+        for word in [
+            "m", "day", "c", "kg to lb", "dollar", "true", "now()", "firefox",
+        ] {
+            assert_eq!(answer(word), [], "{word}");
+        }
     }
 
     #[test]
