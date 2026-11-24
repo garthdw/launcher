@@ -275,18 +275,12 @@ impl Plugin for Calc {
         if !has_number && query.chars().nth(1).is_none() {
             return Vec::new();
         }
-        // Imports and definitions stay in the context for good: `let x = 3` would leave `x` in
-        // later answers, before rates load the currency module would keep NaN rates, and
-        // `use all` would hold every module in memory. `ans` and `_` name the last result,
-        // which every keystroke replaces, so they'd answer with a half-typed query's.
+        // numbat refuses imports, but only after `use all` has parsed every module. `ans` and `_`
+        // name the last result, which every keystroke replaces, so they'd answer with a
+        // half-typed query's.
         if query
             .split(|c: char| !c.is_alphanumeric() && c != '_')
-            .any(|word| {
-                matches!(
-                    word,
-                    "use" | "let" | "fn" | "unit" | "dimension" | "struct" | "ans" | "_"
-                )
-            })
+            .any(|word| matches!(word, "use" | "ans" | "_"))
         {
             return Vec::new();
         }
