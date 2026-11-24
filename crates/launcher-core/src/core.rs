@@ -262,7 +262,8 @@ impl Plugins {
     pub fn ran(&mut self, plugin: PluginId, action: &Action) {
         match self.0.get_mut(plugin.0).and_then(Option::as_mut) {
             Some(plugin) => plugin.ran(action),
-            None => log!("no plugin {} to tell it ran {action:?}", plugin.0),
+            // Not the action: a copy's text can be a token's claims, and the log is kept on disk.
+            None => log!("no plugin {} to tell it ran an action", plugin.0),
         }
     }
 }
