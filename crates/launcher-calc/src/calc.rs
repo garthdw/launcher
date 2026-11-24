@@ -27,10 +27,17 @@ const CALCULATION: u8 = 90;
 const CONSTANT: u8 = 80;
 
 pub struct Calc {
-    /// None until the background thread builds the first.
-    context: Option<Context>,
+    numbat: Numbat,
     rates: Rates,
     pending: Arc<Mutex<Pending>>,
+}
+
+/// numbat's context, built in the background.
+enum Numbat {
+    Building,
+    Ready(Box<Context>),
+    /// The prelude didn't build, which only a broken numbat does.
+    Failed,
 }
 
 /// What the calculator has of exchange rates.
@@ -48,13 +55,15 @@ struct Pending {
     context: Option<(Box<Context>, Option<Date>)>,
     /// No rates could be fetched or found in the cache.
     rates_unavailable: bool,
+    /// The first context didn't build.
+    numbat_failed: bool,
 }
 
 impl Calc {
     /// A calculator without exchange rates: currencies say rates are loading.
     pub fn new() -> Result<Self, Box<NumbatError>> {
         Ok(Self {
-            context: Some(context(false)?),
+            numbat: Numbat::Ready(Box::new(context(false)?)),
             rates: Rates::Loading,
             pending: Arc::default(),
         })
@@ -65,7 +74,7 @@ impl Calc {
     /// them a day old at most. Calls `changed` whenever the answers change.
     pub fn start(directory: PathBuf, changed: ResultsChanged) -> Self {
         let calc = Self {
-            context: None,
+            numbat: Numbat::Building,
             rates: Rates::Loading,
             pending: Arc::default(),
         };
@@ -85,8 +94,11 @@ impl Calc {
         if pending.rates_unavailable {
             self.rates = Rates::Unavailable;
         }
+        if pending.numbat_failed {
+            self.numbat = Numbat::Failed;
+        }
         if let Some((context, date)) = pending.context {
-            self.context = Some(*context);
+            self.numbat = Numbat::Ready(context);
             if let Some(date) = date {
                 self.rates = Rates::Loaded(date);
             }
@@ -171,6 +183,7 @@ fn keep_rates_current(directory: &Path, pending: &Weak<Mutex<Pending>>, changed:
         }
         Err(error) => {
             log!("calculator unavailable: {error}");
+            deliver(pending, changed, |pending| pending.numbat_failed = true);
             return;
         }
     }
@@ -305,8 +318,11 @@ impl Plugin for Calc {
         {
             return Vec::new();
         }
-        let Some(context) = &mut self.context else {
-            return Vec::new();
+        let context = match &mut self.numbat {
+            Numbat::Ready(context) => context,
+            Numbat::Building => return Vec::new(),
+            Numbat::Failed if has_number => return vec![notice("Calculator unavailable")],
+            Numbat::Failed => return Vec::new(),
         };
         let rewritten = x_as_times(query);
         let Ok((statements, InterpreterResult::Value(value))) =
@@ -622,9 +638,24 @@ mod tests {
     }
 
     #[test]
+    fn a_calculator_that_failed_to_build_says_so() {
+        let mut calc = Calc {
+            numbat: Numbat::Building,
+            rates: Rates::Loading,
+            pending: Arc::default(),
+        };
+        publish(&calc.pending, |pending| pending.numbat_failed = true);
+        assert_eq!(
+            shown(&mut calc, "2 + 2"),
+            [("Calculator unavailable".into(), String::new())]
+        );
+        assert_eq!(shown(&mut calc, "pi"), [], "words may be app names");
+    }
+
+    #[test]
     fn unavailable_rates_keep_a_context_not_yet_taken() -> Result<(), Box<NumbatError>> {
         let mut calc = Calc {
-            context: None,
+            numbat: Numbat::Building,
             rates: Rates::Loading,
             pending: Arc::default(),
         };
