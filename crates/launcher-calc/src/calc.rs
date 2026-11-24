@@ -100,14 +100,19 @@ impl Calc {
             Rates::Unavailable => "Exchange rates unavailable",
             Rates::Loaded(_) => return None,
         };
-        mentions_currency(query).then(|| Item {
-            title: title.into(),
-            subtitle: String::new(),
-            icon: Icon::Calculator,
-            action: Action::Nothing,
-            detail: Vec::new(),
-            relevance: CALCULATION,
-        })
+        mentions_currency(query).then(|| notice(title))
+    }
+}
+
+/// A muted row saying why a calculation has no answer.
+fn notice(title: &str) -> Item {
+    Item {
+        title: title.into(),
+        subtitle: String::new(),
+        icon: Icon::Calculator,
+        action: Action::Nothing,
+        detail: Vec::new(),
+        relevance: CALCULATION,
     }
 }
 
