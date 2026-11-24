@@ -1,6 +1,7 @@
 //! The boundary the native shells call. Its types mirror `launcher-core`'s so the core stays
 //! free of FFI derives; a Rust shell (Linux) uses the core directly.
 
+use std::fmt;
 use std::sync::{Arc, Mutex, MutexGuard};
 
 use launcher_core::{Found, PluginId};
@@ -190,6 +191,31 @@ pub struct Settings {
 #[uniffi::export]
 pub fn config_command(arguments: Vec<String>) -> Option<i32> {
     launcher_config::run_command(&arguments)
+}
+
+#[derive(Debug, uniffi::Error)]
+pub enum SettingsFileError {
+    Unavailable { reason: String },
+}
+
+impl fmt::Display for SettingsFileError {
+    fn fmt(&self, formatter: &mut fmt::Formatter) -> fmt::Result {
+        let Self::Unavailable { reason } = self;
+        formatter.write_str(reason)
+    }
+}
+
+/// The config file's path, for the shell to open in an editor. Without a file, writes one first
+/// with every setting commented out, as `config init` does.
+#[uniffi::export]
+pub fn settings_file() -> Result<String, SettingsFileError> {
+    let path = launcher_config::file_to_edit()
+        .map_err(|reason| SettingsFileError::Unavailable { reason })?;
+    path.into_os_string()
+        .into_string()
+        .map_err(|path| SettingsFileError::Unavailable {
+            reason: format!("{} isn't UTF-8, so it can't be opened", path.display()),
+        })
 }
 
 /// Where `action` puts `window`, all in top-left-origin global coordinates; `None` for `Restore`,

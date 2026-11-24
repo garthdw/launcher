@@ -249,6 +249,14 @@ pub fn run_command(arguments: &[String]) -> Option<i32> {
     })
 }
 
+/// The config file, writing what `config init` does first when there's none, so an editor opens
+/// on every setting rather than an empty file.
+pub fn file_to_edit() -> Result<PathBuf, String> {
+    let path = path()?;
+    init(&path).map_err(|error| format!("can't write {}: {error}", path.display()))?;
+    Ok(path)
+}
+
 /// Writes `DEFAULT_FILE` to `path`; `false` when a file is already there, left alone.
 fn init(path: &Path) -> io::Result<bool> {
     if let Some(directory) = path.parent() {

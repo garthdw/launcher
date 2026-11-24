@@ -13,7 +13,7 @@
 #hotkey = "alt+space"
 
 # Shows an item in the menu bar to open the launcher, reload settings, launch at login and
-# quit.
+# quit. Without it, ⌘Q in the launcher quits and ⌘, opens this file.
 #menu_bar = true
 
 # Which plugins answer queries.

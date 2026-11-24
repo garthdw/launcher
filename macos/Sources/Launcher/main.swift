@@ -19,7 +19,8 @@ enum Metrics {
 final class Panel: NSPanel {
     override var canBecomeKey: Bool { true }
 
-    /// The app has no menu bar to route editing shortcuts, so the panel sends them itself.
+    /// The app has no main menu to route shortcuts, so the panel sends them itself: editing, ⌘Q
+    /// and ⌘,.
     override func performKeyEquivalent(with event: NSEvent) -> Bool {
         guard event.modifierFlags.intersection(.deviceIndependentFlagsMask).subtracting(.capsLock) == .command
         else { return super.performKeyEquivalent(with: event) }
@@ -28,6 +29,8 @@ final class Panel: NSPanel {
         case "v": #selector(NSText.paste(_:))
         case "x": #selector(NSText.cut(_:))
         case "a": #selector(NSText.selectAll(_:))
+        case "q": #selector(NSApplication.terminate(_:))
+        case ",": #selector(AppDelegate.openSettingsFile)
         default: nil
         }
         guard let action else { return super.performKeyEquivalent(with: event) }
@@ -374,6 +377,35 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSTextFieldDelegate, N
 
     @objc func openPanel() {
         summon(at: CFAbsoluteTimeGetCurrent())
+    }
+
+    /// Opens the config file in the app that opens `.toml` files, else TextEdit, writing it first
+    /// when there's none.
+    @objc func openSettingsFile() {
+        let file: URL
+        do {
+            file = try URL(fileURLWithPath: settingsFile())
+        } catch let SettingsFileError.Unavailable(reason) {
+            showAlert("Can't open the settings", reason)
+            return
+        } catch {
+            showAlert("Can't open the settings", "\(error)")
+            return
+        }
+        let workspace = NSWorkspace.shared
+        guard let editor = workspace.urlForApplication(toOpen: file)
+            ?? workspace.urlForApplication(withBundleIdentifier: "com.apple.TextEdit")
+        else {
+            showAlert("Can't open the settings", "No app opens \(file.path).")
+            return
+        }
+        workspace.open([file], withApplicationAt: editor, configuration: NSWorkspace.OpenConfiguration()) { _, error in
+            guard let failure = error?.localizedDescription else { return }
+            Task { @MainActor in
+                log("can't open \(file.path): \(failure)")
+                showAlert("Can't open the settings", failure)
+            }
+        }
     }
 
     /// Ticks Launch at Login from the system's state each time the menu opens, since System
