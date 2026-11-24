@@ -399,13 +399,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSTextFieldDelegate, N
             showAlert("Can't open the settings", "No app opens \(file.path).")
             return
         }
-        workspace.open([file], withApplicationAt: editor, configuration: NSWorkspace.OpenConfiguration()) { _, error in
-            guard let failure = error?.localizedDescription else { return }
-            Task { @MainActor in
-                log("can't open \(file.path): \(failure)")
-                showAlert("Can't open the settings", failure)
-            }
-        }
+        open(file, with: editor)
     }
 
     /// Ticks Launch at Login from the system's state each time the menu opens, since System
@@ -623,20 +617,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSTextFieldDelegate, N
         case let .copy(text):
             if copyToPasteboard(text) { launcher.ran(choice: item.choice) }
         case let .open(path):
-            NSWorkspace.shared.open(
-                URL(fileURLWithPath: path), configuration: NSWorkspace.OpenConfiguration()
-            ) { _, error in
-                let failure = error?.localizedDescription
-                Task { @MainActor in
-                    guard let failure else {
-                        self.launcher.ran(choice: item.choice)
-                        return
-                    }
-                    log("can't open \(path): \(failure)")
-                    // The panel has already closed, so nothing else would show the failure.
-                    showAlert("Can't open \(FileManager.default.displayName(atPath: path))", failure)
-                }
-            }
+            open(URL(fileURLWithPath: path)) { self.launcher.ran(choice: item.choice) }
         case .nothing:
             break
         }
@@ -710,6 +691,26 @@ func hintLabel(_ string: String) -> NSTextField {
     label.textColor = .secondaryLabelColor
     label.alignment = .right
     return label
+}
+
+/// Opens `file` in `app`, or else its default app, then runs `opened`. A failure shows an alert,
+/// since the panel has already closed, so nothing else would show it.
+@MainActor
+func open(_ file: URL, with app: URL? = nil, opened: @escaping @MainActor @Sendable () -> Void = {}) {
+    let finished: @Sendable (NSRunningApplication?, (any Error)?) -> Void = { _, error in
+        let failure = error?.localizedDescription
+        Task { @MainActor in
+            guard let failure else { return opened() }
+            log("can't open \(file.path): \(failure)")
+            showAlert("Can't open \(FileManager.default.displayName(atPath: file.path))", failure)
+        }
+    }
+    let configuration = NSWorkspace.OpenConfiguration()
+    if let app {
+        NSWorkspace.shared.open([file], withApplicationAt: app, configuration: configuration, completionHandler: finished)
+    } else {
+        NSWorkspace.shared.open(file, configuration: configuration, completionHandler: finished)
+    }
 }
 
 /// Activates the app to show the alert, then gives focus back: window management acts on the
