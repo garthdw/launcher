@@ -22,6 +22,8 @@ cargo build --profile profiling              # release with full symbols, for sa
 
 `scripts/bundle` signs with the identity in `MAC_APP_SIGN`, or ad hoc without one, in which case macOS asks again for the Accessibility permission after every build. It writes the UniFFI bindings into `macos/Sources/launcher_ffiFFI` and `macos/Sources/Launcher/Generated` (both ignored), so run it before `swift build --package-path macos`.
 
+The app logs to stderr (`log(…)` in Swift, `eprintln!` in Rust). When stderr is `/dev/null`, as it is when launched by Finder or `open`, `Log.swift` points it at `~/Library/Logs/launcher.log` and rotates that to `launcher.log.1` at launch past 1 MB. Each launch logs whether it has the Accessibility permission.
+
 `.cargo/config.toml` sets `MACOSX_DEPLOYMENT_TARGET` to the app's minimum macOS, so C code in dependencies links into the Swift binary without warnings.
 
 ## Architecture

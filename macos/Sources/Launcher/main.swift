@@ -678,6 +678,7 @@ if let status = configCommand(arguments: Array(CommandLine.arguments.dropFirst()
     exit(status)
 }
 
+startLog()
 MainActor.assumeIsolated {
     let app = NSApplication.shared
     app.setActivationPolicy(.accessory)
