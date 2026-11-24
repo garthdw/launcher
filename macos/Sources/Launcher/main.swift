@@ -3,9 +3,35 @@ import Carbon.HIToolbox
 
 let started = CFAbsoluteTimeGetCurrent()
 
+/// Geometry shared by the list and the detail pane.
+enum Metrics {
+    static let width: CGFloat = 640
+    static let headerHeight: CGFloat = 56
+    static let glassRadius: CGFloat = 18
+    /// How far rows and the detail's highlight sit inside the panel's edges.
+    static let inset: CGFloat = 6
+    /// Concentric with the glass: its radius less the inset.
+    static let selectionRadius = glassRadius - inset
+}
+
 /// Borderless panels refuse key status by default, and the query field needs it.
 final class Panel: NSPanel {
     override var canBecomeKey: Bool { true }
+
+    /// The app has no menu bar to route editing shortcuts, so the panel sends them itself.
+    override func performKeyEquivalent(with event: NSEvent) -> Bool {
+        guard event.modifierFlags.intersection(.deviceIndependentFlagsMask).subtracting(.capsLock) == .command
+        else { return super.performKeyEquivalent(with: event) }
+        let action: Selector? = switch event.charactersIgnoringModifiers?.lowercased() {
+        case "c": #selector(NSText.copy(_:))
+        case "v": #selector(NSText.paste(_:))
+        case "x": #selector(NSText.cut(_:))
+        case "a": #selector(NSText.selectAll(_:))
+        default: nil
+        }
+        guard let action else { return super.performKeyEquivalent(with: event) }
+        return NSApp.sendAction(action, to: nil, from: self)
+    }
 }
 
 final class Row: NSView {
@@ -44,18 +70,169 @@ final class Row: NSView {
     }
 }
 
+/// An item's detail in place of the query field and list: a header, then its sections, scrolling
+/// once they pass `maxBodyHeight`.
+final class DetailPane: NSView {
+    let text: DetailText
+    let bodyHeight: CGFloat
+
+    init(item: Item) {
+        let maxBodyHeight: CGFloat = 420
+        text = DetailText(sections: item.detail)
+        let contentHeight = text.contentHeight
+        bodyHeight = min(contentHeight, maxBodyHeight)
+        super.init(frame: NSRect(x: 0, y: 0, width: Metrics.width, height: Metrics.headerHeight + bodyHeight))
+
+        let title = titleLabel(item.title)
+        title.lineBreakMode = .byTruncatingTail
+        title.frame = NSRect(x: 18, y: bodyHeight + 17, width: 380, height: 22)
+        title.autoresizingMask = [.minYMargin]
+        let hint = hintLabel("⌘C copies · esc goes back")
+        hint.frame = NSRect(x: 402, y: bodyHeight + 19, width: 220, height: 18)
+        hint.autoresizingMask = [.minYMargin]
+
+        let scroll = NSScrollView(frame: NSRect(x: 0, y: 0, width: Metrics.width, height: bodyHeight))
+        scroll.autoresizingMask = [.width, .height]
+        scroll.drawsBackground = false
+        scroll.hasVerticalScroller = true
+        scroll.autohidesScrollers = true
+        let document = FlippedView(frame: NSRect(x: 0, y: 0, width: Metrics.width, height: contentHeight))
+        document.autoresizingMask = [.width]
+        text.frame = document.bounds
+        text.autoresizingMask = [.width]
+        document.addSubview(text.highlight)
+        document.addSubview(text)
+        scroll.documentView = document
+        addSubview(title)
+        addSubview(hint)
+        addSubview(scroll)
+        text.placeHighlight()
+    }
+
+    required init?(coder: NSCoder) {
+        fatalError("built in code")
+    }
+}
+
+/// Top-down, like the text view it holds, so a long detail opens scrolled to its start.
+final class FlippedView: NSView {
+    override var isFlipped: Bool { true }
+}
+
+/// Read-only and selectable, so the mouse can copy any part; ↑ and ↓ step through the sections
+/// for ⌘C to copy whole.
+final class DetailText: NSTextView {
+    var back: () -> Void = {}
+    var run: () -> Void = {}
+    /// Each section's span in the text, and what ⌘C copies when it's picked.
+    private var sections: [(range: NSRange, text: String)] = []
+    private var picked = 0 {
+        didSet {
+            // Otherwise ⌘C would copy an earlier mouse selection instead of the section just picked.
+            setSelectedRange(NSRange(location: sections[picked].range.location, length: 0))
+            placeHighlight()
+            scrollRangeToVisible(sections[picked].range)
+        }
+    }
+
+    /// The picked section's background: a layer's colour, not drawn by this view. Drawing in the
+    /// text view gives it a backing store and Metal state, about 8 MB while the detail shows.
+    let highlight: NSView = {
+        let highlight = NSView()
+        highlight.wantsLayer = true
+        // Translucent, unlike the list's solid highlight, so the section's text stays readable.
+        highlight.layer?.backgroundColor = NSColor.controlAccentColor.withAlphaComponent(0.25).cgColor
+        highlight.layer?.cornerRadius = Metrics.selectionRadius
+        return highlight
+    }()
+
+    convenience init(sections: [Section]) {
+        // TextKit 1, for the glyph rects `placeHighlight` reads.
+        self.init(usingTextLayoutManager: false)
+        isEditable = false
+        drawsBackground = false
+        isVerticallyResizable = true
+        maxSize = NSSize(width: CGFloat.greatestFiniteMagnitude, height: CGFloat.greatestFiniteMagnitude)
+        textContainerInset = NSSize(width: 14, height: 12)
+        // The container tracks the view's width, which starts at zero: without the panel's width
+        // before the first layout, nothing lays out and `contentHeight` is only the inset.
+        frame.size.width = Metrics.width
+        textContainer?.widthTracksTextView = true
+        let heading: [NSAttributedString.Key: Any] = [
+            .font: NSFont.systemFont(ofSize: 11, weight: .semibold),
+            .foregroundColor: NSColor.secondaryLabelColor,
+        ]
+        let body: [NSAttributedString.Key: Any] = [
+            .font: NSFont.monospacedSystemFont(ofSize: 13, weight: .regular),
+            .foregroundColor: NSColor.labelColor,
+        ]
+        let string = NSMutableAttributedString()
+        self.sections = sections.enumerated().map { index, section in
+            if index > 0 { string.append(NSAttributedString(string: "\n\n", attributes: body)) }
+            let start = string.length
+            string.append(NSAttributedString(string: section.title.uppercased() + "\n", attributes: heading))
+            string.append(NSAttributedString(string: section.text, attributes: body))
+            return (NSRange(location: start, length: string.length - start), section.text)
+        }
+        textStorage?.setAttributedString(string)
+    }
+
+    var contentHeight: CGFloat {
+        guard let layoutManager, let textContainer else { return 0 }
+        layoutManager.ensureLayout(for: textContainer)
+        return layoutManager.usedRect(for: textContainer).height + textContainerInset.height * 2
+    }
+
+    override func doCommand(by selector: Selector) {
+        switch selector {
+        case #selector(cancelOperation(_:)), #selector(moveLeft(_:)): back()
+        case #selector(insertNewline(_:)): run()
+        case #selector(moveDown(_:)) where !sections.isEmpty: picked = step(picked, by: 1, count: sections.count)
+        case #selector(moveUp(_:)) where !sections.isEmpty: picked = step(picked, by: -1, count: sections.count)
+        default: super.doCommand(by: selector)
+        }
+    }
+
+    /// Copies the mouse's selection, or else the picked section. Plain text either way: rich text
+    /// would carry the monospaced font into whatever it's pasted into.
+    override func copy(_: Any?) {
+        let selected = selectedRange()
+        if selected.length > 0 {
+            copyToPasteboard((string as NSString).substring(with: selected))
+        } else if sections.indices.contains(picked) {
+            copyToPasteboard(sections[picked].text)
+        }
+    }
+
+    /// Moves `highlight`, a sibling behind this view, onto the picked section.
+    func placeHighlight() {
+        guard let layoutManager, let textContainer, let container = highlight.superview,
+              sections.indices.contains(picked)
+        else { return }
+        let glyphs = layoutManager.glyphRange(forCharacterRange: sections[picked].range, actualCharacterRange: nil)
+        let box = layoutManager.boundingRect(forGlyphRange: glyphs, in: textContainer)
+        highlight.frame = convert(NSRect(
+            x: Metrics.inset, y: box.minY + textContainerOrigin.y - Metrics.inset,
+            width: bounds.width - Metrics.inset * 2, height: box.height + Metrics.inset * 2
+        ), to: container)
+    }
+}
+
 @MainActor
 final class AppDelegate: NSObject, NSApplicationDelegate, NSTextFieldDelegate, NSWindowDelegate {
     let launcher = Launcher()
     // Non-activating, so the app the user was in stays frontmost: window snapping acts on it.
     let panel = Panel(
-        contentRect: NSRect(x: 0, y: 0, width: 640, height: 56),
+        contentRect: NSRect(x: 0, y: 0, width: Metrics.width, height: Metrics.headerHeight),
         styleMask: [.borderless, .nonactivatingPanel],
         backing: .buffered,
         defer: false
     )
+    let content = NSView()
     let field = NSTextField()
     let results = NSView()
+    /// Shown in place of the field and list while an item's detail is open.
+    var detail: DetailPane?
     var items: [Item] = []
     var picked = 0 {
         didSet { highlightPicked() }
@@ -83,10 +260,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSTextFieldDelegate, N
         panel.hasShadow = true
         panel.delegate = self
         let glass = NSGlassEffectView()
-        glass.cornerRadius = 18
+        glass.cornerRadius = Metrics.glassRadius
         glass.autoresizingMask = [.width, .height]
         // Only the glass's own `contentView` is guaranteed to sit inside the effect.
-        let content = NSView()
         content.autoresizingMask = [.width, .height]
         glass.contentView = content
         panel.contentView = glass
@@ -98,10 +274,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSTextFieldDelegate, N
         field.placeholderString = "Search apps, calculate, convert…"
         field.delegate = self
         field.autoresizingMask = [.width, .minYMargin]
-        results.autoresizingMask = [.width, .height]
+        // A fixed height: `resize` reads it as the list's, so the panel growing mustn't stretch it.
+        results.autoresizingMask = [.width]
         content.addSubview(field)
         content.addSubview(results)
-        layout()
+        resize()
     }
 
     func registerHotkey() {
@@ -122,12 +299,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSTextFieldDelegate, N
 
     func summon(at time: CFAbsoluteTime) {
         summoned = time
+        // ⌥Space while the panel is still key comes here without hiding it first.
+        closeDetail()
         if let screen = NSScreen.main {
             let frame = screen.visibleFrame
             panel.setFrameTopLeftPoint(NSPoint(x: frame.midX - panel.frame.width / 2, y: frame.maxY - 180))
         }
         panel.makeKeyAndOrderFront(nil)
         panel.makeFirstResponder(field)
+    }
+
+    func hide() {
+        closeDetail()
+        panel.orderOut(nil)
     }
 
     func windowDidBecomeKey(_: Notification) {
@@ -137,35 +321,24 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSTextFieldDelegate, N
     }
 
     func windowDidResignKey(_: Notification) {
-        panel.orderOut(nil)
+        hide()
     }
 
     func refresh() {
         items = launcher.query(query: field.stringValue)
-        layout()
-        picked = 0
-    }
-
-    func layout() {
         let rowHeight: CGFloat = 44
-        let listHeight = items.isEmpty ? 0 : CGFloat(items.count) * (rowHeight + 2) + 12
-        let height = 56 + listHeight
-        var frame = panel.frame
-        frame.origin.y += frame.height - height
-        frame.size.height = height
-        panel.setFrame(frame, display: true)
-        field.frame = NSRect(x: 18, y: height - 56 + 16, width: 640 - 36, height: 26)
-        results.frame = NSRect(x: 0, y: 0, width: 640, height: listHeight)
+        let listHeight = items.isEmpty ? 0 : CGFloat(items.count) * (rowHeight + 2) + Metrics.inset * 2
+        results.frame = NSRect(x: 0, y: 0, width: Metrics.width, height: listHeight)
         results.subviews.forEach { $0.removeFromSuperview() }
         for (index, item) in items.enumerated() {
             let row = Row(frame: NSRect(
-                x: 6, y: listHeight - 6 - CGFloat(index + 1) * (rowHeight + 2), width: 628, height: rowHeight
+                x: Metrics.inset, y: listHeight - Metrics.inset - CGFloat(index + 1) * (rowHeight + 2),
+                width: Metrics.width - Metrics.inset * 2, height: rowHeight
             ))
             row.clicked = { [unowned self] in choose(index) }
             row.hovered = { [unowned self] in if picked != index { picked = index } }
             row.wantsLayer = true
-            // Concentric with the glass: its 18 pt radius less the row's 6 pt inset.
-            row.layer?.cornerRadius = 12
+            row.layer?.cornerRadius = Metrics.selectionRadius
             var titleX: CGFloat = 12
             if case let .open(path) = item.action {
                 let icon = NSImageView(image: NSWorkspace.shared.icon(forFile: path))
@@ -173,18 +346,40 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSTextFieldDelegate, N
                 row.addSubview(icon)
                 titleX = 46
             }
-            let title = NSTextField(labelWithString: item.title)
-            title.font = .systemFont(ofSize: 17, weight: .semibold)
+            let title = titleLabel(item.title)
             title.frame = NSRect(x: titleX, y: 11, width: 392 - titleX, height: 22)
-            let subtitle = NSTextField(labelWithString: item.subtitle)
-            subtitle.font = .systemFont(ofSize: 13)
-            subtitle.textColor = .secondaryLabelColor
-            subtitle.alignment = .right
+            // The shell names its own keys, so plugins' subtitles say only what an item is.
+            let keys = switch item.action {
+            case .copy: "↵ copies"
+            case .open: "↵ opens"
+            }
+            let subtitle = hintLabel(
+                ([item.subtitle, keys] + (item.detail.isEmpty ? [] : ["→ details"]))
+                    .filter { !$0.isEmpty }
+                    .joined(separator: " · ")
+            )
+            // Long subtitles such as app folders lose their start, not the keys.
+            subtitle.lineBreakMode = .byTruncatingHead
             subtitle.frame = NSRect(x: 396, y: 13, width: 220, height: 18)
             row.addSubview(title)
             row.addSubview(subtitle)
             results.addSubview(row)
         }
+        resize()
+        picked = 0
+    }
+
+    /// Fits the panel to what it shows, keeping its top edge where it is.
+    func resize() {
+        let height = Metrics.headerHeight + (detail?.bodyHeight ?? results.frame.height)
+        var frame = panel.frame
+        frame.origin.y += frame.height - height
+        frame.size.height = height
+        panel.setFrame(frame, display: true)
+        field.frame = NSRect(x: 18, y: height - Metrics.headerHeight + 16, width: Metrics.width - 36, height: 26)
+        field.isHidden = detail != nil
+        results.isHidden = detail != nil
+        detail?.frame = NSRect(x: 0, y: 0, width: Metrics.width, height: height)
     }
 
     /// Moving the selection only recolours rows; rebuilding them would fetch every icon again.
@@ -194,22 +389,40 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSTextFieldDelegate, N
         }
     }
 
+    func showDetail(of index: Int) {
+        let pane = DetailPane(item: items[index])
+        pane.text.back = { [unowned self] in
+            closeDetail()
+            panel.makeFirstResponder(field)
+            field.currentEditor()?.moveToEndOfDocument(nil)
+        }
+        // The shown item, not `picked`: hidden rows under the pane may still track the pointer.
+        pane.text.run = { [unowned self] in choose(index) }
+        detail = pane
+        content.addSubview(pane)
+        resize()
+        panel.makeFirstResponder(pane.text)
+    }
+
+    /// The pane is rebuilt each time it opens, so nothing stays resident once it closes.
+    func closeDetail() {
+        guard let detail else { return }
+        detail.removeFromSuperview()
+        self.detail = nil
+        resize()
+    }
+
     func choose(_ index: Int) {
         if index < items.count { run(items[index]) }
         field.stringValue = ""
         refresh()
-        panel.orderOut(nil)
+        hide()
     }
 
     func run(_ item: Item) {
         switch item.action {
         case let .copy(text):
-            NSPasteboard.general.clearContents()
-            if NSPasteboard.general.setString(text, forType: .string) {
-                launcher.ran(choice: item.choice)
-            } else {
-                log("can't copy \(text)")
-            }
+            if copyToPasteboard(text) { launcher.ran(choice: item.choice) }
         case let .open(path):
             NSWorkspace.shared.open(
                 URL(fileURLWithPath: path), configuration: NSWorkspace.OpenConfiguration()
@@ -239,23 +452,57 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSTextFieldDelegate, N
         refresh()
     }
 
-    func control(_: NSControl, textView _: NSTextView, doCommandBy selector: Selector) -> Bool {
+    func control(_: NSControl, textView: NSTextView, doCommandBy selector: Selector) -> Bool {
         switch selector {
         case #selector(NSResponder.moveDown(_:)) where !items.isEmpty:
-            picked = (picked + 1) % items.count
+            picked = step(picked, by: 1, count: items.count)
         case #selector(NSResponder.moveUp(_:)) where !items.isEmpty:
-            picked = (picked + items.count - 1) % items.count
+            picked = step(picked, by: -1, count: items.count)
+        // Only from the end of the query, so → still moves the caret elsewhere.
+        case #selector(NSResponder.moveRight(_:))
+            where textView.selectedRange() == NSRange(location: (textView.string as NSString).length, length: 0)
+            && items.indices.contains(picked) && !items[picked].detail.isEmpty:
+            showDetail(of: picked)
         case #selector(NSResponder.insertNewline(_:)):
             choose(picked)
             return true
         case #selector(NSResponder.cancelOperation(_:)):
-            panel.orderOut(nil)
+            hide()
             return true
         default:
             return false
         }
         return true
     }
+}
+
+/// Moves a selection through `count` entries, wrapping at either end.
+func step(_ index: Int, by offset: Int, count: Int) -> Int {
+    (index + offset + count) % count
+}
+
+@MainActor
+func titleLabel(_ string: String) -> NSTextField {
+    let label = NSTextField(labelWithString: string)
+    label.font = .systemFont(ofSize: 17, weight: .semibold)
+    return label
+}
+
+@MainActor
+func hintLabel(_ string: String) -> NSTextField {
+    let label = NSTextField(labelWithString: string)
+    label.font = .systemFont(ofSize: 13)
+    label.textColor = .secondaryLabelColor
+    label.alignment = .right
+    return label
+}
+
+@discardableResult
+func copyToPasteboard(_ text: String) -> Bool {
+    NSPasteboard.general.clearContents()
+    if NSPasteboard.general.setString(text, forType: .string) { return true }
+    log("can't copy \(text)")
+    return false
 }
 
 func log(_ message: String) {

@@ -3,8 +3,17 @@ use std::path::PathBuf;
 #[derive(Clone, Debug, PartialEq)]
 pub struct Item {
     pub title: String,
+    /// What the item is, such as its source. The shell adds the keys that act on it.
     pub subtitle: String,
     pub action: Action,
+    /// Shown on request in a scrolling, monospaced view; empty for items without one.
+    pub detail: Vec<Section>,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct Section {
+    pub title: String,
+    pub text: String,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -89,6 +98,7 @@ mod tests {
                 title: format!("{} {query}", self.title),
                 subtitle: String::new(),
                 action: Action::Copy(self.title.into()),
+                detail: Vec::new(),
             }]
         }
 

@@ -125,6 +125,7 @@ impl Plugin for Apps {
                     .map(|folder| folder.display().to_string())
                     .unwrap_or_default(),
                 action: Action::Open(app.path.clone()),
+                detail: Vec::new(),
             })
             .collect()
     }

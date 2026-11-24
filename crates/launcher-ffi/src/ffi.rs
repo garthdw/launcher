@@ -14,8 +14,24 @@ pub struct Item {
     pub title: String,
     pub subtitle: String,
     pub action: Action,
+    pub detail: Vec<Section>,
     /// Handed back to `Launcher::ran` once the action has run.
     pub choice: Arc<Choice>,
+}
+
+#[derive(uniffi::Record)]
+pub struct Section {
+    pub title: String,
+    pub text: String,
+}
+
+impl From<launcher_core::Section> for Section {
+    fn from(section: launcher_core::Section) -> Self {
+        Self {
+            title: section.title,
+            text: section.text,
+        }
+    }
 }
 
 #[derive(uniffi::Enum)]
@@ -44,6 +60,7 @@ impl From<Found> for Item {
             title: found.item.title,
             subtitle: found.item.subtitle,
             action,
+            detail: found.item.detail.into_iter().map(Section::from).collect(),
             choice: Arc::new(Choice {
                 plugin: found.plugin,
                 action: found.item.action,
@@ -118,6 +135,14 @@ mod tests {
         assert_eq!(
             items[0].choice.action,
             launcher_core::Action::Copy("5".into())
+        );
+        assert_eq!(
+            items[0]
+                .detail
+                .iter()
+                .map(|section| (section.title.as_str(), section.text.as_str()))
+                .collect::<Vec<_>>(),
+            [("Input", "2 + 3")]
         );
         Ok(())
     }
