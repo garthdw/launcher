@@ -292,7 +292,7 @@ impl Plugin for Calc {
         }
         let rewritten = x_as_times(query);
         let Ok((statements, InterpreterResult::Value(value))) =
-            self.context.interpret(&rewritten, CodeSource::Text)
+            self.context.interpret_and_forget(&rewritten, CodeSource::Text)
         else {
             if !has_number {
                 return Vec::new();
