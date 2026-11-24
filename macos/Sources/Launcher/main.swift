@@ -133,11 +133,10 @@ final class DetailText: NSTextView {
         isVerticallyResizable = true
         maxSize = NSSize(width: CGFloat.greatestFiniteMagnitude, height: CGFloat.greatestFiniteMagnitude)
         textContainerInset = NSSize(width: 14, height: 12)
+        // The container tracks the view's width, which starts at zero: without the panel's width
+        // before the first layout, nothing lays out and `contentHeight` is only the inset.
+        frame.size.width = Metrics.width
         textContainer?.widthTracksTextView = true
-        // Sized before the first layout, so `contentHeight` wraps lines at the panel's width.
-        textContainer?.containerSize = NSSize(
-            width: Metrics.width - textContainerInset.width * 2, height: CGFloat.greatestFiniteMagnitude
-        )
         let heading: [NSAttributedString.Key: Any] = [
             .font: NSFont.systemFont(ofSize: 11, weight: .semibold),
             .foregroundColor: NSColor.secondaryLabelColor,
