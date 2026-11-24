@@ -2,7 +2,7 @@ use base64::Engine;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use jiff::tz::TimeZone;
 use jiff::{SignedDuration, Timestamp};
-use launcher_core::{Action, Item, Plugin, Section};
+use launcher_core::{Action, Icon, Item, Plugin, Section};
 use serde_json::{Map, Value};
 
 /// Decodes a pasted JSON Web Token. It doesn't verify the signature, which needs the issuer's key;
@@ -132,6 +132,7 @@ fn item(
     Item {
         title: format!("{name} · {status}"),
         subtitle: String::new(),
+        icon: Icon::Token,
         action: Action::Copy(payload),
         detail,
         // Three base64url JSON objects can only be a token.
@@ -186,6 +187,7 @@ mod tests {
         };
         assert_eq!(item.title, "ada · valid for 12 min");
         assert_eq!(item.subtitle, "", "the group's header names it");
+        assert_eq!(item.icon, Icon::Token);
         let payload = "{\n  \"sub\": \"ada\",\n  \"iat\": 1799996400,\n  \"exp\": 1800000720\n}";
         assert_eq!(item.action, Action::Copy(payload.into()));
         assert_eq!(

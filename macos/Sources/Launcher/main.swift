@@ -578,13 +578,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSTextFieldDelegate, N
         row.hovered = { [unowned self] in if picked != index { picked = index } }
         row.wantsLayer = true
         row.layer?.cornerRadius = Metrics.selectionRadius
-        var titleX: CGFloat = 12
-        if case let .open(path) = item.action {
-            let icon = NSImageView(image: NSWorkspace.shared.icon(forFile: path))
-            icon.frame = NSRect(x: 10, y: 8, width: 28, height: 28)
-            row.addSubview(icon)
-            titleX = 46
-        }
+        let icon = NSImageView(image: item.icon.image)
+        icon.frame = NSRect(x: 10, y: 8, width: 28, height: 28)
+        icon.contentTintColor = .secondaryLabelColor
+        row.addSubview(icon)
+        let titleX: CGFloat = 46
         let title = titleLabel(item.title)
         // The shell names its own keys, so plugins' subtitles say only what an item is.
         var keys = ""
@@ -788,6 +786,22 @@ func showAlert(_ message: String, _ detail: String, buttons: [String] = []) -> N
     let response = alert.runModal()
     previous?.activate()
     return response
+}
+
+extension Icon {
+    /// A file's own icon, or an SF Symbol for the kinds the core names.
+    @MainActor
+    var image: NSImage {
+        let symbol: String
+        switch self {
+        case let .file(path): return NSWorkspace.shared.icon(forFile: path)
+        case .calculator: symbol = "plus.forwardslash.minus"
+        case .token: symbol = "key.horizontal"
+        }
+        let configuration = NSImage.SymbolConfiguration(pointSize: 18, weight: .medium)
+        return NSImage(systemSymbolName: symbol, accessibilityDescription: nil)?
+            .withSymbolConfiguration(configuration) ?? NSImage()
+    }
 }
 
 extension Hotkey {

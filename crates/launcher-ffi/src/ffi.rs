@@ -33,6 +33,7 @@ impl From<launcher_core::Group> for Group {
 pub struct Item {
     pub title: String,
     pub subtitle: String,
+    pub icon: Icon,
     pub action: Action,
     pub detail: Vec<Section>,
     /// Handed back to `Launcher::ran` once the action has run.
@@ -50,6 +51,25 @@ impl From<launcher_core::Section> for Section {
         Self {
             title: section.title,
             text: section.text,
+        }
+    }
+}
+
+#[derive(Debug, PartialEq, uniffi::Enum)]
+pub enum Icon {
+    File { path: String },
+    Calculator,
+    Token,
+}
+
+impl From<launcher_core::Icon> for Icon {
+    fn from(icon: launcher_core::Icon) -> Self {
+        match icon {
+            launcher_core::Icon::File(path) => Self::File {
+                path: path.to_string_lossy().into_owned(),
+            },
+            launcher_core::Icon::Calculator => Self::Calculator,
+            launcher_core::Icon::Token => Self::Token,
         }
     }
 }
@@ -81,6 +101,7 @@ impl Item {
         Self {
             title: item.title,
             subtitle: item.subtitle,
+            icon: item.icon.into(),
             action,
             detail: item.detail.into_iter().map(Section::from).collect(),
             choice: Arc::new(Choice {
@@ -388,6 +409,7 @@ mod tests {
             vec![launcher_core::Item {
                 title: "Loading…".into(),
                 subtitle: String::new(),
+                icon: launcher_core::Icon::Calculator,
                 action: launcher_core::Action::Nothing,
                 detail: Vec::new(),
                 relevance: 0,
@@ -457,6 +479,7 @@ mod tests {
         assert_eq!(name, "Calculator");
         assert_eq!(items.len(), 1);
         assert_eq!(items[0].title, "5");
+        assert_eq!(items[0].icon, Icon::Calculator);
         assert!(matches!(&items[0].action, Action::Copy { text } if text == "5"));
         assert_eq!(
             items[0].choice.action,
