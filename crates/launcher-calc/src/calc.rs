@@ -1,6 +1,7 @@
-use launcher_core::{Action, Item, Plugin};
+use launcher_core::{Action, Item, Plugin, Section};
 use numbat::markup::plain_text_format;
 use numbat::module_importer::BuiltinModuleImporter;
+use numbat::pretty_print::PrettyPrint;
 use numbat::resolver::CodeSource;
 use numbat::value::Value;
 use numbat::{Context, FormatOptions, InterpreterResult, NumbatError};
@@ -33,22 +34,43 @@ impl Plugin for Calc {
             return Vec::new();
         }
         let query = x_as_times(query);
-        let Ok((_, InterpreterResult::Value(value))) =
+        let Ok((statements, InterpreterResult::Value(value))) =
             self.context.interpret(&query, CodeSource::Text)
         else {
             return Vec::new();
         };
+        // Digit separators read well but break pasting into most other apps.
+        let unseparated = FormatOptions {
+            digit_separator: String::new(),
+            ..FormatOptions::default()
+        };
+        let copied = plain_text(&value, &unseparated);
+        let precise = plain_text(
+            &value,
+            &FormatOptions {
+                significant_digits: 17,
+                ..unseparated
+            },
+        );
+        let mut detail = vec![Section {
+            title: "Input".into(),
+            text: statements
+                .iter()
+                .map(|statement| plain_text_format(&statement.pretty_print(), false))
+                .collect::<Vec<_>>()
+                .join("\n"),
+        }];
+        if precise != copied {
+            detail.push(Section {
+                title: "Full precision".into(),
+                text: precise,
+            });
+        }
         vec![Item {
             title: plain_text(&value, &FormatOptions::default()),
-            subtitle: "Calculator · ↵ copies".into(),
-            // Digit separators read well but break pasting into most other apps.
-            action: Action::Copy(plain_text(
-                &value,
-                &FormatOptions {
-                    digit_separator: String::new(),
-                    ..FormatOptions::default()
-                },
-            )),
+            subtitle: "Calculator · ↵ copies · → details".into(),
+            action: Action::Copy(copied),
+            detail,
         }]
     }
 }
@@ -111,6 +133,31 @@ mod tests {
             .into_iter()
             .map(|item| item.title)
             .collect()
+    }
+
+    fn detail(query: &str) -> Vec<(String, String)> {
+        let mut calc = Calc::new().expect("prelude loads");
+        calc.query(query)
+            .into_iter()
+            .flat_map(|item| item.detail)
+            .map(|section| (section.title, section.text))
+            .collect()
+    }
+
+    #[test]
+    fn detail_shows_the_reading_and_full_precision() {
+        assert_eq!(
+            detail("100 N to lbf"),
+            [
+                ("Input".into(), "100 newton ➞ pound_force".into()),
+                ("Full precision".into(), "22.48089236553391 lbf".into()),
+            ]
+        );
+        assert_eq!(
+            detail("2x1000000"),
+            [("Input".into(), "2 × 1_000_000".into())],
+            "precision matching what ↵ copies adds nothing"
+        );
     }
 
     #[test]

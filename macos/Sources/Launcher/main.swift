@@ -44,8 +44,134 @@ final class Row: NSView {
     }
 }
 
+/// An item's detail in place of the query field and list: a header, then its sections, scrolling
+/// once they pass `maxBodyHeight`.
+final class DetailPane: NSView {
+    let text = DetailText(usingTextLayoutManager: false)
+    let bodyHeight: CGFloat
+
+    init(item: Item) {
+        let maxBodyHeight: CGFloat = 420
+        text.show(item.detail)
+        bodyHeight = min(text.contentHeight, maxBodyHeight)
+        super.init(frame: NSRect(x: 0, y: 0, width: 640, height: 56 + bodyHeight))
+
+        let title = NSTextField(labelWithString: item.title)
+        title.font = .systemFont(ofSize: 17, weight: .semibold)
+        title.lineBreakMode = .byTruncatingTail
+        title.frame = NSRect(x: 18, y: bodyHeight + 17, width: 380, height: 22)
+        title.autoresizingMask = [.minYMargin]
+        let hint = NSTextField(labelWithString: "⌘C copies · esc goes back")
+        hint.font = .systemFont(ofSize: 13)
+        hint.textColor = .secondaryLabelColor
+        hint.alignment = .right
+        hint.frame = NSRect(x: 402, y: bodyHeight + 19, width: 220, height: 18)
+        hint.autoresizingMask = [.minYMargin]
+
+        let scroll = NSScrollView(frame: NSRect(x: 0, y: 0, width: 640, height: bodyHeight))
+        scroll.autoresizingMask = [.width, .height]
+        scroll.drawsBackground = false
+        scroll.hasVerticalScroller = true
+        scroll.autohidesScrollers = true
+        text.frame = NSRect(x: 0, y: 0, width: 640, height: text.contentHeight)
+        text.autoresizingMask = [.width]
+        scroll.documentView = text
+        addSubview(title)
+        addSubview(hint)
+        addSubview(scroll)
+    }
+
+    required init?(coder: NSCoder) {
+        fatalError("built in code")
+    }
+}
+
+/// Read-only and selectable, so the mouse can copy any part; ↑ and ↓ step through the sections
+/// for ⌘C to copy whole. The panel has no menu bar to route ⌘C, so this view handles it itself.
+final class DetailText: NSTextView {
+    var back: () -> Void = {}
+    var run: () -> Void = {}
+    private var sections: [Section] = []
+    private var ranges: [NSRange] = []
+    private var picked = 0 {
+        didSet {
+            needsDisplay = true
+            scrollRangeToVisible(ranges[picked])
+        }
+    }
+
+    var contentHeight: CGFloat {
+        guard let layoutManager, let textContainer else { return 0 }
+        layoutManager.ensureLayout(for: textContainer)
+        return layoutManager.usedRect(for: textContainer).height + textContainerInset.height * 2
+    }
+
+    func show(_ sections: [Section]) {
+        isEditable = false
+        drawsBackground = false
+        isVerticallyResizable = true
+        maxSize = NSSize(width: CGFloat.greatestFiniteMagnitude, height: CGFloat.greatestFiniteMagnitude)
+        textContainerInset = NSSize(width: 14, height: 12)
+        textContainer?.widthTracksTextView = true
+        // Sized before the first layout, so `contentHeight` wraps lines at the panel's width.
+        textContainer?.containerSize = NSSize(width: CGFloat(640 - 28), height: CGFloat.greatestFiniteMagnitude)
+        let heading: [NSAttributedString.Key: Any] = [
+            .font: NSFont.systemFont(ofSize: 11, weight: .semibold),
+            .foregroundColor: NSColor.secondaryLabelColor,
+        ]
+        let body: [NSAttributedString.Key: Any] = [
+            .font: NSFont.monospacedSystemFont(ofSize: 13, weight: .regular),
+            .foregroundColor: NSColor.labelColor,
+        ]
+        let string = NSMutableAttributedString()
+        ranges = sections.enumerated().map { index, section in
+            if index > 0 { string.append(NSAttributedString(string: "\n\n", attributes: body)) }
+            let start = string.length
+            string.append(NSAttributedString(string: section.title.uppercased() + "\n", attributes: heading))
+            string.append(NSAttributedString(string: section.text, attributes: body))
+            return NSRange(location: start, length: string.length - start)
+        }
+        textStorage?.setAttributedString(string)
+        self.sections = sections
+    }
+
+    override func keyDown(with event: NSEvent) {
+        switch Int(event.keyCode) {
+        case kVK_Escape, kVK_LeftArrow: back()
+        case kVK_Return, kVK_ANSI_KeypadEnter: run()
+        case kVK_DownArrow where !ranges.isEmpty: picked = (picked + 1) % ranges.count
+        case kVK_UpArrow where !ranges.isEmpty: picked = (picked + ranges.count - 1) % ranges.count
+        default: super.keyDown(with: event)
+        }
+    }
+
+    override func performKeyEquivalent(with event: NSEvent) -> Bool {
+        guard window?.firstResponder === self,
+              event.modifierFlags.intersection(.deviceIndependentFlagsMask) == .command,
+              event.charactersIgnoringModifiers == "c",
+              sections.indices.contains(picked)
+        else { return super.performKeyEquivalent(with: event) }
+        let selected = selectedRange()
+        copyToPasteboard(selected.length > 0 ? (string as NSString).substring(with: selected) : sections[picked].text)
+        return true
+    }
+
+    override func drawBackground(in rect: NSRect) {
+        super.drawBackground(in: rect)
+        guard let layoutManager, let textContainer, ranges.indices.contains(picked) else { return }
+        let glyphs = layoutManager.glyphRange(forCharacterRange: ranges[picked], actualCharacterRange: nil)
+        let box = layoutManager.boundingRect(forGlyphRange: glyphs, in: textContainer)
+        // Inset as the list's rows are, so the highlight reads as the same kind of selection.
+        let highlight = NSRect(
+            x: 6, y: box.minY + textContainerOrigin.y - 6, width: bounds.width - 12, height: box.height + 12
+        )
+        NSColor.controlAccentColor.withAlphaComponent(0.25).setFill()
+        NSBezierPath(roundedRect: highlight, xRadius: 12, yRadius: 12).fill()
+    }
+}
+
 @MainActor
-final class AppDelegate: NSObject, NSApplicationDelegate, NSTextFieldDelegate, NSWindowDelegate {
+final class AppDelegate:NSObject, NSApplicationDelegate, NSTextFieldDelegate, NSWindowDelegate {
     let launcher = Launcher()
     // Non-activating, so the app the user was in stays frontmost: window snapping acts on it.
     let panel = Panel(
@@ -54,8 +180,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSTextFieldDelegate, N
         backing: .buffered,
         defer: false
     )
+    let content = NSView()
     let field = NSTextField()
     let results = NSView()
+    /// Shown in place of the field and list while an item's detail is open.
+    var detail: DetailPane?
     var items: [Item] = []
     var picked = 0 {
         didSet { highlightPicked() }
@@ -86,7 +215,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSTextFieldDelegate, N
         glass.cornerRadius = 18
         glass.autoresizingMask = [.width, .height]
         // Only the glass's own `contentView` is guaranteed to sit inside the effect.
-        let content = NSView()
         content.autoresizingMask = [.width, .height]
         glass.contentView = content
         panel.contentView = glass
@@ -122,6 +250,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSTextFieldDelegate, N
 
     func summon(at time: CFAbsoluteTime) {
         summoned = time
+        // A detail left open when the panel lost focus would greet the user with stale content.
+        closeDetail()
         if let screen = NSScreen.main {
             let frame = screen.visibleFrame
             panel.setFrameTopLeftPoint(NSPoint(x: frame.midX - panel.frame.width / 2, y: frame.maxY - 180))
@@ -149,12 +279,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSTextFieldDelegate, N
 
     /// Fits the panel to what it shows, keeping its top edge where it is.
     func resize() {
-        let height = 56 + results.frame.height
+        let height = 56 + (detail?.bodyHeight ?? results.frame.height)
         var frame = panel.frame
         frame.origin.y += frame.height - height
         frame.size.height = height
         panel.setFrame(frame, display: true)
         field.frame = NSRect(x: 18, y: height - 56 + 16, width: 640 - 36, height: 26)
+        field.isHidden = detail != nil
+        results.isHidden = detail != nil
+        detail?.frame = NSRect(x: 0, y: 0, width: 640, height: height)
     }
 
     func buildRows() {
@@ -199,8 +332,33 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSTextFieldDelegate, N
         }
     }
 
+    func showDetail(of item: Item) {
+        let pane = DetailPane(item: item)
+        pane.text.back = { [unowned self] in showList() }
+        pane.text.run = { [unowned self] in choose(picked) }
+        detail = pane
+        content.addSubview(pane)
+        resize()
+        panel.makeFirstResponder(pane.text)
+    }
+
+    func showList() {
+        closeDetail()
+        panel.makeFirstResponder(field)
+        field.currentEditor()?.moveToEndOfDocument(nil)
+    }
+
+    /// The pane is rebuilt each time it opens, so nothing stays resident while the list shows.
+    func closeDetail() {
+        guard let detail else { return }
+        detail.removeFromSuperview()
+        self.detail = nil
+        resize()
+    }
+
     func choose(_ index: Int) {
         if index < items.count { run(items[index]) }
+        closeDetail()
         field.stringValue = ""
         refresh()
         panel.orderOut(nil)
@@ -209,12 +367,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSTextFieldDelegate, N
     func run(_ item: Item) {
         switch item.action {
         case let .copy(text):
-            NSPasteboard.general.clearContents()
-            if NSPasteboard.general.setString(text, forType: .string) {
-                launcher.ran(choice: item.choice)
-            } else {
-                log("can't copy \(text)")
-            }
+            if copyToPasteboard(text) { launcher.ran(choice: item.choice) }
         case let .open(path):
             NSWorkspace.shared.open(
                 URL(fileURLWithPath: path), configuration: NSWorkspace.OpenConfiguration()
@@ -244,12 +397,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSTextFieldDelegate, N
         refresh()
     }
 
-    func control(_: NSControl, textView _: NSTextView, doCommandBy selector: Selector) -> Bool {
+    func control(_: NSControl, textView: NSTextView, doCommandBy selector: Selector) -> Bool {
         switch selector {
         case #selector(NSResponder.moveDown(_:)) where !items.isEmpty:
             picked = (picked + 1) % items.count
         case #selector(NSResponder.moveUp(_:)) where !items.isEmpty:
             picked = (picked + items.count - 1) % items.count
+        case #selector(NSResponder.moveRight(_:))
+            where caretAtEnd(of: textView) && items.indices.contains(picked) && !items[picked].detail.isEmpty:
+            showDetail(of: items[picked])
         case #selector(NSResponder.insertNewline(_:)):
             choose(picked)
             return true
@@ -261,6 +417,20 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSTextFieldDelegate, N
         }
         return true
     }
+}
+
+/// → opens the detail only from the end of the query, so it still moves the caret elsewhere.
+@MainActor
+func caretAtEnd(of textView: NSTextView) -> Bool {
+    textView.selectedRange() == NSRange(location: (textView.string as NSString).length, length: 0)
+}
+
+@discardableResult
+func copyToPasteboard(_ text: String) -> Bool {
+    NSPasteboard.general.clearContents()
+    if NSPasteboard.general.setString(text, forType: .string) { return true }
+    log("can't copy \(text)")
+    return false
 }
 
 func log(_ message: String) {
