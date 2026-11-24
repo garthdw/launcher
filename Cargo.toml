@@ -14,6 +14,7 @@ publish = false
 launcher-core = { path = "crates/launcher-core" }
 launcher-apps = { path = "crates/launcher-apps" }
 launcher-calc = { path = "crates/launcher-calc" }
+launcher-config = { path = "crates/launcher-config" }
 launcher-jwt = { path = "crates/launcher-jwt" }
 launcher-plugins = { path = "crates/launcher-plugins" }
 launcher-window = { path = "crates/launcher-window" }
@@ -27,9 +28,12 @@ notify = "8.2.2"
 objc2-core-foundation = { version = "0.3.2", default-features = false, features = ["std", "CFError", "CFString", "CFURL"] }
 numbat = { version = "1.24.0", default-features = false }
 numbat-exchange-rates = "0.6.0"
+serde = { version = "1.0.229", features = ["derive"] }
 # `preserve_order`, so a decoded JWT shows its claims in the token's order.
 serde_json = { version = "1.0.154", features = ["preserve_order"] }
 tempfile = "3.27.0"
+# Reading only: `display` would add the writer.
+toml = { version = "1.2.2", default-features = false, features = ["parse", "serde", "std"] }
 uniffi = "0.32.2"
 
 [patch.crates-io]

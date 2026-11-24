@@ -747,6 +747,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "launcher-config"
+version = "0.1.0"
+dependencies = [
+ "launcher-core",
+ "launcher-window",
+ "notify",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "toml",
+]
+
+[[package]]
 name = "launcher-core"
 version = "0.1.0"
 
