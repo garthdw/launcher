@@ -4,7 +4,7 @@
 use std::sync::{Arc, Mutex};
 
 use launcher_core::{Found, PluginId, Plugins};
-use launcher_window::{DEFAULT_BINDINGS, Rect, WindowAction};
+use launcher_window::{DEFAULT_BINDINGS, Display, Placement, Rect, WindowAction};
 
 uniffi::setup_scaffolding!();
 
@@ -79,6 +79,18 @@ pub struct Rect {
     pub height: f64,
 }
 
+#[uniffi::remote(Record)]
+pub struct Display {
+    pub frame: Rect,
+    pub visible: Rect,
+}
+
+#[uniffi::remote(Record)]
+pub struct Placement {
+    pub frame: Rect,
+    pub visible: Rect,
+}
+
 #[uniffi::remote(Enum)]
 pub enum WindowAction {
     LeftHalf,
@@ -95,6 +107,8 @@ pub enum WindowAction {
     Maximise,
     Centre,
     Restore,
+    NextDisplay,
+    PreviousDisplay,
 }
 
 #[derive(uniffi::Record)]
@@ -168,17 +182,27 @@ pub fn window_bindings() -> Vec<WindowBinding> {
         .collect()
 }
 
-/// The index of the display, among `displays`' frames, whose layouts `window` uses.
+/// Where `action` puts `window`, all in top-left-origin global coordinates; `None` for `Restore`,
+/// for a display move with only one display, and without displays.
 #[uniffi::export]
-pub fn window_display(window: Rect, displays: Vec<Rect>) -> Option<u32> {
-    launcher_window::display_holding(window, &displays).and_then(|index| u32::try_from(index).ok())
+pub fn window_placement(
+    action: WindowAction,
+    window: Rect,
+    displays: Vec<Display>,
+) -> Option<Placement> {
+    action.place(window, &displays)
 }
 
-/// Where `action` puts `window` within `visible`, both in top-left-origin global coordinates;
-/// `None` for `Restore`.
+/// Where `Restore` puts `window` back to `original`, saved among the displays `saved`; `None` to
+/// restore it exactly, as while its display is still where it was.
 #[uniffi::export]
-pub fn window_frame(action: WindowAction, window: Rect, visible: Rect) -> Option<Rect> {
-    action.frame(window, visible)
+pub fn window_restore_placement(
+    original: Rect,
+    saved: Vec<Display>,
+    window: Rect,
+    displays: Vec<Display>,
+) -> Option<Placement> {
+    launcher_window::restore_placement(original, &saved, window, &displays)
 }
 
 /// `frame` moved as little as it takes to lie within `visible`, keeping its size.

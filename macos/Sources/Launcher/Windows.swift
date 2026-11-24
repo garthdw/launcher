@@ -5,10 +5,12 @@ import ApplicationServices
 /// puts it comes from the Rust core, shared with other shells; this only reads and moves windows.
 @MainActor
 final class Windows {
-    /// Each window's frame from before its first layout since the last restore, for `.restore`.
+    /// Each window's frame from before its first layout or display move since the last restore,
+    /// for `.restore`, so restoring after a display move goes back to the original display while
+    /// it's still there (see `windowRestorePlacement`), with the displays at the time.
     /// Kept even if the user moves the window in between: telling their move from an app adjusting
     /// the frame it was given (to a minimum size, a terminal's cell grid, late) isn't reliable.
-    private var originals: [AXUIElement: CGRect] = [:]
+    private var originals: [AXUIElement: (frame: CGRect, displays: [Display])] = [:]
     private var askedForPermission = false
     private var explaining = false
 
@@ -34,23 +36,30 @@ final class Windows {
             log("leaving \(name)'s full-screen window alone")
             return
         }
+        let displays = NSScreen.screens.map {
+            Display(frame: Rect(axFrame($0.frame)), visible: Rect(axFrame($0.visibleFrame)))
+        }
+        let placement: Placement
         if action == .restore {
             guard let original = originals.removeValue(forKey: window) else { return }
-            window.setFrame(original)
-            return
+            guard let fitted = windowRestorePlacement(
+                original: Rect(original.frame), saved: original.displays, window: Rect(frame), displays: displays
+            ) else {
+                window.setFrame(original.frame)
+                return
+            }
+            placement = fitted
+        } else {
+            guard let laidOut = windowPlacement(action: action, window: Rect(frame), displays: displays)
+            else { return }
+            if originals[window] == nil { originals[window] = (frame, displays) }
+            placement = laidOut
         }
-        let screens = NSScreen.screens
-        guard let index = windowDisplay(window: Rect(frame), displays: screens.map { Rect(axFrame($0.frame)) })
-        else { return }
-        let visible = Rect(axFrame(screens[Int(index)].visibleFrame))
-        guard let target = windowFrame(action: action, window: Rect(frame), visible: visible).map(CGRect.init)
-        else { return }
-        if originals[window] == nil { originals[window] = frame }
-        window.setFrame(target)
+        window.setFrame(CGRect(placement.frame))
         // A window whose minimum size is larger than the target hangs off the display's edge. Apps
         // that resize asynchronously (Electron, Chrome) still report the old frame, so leave those.
         if let placed = window.frame, placed != frame {
-            let within = CGRect(windowMovedWithin(frame: Rect(placed), visible: visible))
+            let within = CGRect(windowMovedWithin(frame: Rect(placed), visible: placement.visible))
             if within.origin != placed.origin { window.setPosition(within.origin) }
         }
     }
