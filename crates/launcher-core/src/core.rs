@@ -200,12 +200,26 @@ pub struct Found {
     pub item: Item,
 }
 
-/// The plugins a shell runs, asked in order.
-pub struct Plugins(Vec<Box<dyn Plugin + Send>>);
+/// The plugins a shell runs, asked in order. A place can be empty, for a plugin that's off, so
+/// turning one on or off leaves the others' ids, and the items they made, pointing at them.
+pub struct Plugins(Vec<Option<Box<dyn Plugin + Send>>>);
 
 impl Plugins {
     pub fn new(plugins: Vec<Box<dyn Plugin + Send>>) -> Self {
-        Self(plugins)
+        Self(plugins.into_iter().map(Some).collect())
+    }
+
+    /// `count` empty places, for `set` to fill.
+    pub fn empty(count: usize) -> Self {
+        Self(std::iter::repeat_with(|| None).take(count).collect())
+    }
+
+    /// Puts `plugin`, or nothing, in place `place`, dropping the plugin there.
+    pub fn set(&mut self, place: usize, plugin: Option<Box<dyn Plugin + Send>>) {
+        match self.0.get_mut(place) {
+            Some(slot) => *slot = plugin,
+            None => eprintln!("no place {place} for a plugin"),
+        }
     }
 
     /// Runs on the UI thread for every keystroke, so every plugin must stay well under a frame.
@@ -217,6 +231,7 @@ impl Plugins {
         self.0
             .iter_mut()
             .enumerate()
+            .filter_map(|(index, plugin)| Some((index, plugin.as_mut()?)))
             .flat_map(|(index, plugin)| {
                 plugin.query(query).into_iter().map(move |item| Found {
                     plugin: PluginId(index),
@@ -228,7 +243,7 @@ impl Plugins {
 
     /// The shell ran `action` from an item `plugin` produced; only that plugin hears of it.
     pub fn ran(&mut self, plugin: PluginId, action: &Action) {
-        match self.0.get_mut(plugin.0) {
+        match self.0.get_mut(plugin.0).and_then(Option::as_mut) {
             Some(plugin) => plugin.ran(action),
             None => eprintln!("no plugin {} to tell it ran {action:?}", plugin.0),
         }
@@ -302,6 +317,27 @@ mod tests {
         };
         plugins.ran(chosen.plugin, &chosen.item.action);
         assert!(first.lock().is_ok_and(|ran| ran.is_empty()));
+        assert!(
+            second
+                .lock()
+                .is_ok_and(|ran| *ran == [Action::Copy("second".into())])
+        );
+    }
+
+    #[test]
+    fn emptying_a_place_keeps_the_others_ids() {
+        let (mut plugins, _, second) = recorders();
+        let found = plugins.query("anything");
+        plugins.set(0, None);
+        let titles: Vec<String> = plugins
+            .query("again")
+            .into_iter()
+            .map(|found| found.item.title)
+            .collect();
+        assert_eq!(titles, ["second again"]);
+        for chosen in &found {
+            plugins.ran(chosen.plugin, &chosen.item.action);
+        }
         assert!(
             second
                 .lock()

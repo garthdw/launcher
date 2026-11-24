@@ -11,5 +11,7 @@ path = "src/plugins.rs"
 [dependencies]
 launcher-apps.workspace = true
 launcher-calc.workspace = true
+launcher-config.workspace = true
 launcher-core.workspace = true
 launcher-jwt.workspace = true
+notify.workspace = true

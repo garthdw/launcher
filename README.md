@@ -20,6 +20,23 @@ open target/release/Launcher.app
 Set `MAC_APP_SIGN` to a codesigning identity (`security find-identity -v -p codesigning` lists
 yours) to keep macOS permissions across rebuilds; without it the app is signed ad hoc.
 
+## Settings
+
+Settings live in `~/.config/launcher/config.toml`: the launcher's hotkey, each window action's
+hotkey (or `"none"`), and which plugins are on. Write one with every setting at its default and
+comments explaining them:
+
+```sh
+target/release/Launcher.app/Contents/MacOS/Launcher config init
+```
+
+Hotkeys are modifiers and a key joined by `+`, such as `"ctrl+alt+left"` or `"cmd+shift+k"`. The
+launcher reloads the file when it's saved. If the file has a mistake, the launcher keeps the
+settings it had and says what's wrong; if another app holds a hotkey, it says which setting it
+can't use. Editors that read `#:schema` lines
+(Taplo, the Even Better TOML extension) check and complete the file against
+[`config.schema.json`](crates/launcher-config/config.schema.json).
+
 ## Contributing
 
 See [`AGENTS.md`](AGENTS.md) for the architecture, commands and coding guidelines.

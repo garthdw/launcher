@@ -11,6 +11,7 @@ path = "src/ffi.rs"
 crate-type = ["staticlib", "lib"]
 
 [dependencies]
+launcher-config.workspace = true
 launcher-core.workspace = true
 launcher-plugins.workspace = true
 launcher-window.workspace = true

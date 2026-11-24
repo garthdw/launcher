@@ -768,6 +768,7 @@ name = "launcher-ffi"
 version = "0.1.0"
 dependencies = [
  "launcher-calc",
+ "launcher-config",
  "launcher-core",
  "launcher-plugins",
  "launcher-window",
@@ -790,8 +791,10 @@ version = "0.1.0"
 dependencies = [
  "launcher-apps",
  "launcher-calc",
+ "launcher-config",
  "launcher-core",
  "launcher-jwt",
+ "notify",
 ]
 
 [[package]]

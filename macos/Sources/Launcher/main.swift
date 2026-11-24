@@ -220,9 +220,10 @@ final class DetailText: NSTextView {
 
 @MainActor
 final class AppDelegate: NSObject, NSApplicationDelegate, NSTextFieldDelegate, NSWindowDelegate {
-    lazy var launcher = Launcher(listener: ResultsRelay { [weak self] in
-        DispatchQueue.main.async { MainActor.assumeIsolated { self?.resultsChanged() } }
-    })
+    lazy var launcher = Launcher(
+        listener: MainRelay { [weak self] in self?.resultsChanged() },
+        settingsListener: MainRelay { [weak self] in self?.reloadSettings() }
+    )
     let windows = Windows()
     // Non-activating, so the app the user was in stays frontmost: window snapping acts on it.
     let panel = Panel(
@@ -243,15 +244,22 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSTextFieldDelegate, N
     var summoned: CFAbsoluteTime?
     /// A plugin's results changed while the panel was hidden or showed a detail.
     var resultsStale = false
-    /// What each registered hotkey does, indexed by its Carbon hotkey ID.
-    var hotkeyActions: [() -> Void] = []
+    /// The registered hotkeys by their Carbon hotkey IDs: the ref to unregister each, and what it
+    /// does. IDs aren't reused, so a press queued before a reload can't run another binding.
+    var hotkeys: [UInt32: (ref: EventHotKeyRef, action: () -> Void)] = [:]
+    var nextHotkeyID: UInt32 = 0
+    /// Problems with the settings that came while an alert about earlier ones showed; shown
+    /// after it, rather than in an alert on top.
+    var pendingProblems: [String]?
+    var showingProblems = false
 
     func applicationDidFinishLaunching(_: Notification) {
-        // Lazy only so the relay can reach `self`; plugins start their background work now, not
-        // on the first keystroke.
+        // Lazy only so the relays can reach `self`; plugins start their background work, and the
+        // config file is watched, now rather than on the first keystroke.
         _ = launcher
         buildPanel()
-        registerHotkeys()
+        handleHotkeys()
+        apply(launcher.settings())
         // Opens the panel at launch with this query, for measuring without the hotkey.
         if let query = ProcessInfo.processInfo.environment["LAUNCHER_OPEN"] {
             field.stringValue = query
@@ -289,7 +297,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSTextFieldDelegate, N
         resize()
     }
 
-    func registerHotkeys() {
+    func handleHotkeys() {
         var pressed = EventTypeSpec(eventClass: OSType(kEventClassKeyboard), eventKind: UInt32(kEventHotKeyPressed))
         let delegate = Unmanaged.passUnretained(self).toOpaque()
         InstallEventHandler(GetApplicationEventTarget(), { _, event, context in
@@ -302,37 +310,63 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSTextFieldDelegate, N
             guard status == noErr else { return status }
             let delegate = Unmanaged<AppDelegate>.fromOpaque(context).takeUnretainedValue()
             return MainActor.assumeIsolated {
-                let index = Int(hotkeyID.id)
-                guard delegate.hotkeyActions.indices.contains(index) else { return OSStatus(eventNotHandledErr) }
-                delegate.hotkeyActions[index]()
+                guard let hotkey = delegate.hotkeys[hotkeyID.id] else { return OSStatus(eventNotHandledErr) }
+                hotkey.action()
                 return noErr
             }
         }, 1, &pressed, delegate, nil)
-        registerHotkey(Hotkey(key: .space, control: false, option: true, command: false, shift: false)) {
-            [unowned self] in summon(at: CFAbsoluteTimeGetCurrent())
-        }
-        for binding in windowBindings() {
-            registerHotkey(binding.hotkey) { [unowned self, action = binding.action] in windows.perform(action) }
-        }
     }
 
-    /// `action` runs when the hotkey is pressed, whichever app is frontmost.
-    func registerHotkey(_ hotkey: Hotkey, action: @escaping () -> Void) {
-        guard let keyCode = hotkey.keyCode else {
-            log("can't register \(hotkey.name): no such key")
+    func reloadSettings() {
+        if let settings = launcher.reloadSettings() { apply(settings) }
+    }
+
+    /// Registers the settings' hotkeys in place of those from before, and shows what's wrong
+    /// with the settings, if anything.
+    func apply(_ settings: Settings) {
+        for hotkey in hotkeys.values {
+            UnregisterEventHotKey(hotkey.ref)
+        }
+        hotkeys = [:]
+        let problems = [settings.problem].compactMap { $0 } + settings.bindings.compactMap(register)
+        problems.forEach(log)
+        // The alert's modal loop still runs reloads, so a save while it shows lands here.
+        guard !showingProblems else {
+            pendingProblems = problems
             return
         }
+        showingProblems = true
+        var showing = problems
+        while !showing.isEmpty {
+            pendingProblems = nil
+            showAlert("Some settings don't work", showing.joined(separator: "\n\n"))
+            showing = pendingProblems ?? []
+        }
+        showingProblems = false
+    }
+
+    /// Its action runs when the hotkey is pressed, whichever app is frontmost. Returns why it
+    /// couldn't be registered.
+    func register(_ binding: HotkeyBinding) -> String? {
+        guard let keyCode = binding.hotkey.keyCode else { return "\(binding.setting): no such key." }
         var registered: EventHotKeyRef?
+        let id = nextHotkeyID
+        nextHotkeyID &+= 1
+        // Exclusive, so registering fails while another app holds the hotkey rather than both
+        // acting on it.
         let status = RegisterEventHotKey(
-            UInt32(keyCode), UInt32(hotkey.carbonModifiers),
-            EventHotKeyID(signature: 0x4C4E_4348, id: UInt32(hotkeyActions.count)),
-            GetApplicationEventTarget(), 0, &registered
+            UInt32(keyCode), UInt32(binding.hotkey.carbonModifiers),
+            EventHotKeyID(signature: 0x4C4E_4348, id: id),
+            GetApplicationEventTarget(), OptionBits(kEventHotKeyExclusive), &registered
         )
-        guard status == noErr else {
-            log("can't register \(hotkey.name): \(status)")
-            return
+        guard status == noErr, let registered else {
+            let reason = status == eventHotKeyExistsErr ? "another app already uses this hotkey" : "error \(status)"
+            return "\(binding.setting): \(reason)."
         }
-        hotkeyActions.append(action)
+        hotkeys[id] = (registered, { [unowned self, action = binding.action] in
+            if let action { windows.perform(action) } else { summon(at: CFAbsoluteTimeGetCurrent()) }
+        })
+        return nil
     }
 
     func summon(at time: CFAbsoluteTime) {
@@ -538,16 +572,24 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSTextFieldDelegate, N
     }
 }
 
-/// Hands `results_changed` calls, which come on plugins' threads, to the app delegate.
-final class ResultsRelay: ResultsListener, Sendable {
-    let changed: @Sendable () -> Void
+/// Hands the core's calls, which come on its background threads, to the main actor.
+final class MainRelay: ResultsListener, SettingsListener, Sendable {
+    let changed: @MainActor @Sendable () -> Void
 
-    init(_ changed: @escaping @Sendable () -> Void) {
+    init(_ changed: @escaping @MainActor @Sendable () -> Void) {
         self.changed = changed
     }
 
     func resultsChanged() {
-        changed()
+        relay()
+    }
+
+    func settingsChanged() {
+        relay()
+    }
+
+    private func relay() {
+        DispatchQueue.main.async { MainActor.assumeIsolated { self.changed() } }
     }
 }
 
@@ -608,21 +650,6 @@ extension Hotkey {
     var carbonModifiers: Int {
         (control ? controlKey : 0) | (option ? optionKey : 0) | (shift ? shiftKey : 0) | (command ? cmdKey : 0)
     }
-
-    /// As menus show it, such as ⌃⌥←.
-    var name: String {
-        let key = switch key {
-        case .left: "←"
-        case .right: "→"
-        case .up: "↑"
-        case .down: "↓"
-        case .return: "↩"
-        case .delete: "⌫"
-        case .space: "Space"
-        case let .character(character): character.uppercased()
-        }
-        return (control ? "⌃" : "") + (option ? "⌥" : "") + (shift ? "⇧" : "") + (command ? "⌘" : "") + key
-    }
 }
 
 let characterKeyCodes: [String: Int] = [
@@ -644,6 +671,11 @@ func copyToPasteboard(_ text: String) -> Bool {
 
 func log(_ message: String) {
     FileHandle.standardError.write(Data((message + "\n").utf8))
+}
+
+// `Launcher config init`, from the app's own binary, so there's no separate tool to build and sign.
+if let status = configCommand(arguments: Array(CommandLine.arguments.dropFirst())) {
+    exit(status)
 }
 
 MainActor.assumeIsolated {
