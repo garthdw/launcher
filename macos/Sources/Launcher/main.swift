@@ -513,47 +513,52 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSTextFieldDelegate, N
         results.frame = NSRect(x: 0, y: 0, width: Metrics.width, height: listHeight)
         results.subviews.forEach { $0.removeFromSuperview() }
         for (index, item) in items.enumerated() {
-            let row = Row(frame: NSRect(
+            results.addSubview(row(for: item, at: index, frame: NSRect(
                 x: Metrics.inset, y: listHeight - Metrics.inset - CGFloat(index + 1) * (rowHeight + 2),
                 width: Metrics.width - Metrics.inset * 2, height: rowHeight
-            ))
-            row.clicked = { [unowned self] in choose(index) }
-            row.hovered = { [unowned self] in if picked != index { picked = index } }
-            row.wantsLayer = true
-            row.layer?.cornerRadius = Metrics.selectionRadius
-            var titleX: CGFloat = 12
-            if case let .open(path) = item.action {
-                let icon = NSImageView(image: NSWorkspace.shared.icon(forFile: path))
-                icon.frame = NSRect(x: 10, y: 8, width: 28, height: 28)
-                row.addSubview(icon)
-                titleX = 46
-            }
-            let title = titleLabel(item.title)
-            // The shell names its own keys, so plugins' subtitles say only what an item is.
-            var keys = ""
-            switch item.action {
-            case .copy: keys = "↵ copies"
-            case .open: keys = "↵ opens"
-            case .nothing: title.textColor = .secondaryLabelColor
-            }
-            let subtitle = hintLabel(
-                ([item.subtitle, keys] + (item.detail.isEmpty ? [] : ["→ details"]))
-                    .filter { !$0.isEmpty }
-                    .joined(separator: " · ")
-            )
-            // Long subtitles such as app folders lose their start, not the keys. A subtitle may
-            // take room a short title leaves, but never squeezes a long title further.
-            subtitle.lineBreakMode = .byTruncatingHead
-            let end = row.frame.width - 12
-            let subtitleX = min(396, max(titleX + title.fittingSize.width + 4, end - subtitle.fittingSize.width))
-            subtitle.frame = NSRect(x: subtitleX, y: 13, width: end - subtitleX, height: 18)
-            title.frame = NSRect(x: titleX, y: 11, width: subtitleX - 4 - titleX, height: 22)
-            row.addSubview(title)
-            row.addSubview(subtitle)
-            results.addSubview(row)
+            )))
         }
         resize()
         picked = 0
+    }
+
+    /// `item`'s row, the `index`th in `items`.
+    func row(for item: Item, at index: Int, frame: NSRect) -> Row {
+        let row = Row(frame: frame)
+        row.clicked = { [unowned self] in choose(index) }
+        row.hovered = { [unowned self] in if picked != index { picked = index } }
+        row.wantsLayer = true
+        row.layer?.cornerRadius = Metrics.selectionRadius
+        var titleX: CGFloat = 12
+        if case let .open(path) = item.action {
+            let icon = NSImageView(image: NSWorkspace.shared.icon(forFile: path))
+            icon.frame = NSRect(x: 10, y: 8, width: 28, height: 28)
+            row.addSubview(icon)
+            titleX = 46
+        }
+        let title = titleLabel(item.title)
+        // The shell names its own keys, so plugins' subtitles say only what an item is.
+        var keys = ""
+        switch item.action {
+        case .copy: keys = "↵ copies"
+        case .open: keys = "↵ opens"
+        case .nothing: title.textColor = .secondaryLabelColor
+        }
+        let subtitle = hintLabel(
+            ([item.subtitle, keys] + (item.detail.isEmpty ? [] : ["→ details"]))
+                .filter { !$0.isEmpty }
+                .joined(separator: " · ")
+        )
+        // Long subtitles such as app folders lose their start, not the keys. A subtitle may
+        // take room a short title leaves, but never squeezes a long title further.
+        subtitle.lineBreakMode = .byTruncatingHead
+        let end = row.frame.width - 12
+        let subtitleX = min(396, max(titleX + title.fittingSize.width + 4, end - subtitle.fittingSize.width))
+        subtitle.frame = NSRect(x: subtitleX, y: 13, width: end - subtitleX, height: 18)
+        title.frame = NSRect(x: titleX, y: 11, width: subtitleX - 4 - titleX, height: 22)
+        row.addSubview(title)
+        row.addSubview(subtitle)
+        return row
     }
 
     /// Fits the panel to what it shows, keeping its top edge where it is.
