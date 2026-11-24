@@ -22,8 +22,8 @@ const RATES_RETRY: Duration = Duration::from_secs(60);
 /// A query with a number is almost surely a calculation. Only an app whose name starts with it,
 /// as "1Password" does with "1pass", ranks higher.
 const CALCULATION: u8 = 90;
-/// A word such as `pi` or `e` may as well be the start of an app's name: below an app with a word
-/// starting with it (Pixelmator, TextEdit), above looser matches (Preview, Notes).
+/// A word such as `pi` may as well be the start of an app's name: below an app with a word
+/// starting with it (Pixelmator), above looser matches (Preview).
 const CONSTANT: u8 = 80;
 
 pub struct Calc {
@@ -270,6 +270,10 @@ impl Plugin for Calc {
     fn query(&mut self, query: &str) -> Vec<Item> {
         self.take_update();
         let has_number = query.chars().any(|c| c.is_ascii_digit());
+        // A lone letter such as `e` is more likely the start of an app's name than a constant.
+        if !has_number && query.chars().nth(1).is_none() {
+            return Vec::new();
+        }
         // Imports and definitions stay in the context for good: `let x = 3` would leave `x` in
         // later answers, before rates load the currency module would keep NaN rates, and
         // `use all` would hold every module in memory.
@@ -609,7 +613,10 @@ mod tests {
                 .collect::<Vec<_>>()
         };
         assert_eq!(answer("pi"), [("3.14159".into(), CONSTANT)]);
-        assert_eq!(answer("e"), [("2.71828".into(), CONSTANT)]);
+        assert_eq!(answer("e"), [], "a lone letter is the start of a word");
+        assert_eq!(answer("e*e"), [("7.38906".into(), CONSTANT)]);
+        assert_eq!(answer("e * 2"), [("5.43656".into(), CALCULATION)]);
+        assert_eq!(answer("2e"), [("5.43656".into(), CALCULATION)]);
         assert_eq!(answer("pi * e"), [("8.53973".into(), CONSTANT)]);
         assert_eq!(answer("2 pi"), [("6.28319".into(), CALCULATION)]);
         for word in [
