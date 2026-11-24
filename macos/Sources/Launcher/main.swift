@@ -155,6 +155,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSTextFieldDelegate, N
         }
     }
 
+    func choose(_ index: Int) {
+        if index < items.count { run(items[index]) }
+        field.stringValue = ""
+        refresh()
+        panel.orderOut(nil)
+    }
+
     func run(_ item: Item) {
         switch item.action {
         case let .copy(text):
@@ -197,10 +204,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSTextFieldDelegate, N
         case #selector(NSResponder.moveUp(_:)) where !items.isEmpty:
             picked = (picked + items.count - 1) % items.count
         case #selector(NSResponder.insertNewline(_:)):
-            if picked < items.count { run(items[picked]) }
-            field.stringValue = ""
-            refresh()
-            panel.orderOut(nil)
+            choose(picked)
             return true
         case #selector(NSResponder.cancelOperation(_:)):
             panel.orderOut(nil)
