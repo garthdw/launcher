@@ -11,6 +11,8 @@ The toolchain is pinned in `rust-toolchain.toml`. The macOS shell targets macOS 
 ```sh
 cargo fmt --check && cargo clippy --all-targets -- -D warnings && cargo test
 cargo test -p launcher-calc units            # single test, by name substring
+just                                         # bundle, stop any running copy, run in the foreground
+just run '100 N to lbf'                      # the same, opening the panel with this query
 scripts/bundle                               # macOS: Rust core, Swift bindings, signed target/release/Launcher.app
 LAUNCHER_OPEN='100 N to lbf' target/release/Launcher.app/Contents/MacOS/Launcher   # open the panel at launch
 footprint "$(pgrep -x Launcher)"             # memory, as Activity Monitor reports it
@@ -66,4 +68,4 @@ Settings and state live in `~/.config/launcher` on every platform (`launcher_cor
 
 ## Verifying changes
 
-A change is done when it works in the real app, not just when tests pass. Bundle it, open the panel with `LAUNCHER_OPEN`, and check the result on screen and the `summon to focus` line it logs. A synthetic hotkey needs the Accessibility permission for the terminal, so press ⌥Space yourself to check the hotkey path.
+A change is done when it works in the real app, not just when tests pass. Run it with `just run '<query>'`, check the `summon to focus` line it logs, then drive the panel with `scripts/press` (real key presses, including ⌥Space) and check the screen and clipboard. The `drive-app` skill (`.claude/skills/drive-app/SKILL.md`) walks through it and the traps that look like app bugs. `scripts/press` needs the Accessibility permission for the terminal.

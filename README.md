@@ -12,7 +12,8 @@ You need the Rust toolchain pinned in `rust-toolchain.toml` (rustup installs it)
 later.
 
 ```sh
-scripts/bundle    # builds target/release/Launcher.app
+just              # builds and runs the app, logging to the terminal
+scripts/bundle    # or just builds target/release/Launcher.app
 open target/release/Launcher.app
 ```
 
