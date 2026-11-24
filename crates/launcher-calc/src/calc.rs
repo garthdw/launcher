@@ -271,11 +271,12 @@ impl Plugin for Calc {
         if !query.chars().any(|c| c.is_ascii_digit()) {
             return Vec::new();
         }
-        // An import stays in the context for good: before rates load, the currency module would
-        // keep NaN rates, and `use all` would hold every module in memory.
+        // Imports and definitions stay in the context for good: `let x = 3` would leave `x` in
+        // later answers, before rates load the currency module would keep NaN rates, and
+        // `use all` would hold every module in memory.
         if query
             .split(|c: char| !c.is_alphanumeric() && c != '_')
-            .any(|word| word == "use")
+            .any(|word| matches!(word, "use" | "let" | "fn" | "unit" | "dimension" | "struct"))
         {
             return Vec::new();
         }
@@ -588,6 +589,24 @@ mod tests {
     fn ignores_imports() {
         assert!(titles("use units::currencies; 1").is_empty());
         assert!(titles("2; use all").is_empty());
+    }
+
+    #[test]
+    fn definitions_dont_outlive_their_query() -> Result<(), Box<NumbatError>> {
+        let mut calc = Calc::new()?;
+        for definition in [
+            "let x = 3",
+            "fn double(y) = 2 y",
+            "unit widget = 3 m",
+            "dimension Foo",
+            "struct Point2 { x: Scalar }",
+        ] {
+            calc.query(definition);
+        }
+        for uses in ["x + 1", "double(2)", "2 widget", "1 x", "x"] {
+            assert_eq!(shown(&mut calc, uses), [], "{uses}");
+        }
+        Ok(())
     }
 
     #[test]
