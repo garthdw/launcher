@@ -433,7 +433,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSTextFieldDelegate, N
         guard app.status == .requiresApproval else { return }
         if showAlert(
             "Turn on Launcher in Login Items",
-            "Launcher is in System Settings > General > Login Items, but turned off. Turn it on there to open Launcher at login.",
+            loginItemApproval,
             buttons: ["Open Login Items", "Cancel"]
         ) == .alertFirstButtonReturn {
             SMAppService.openSystemSettingsLoginItems()
