@@ -68,6 +68,11 @@ final class Row: NSView {
         frame.contains(point) ? self : nil
     }
 
+    // VoiceOver reads the row whole, by its label, rather than its icon and labels one by one.
+    override func accessibilityChildren() -> [Any]? {
+        nil
+    }
+
     // AppKit sends `mouseUp` only to the view that took `mouseDown`.
     override func mouseDown(with _: NSEvent) {}
 
@@ -308,6 +313,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSTextFieldDelegate, N
         panel.isOpaque = false
         panel.hasShadow = true
         panel.delegate = self
+        // Borderless, so never drawn; VoiceOver names the window by it.
+        panel.title = "Launcher"
         let glass = NSGlassEffectView()
         glass.cornerRadius = Metrics.glassRadius
         glass.autoresizingMask = [.width, .height]
@@ -324,8 +331,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSTextFieldDelegate, N
         // One line that scrolls sideways: a pasted token would otherwise wrap onto a clipped second line.
         field.usesSingleLineMode = true
         field.cell?.isScrollable = true
+        field.setAccessibilityLabel("Search")
         field.delegate = self
         field.autoresizingMask = [.width, .minYMargin]
+        list.setAccessibilityElement(true)
+        list.setAccessibilityRole(.list)
+        list.setAccessibilityLabel("Results")
         // A fixed height: `resize` reads it as the list's, so the panel growing mustn't stretch it.
         results.autoresizingMask = [.width]
         content.addSubview(field)
@@ -552,6 +563,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSTextFieldDelegate, N
             header.font = .systemFont(ofSize: 12, weight: .semibold)
             header.textColor = .secondaryLabelColor
             header.frame = NSRect(x: titleX, y: y + 9, width: Metrics.width - titleX * 2, height: 16)
+            // AppKit names no heading role, but VoiceOver reads and navigates `AXHeading` as one.
+            header.setAccessibilityRole(NSAccessibility.Role(rawValue: "AXHeading"))
             list.addSubview(header)
             // A group's first row reaches up over its header.
             var top = y - Metrics.inset
@@ -568,6 +581,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSTextFieldDelegate, N
             }
         }
         let height = groups.isEmpty ? 0 : y + Metrics.inset
+        list.setAccessibilityRows(rows)
         list.frame = NSRect(x: 0, y: 0, width: Metrics.width, height: height)
         results.frame = NSRect(x: 0, y: 0, width: Metrics.width, height: min(height, maxHeight))
         resize()
@@ -581,6 +595,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSTextFieldDelegate, N
         row.hovered = { [unowned self] in if picked != index { picked = index } }
         row.wantsLayer = true
         row.layer?.cornerRadius = Metrics.selectionRadius
+        row.setAccessibilityElement(true)
+        row.setAccessibilityRole(.row)
+        row.setAccessibilityLabel([item.title, item.subtitle].filter { !$0.isEmpty }.joined(separator: ", "))
         let icon = NSImageView(image: item.icon.image)
         icon.frame = NSRect(x: 10, y: 8, width: 28, height: 28)
         icon.contentTintColor = .secondaryLabelColor
@@ -630,7 +647,20 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSTextFieldDelegate, N
     func highlightPicked() {
         for (index, row) in rows.enumerated() {
             row.layer?.backgroundColor = index == picked ? NSColor.controlAccentColor.cgColor : nil
+            row.setAccessibilitySelected(index == picked)
         }
+        list.setAccessibilitySelectedRows(rows.indices.contains(picked) ? [rows[picked]] : [])
+        NSAccessibility.post(element: list, notification: .selectedRowsChanged)
+    }
+
+    /// Keyboard focus stays in the field, so moving the selection gives VoiceOver no focus change
+    /// to follow; it speaks an announcement wherever focus is.
+    func announcePicked() {
+        guard rows.indices.contains(picked), let label = rows[picked].accessibilityLabel() else { return }
+        NSAccessibility.post(element: panel, notification: .announcementRequested, userInfo: [
+            .announcement: label,
+            .priority: NSAccessibilityPriorityLevel.high.rawValue,
+        ])
     }
 
     /// Picks the `index`th item and scrolls its row into view. Hover sets `picked` alone: scrolling
@@ -693,8 +723,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSTextFieldDelegate, N
         switch selector {
         case #selector(NSResponder.moveDown(_:)) where !items.isEmpty:
             pick(step(picked, by: 1, count: items.count))
+            announcePicked()
         case #selector(NSResponder.moveUp(_:)) where !items.isEmpty:
             pick(step(picked, by: -1, count: items.count))
+            announcePicked()
         // Only from the end of the query, so → still moves the caret elsewhere.
         case #selector(NSResponder.moveRight(_:))
             where textView.selectedRange() == NSRange(location: (textView.string as NSString).length, length: 0)
