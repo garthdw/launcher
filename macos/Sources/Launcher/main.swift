@@ -98,18 +98,15 @@ final class DetailPane: NSView {
         hint.frame = NSRect(x: 402, y: bodyHeight + 19, width: 220, height: 18)
         hint.autoresizingMask = [.minYMargin]
 
-        let scroll = NSScrollView(frame: NSRect(x: 0, y: 0, width: Metrics.width, height: bodyHeight))
-        scroll.autoresizingMask = [.width, .height]
-        scroll.drawsBackground = false
-        scroll.hasVerticalScroller = true
-        scroll.autohidesScrollers = true
         let document = FlippedView(frame: NSRect(x: 0, y: 0, width: Metrics.width, height: contentHeight))
         document.autoresizingMask = [.width]
         text.frame = document.bounds
         text.autoresizingMask = [.width]
         document.addSubview(text.highlight)
         document.addSubview(text)
-        scroll.documentView = document
+        let scroll = scrollView(holding: document)
+        scroll.frame = NSRect(x: 0, y: 0, width: Metrics.width, height: bodyHeight)
+        scroll.autoresizingMask = [.width, .height]
         addSubview(title)
         addSubview(hint)
         addSubview(scroll)
@@ -121,9 +118,20 @@ final class DetailPane: NSView {
     }
 }
 
-/// Top-down, like the text view it holds, so a long detail opens scrolled to its start.
+/// Top-down, so scrolled content opens at its start, and a scroll view's document grows down.
 final class FlippedView: NSView {
     override var isFlipped: Bool { true }
+}
+
+/// Scrolls `document` on the glass, its scroller showing only while it scrolls.
+@MainActor
+func scrollView(holding document: FlippedView) -> NSScrollView {
+    let scroll = NSScrollView()
+    scroll.drawsBackground = false
+    scroll.hasVerticalScroller = true
+    scroll.autohidesScrollers = true
+    scroll.documentView = document
+    return scroll
 }
 
 /// Read-only and selectable, so the mouse can copy any part; ↑ and ↓ step through the sections
@@ -241,9 +249,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSTextFieldDelegate, N
     )
     let content = NSView()
     let field = NSTextField()
-    let results = NSScrollView()
     /// The scrolled content of `results`.
     let list = FlippedView()
+    lazy var results = scrollView(holding: list)
     /// Shown in place of the field and list while an item's detail is open.
     var detail: DetailPane?
     /// Every group's items, in the order shown.
@@ -306,10 +314,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSTextFieldDelegate, N
         field.autoresizingMask = [.width, .minYMargin]
         // A fixed height: `resize` reads it as the list's, so the panel growing mustn't stretch it.
         results.autoresizingMask = [.width]
-        results.drawsBackground = false
-        results.hasVerticalScroller = true
-        results.autohidesScrollers = true
-        results.documentView = list
         content.addSubview(field)
         content.addSubview(results)
         resize()
@@ -533,17 +537,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSTextFieldDelegate, N
             let header = groupLabel(group.name)
             header.frame = NSRect(x: titleX, y: y + 9, width: Metrics.width - titleX * 2, height: 16)
             list.addSubview(header)
-            let groupTop = y
+            // A group's first row reaches up over its header.
+            var top = y - Metrics.inset
             y += headerHeight
-            for (place, item) in group.items.enumerated() {
+            for item in group.items {
                 let row = row(for: item, at: rows.count, frame: NSRect(
                     x: Metrics.inset, y: y, width: Metrics.width - Metrics.inset * 2, height: rowHeight
                 ))
-                let top = (place == 0 ? groupTop : y) - Metrics.inset
                 row.reach = NSRect(x: 0, y: top, width: Metrics.width, height: y + rowHeight + Metrics.inset - top)
                 list.addSubview(row)
                 rows.append(row)
                 y += rowHeight + 2
+                top = y - Metrics.inset
             }
         }
         let height = groups.isEmpty ? 0 : y + Metrics.inset

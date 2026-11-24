@@ -451,9 +451,10 @@ mod tests {
         // Only the calculator, so installed apps can't add results.
         let launcher = launcher(Plugins::new(vec![Box::new(Calc::new()?)]));
         let groups = launcher.query("2 + 3".into());
-        assert_eq!(groups.len(), 1);
-        assert_eq!(groups[0].name, "Calculator");
-        let items = &groups[0].items;
+        let [Group { name, items }] = groups.as_slice() else {
+            panic!("expected one group, got {}", groups.len());
+        };
+        assert_eq!(name, "Calculator");
         assert_eq!(items.len(), 1);
         assert_eq!(items[0].title, "5");
         assert!(matches!(&items[0].action, Action::Copy { text } if text == "5"));

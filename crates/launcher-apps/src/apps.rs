@@ -599,13 +599,6 @@ mod tests {
             .collect()
     }
 
-    fn relevances(apps: &[App], query: &str) -> Vec<(String, u8)> {
-        rank(apps, &HashMap::new(), query, 1_000_000)
-            .into_iter()
-            .map(|(app, relevance)| (app.name.clone(), relevance))
-            .collect()
-    }
-
     /// The calculator scores 90 for a calculation and 80 for a bare constant such as `pi`.
     #[test]
     fn relevance_is_a_share_of_the_best_match() {
@@ -620,9 +613,9 @@ mod tests {
             "Visual Studio Code",
         ]);
         let relevance = |query, name: &str| {
-            relevances(&installed, query)
+            rank(&installed, &HashMap::new(), query, 1_000_000)
                 .into_iter()
-                .find(|(found, _)| found == name)
+                .find(|(app, _)| app.name == name)
                 .map(|(_, relevance)| relevance)
         };
         assert_eq!(relevance("safari", "Safari"), Some(97));
