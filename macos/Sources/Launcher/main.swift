@@ -8,6 +8,42 @@ final class Panel: NSPanel {
     override var canBecomeKey: Bool { true }
 }
 
+final class Row: NSView {
+    var clicked: () -> Void = {}
+    var hovered: () -> Void = {}
+
+    override init(frame: NSRect) {
+        super.init(frame: frame)
+        // `activeAlways`: the panel never makes the app active, so other tracking modes stay off.
+        // `mouseMoved` rather than entered: rows rebuilt under a resting pointer mustn't take the
+        // selection from the top result.
+        addTrackingArea(NSTrackingArea(
+            rect: .zero, options: [.mouseMoved, .activeAlways, .inVisibleRect], owner: self
+        ))
+    }
+
+    required init?(coder: NSCoder) {
+        fatalError("rows are built in code")
+    }
+
+    override func mouseMoved(with _: NSEvent) {
+        hovered()
+    }
+
+    // Clicks on the title, subtitle or icon belong to the row.
+    override func hitTest(_ point: NSPoint) -> NSView? {
+        frame.contains(point) ? self : nil
+    }
+
+    // AppKit sends `mouseUp` only to the view that took `mouseDown`.
+    override func mouseDown(with _: NSEvent) {}
+
+    // Like a button: dragging off the row before letting go cancels the click.
+    override func mouseUp(with event: NSEvent) {
+        if bounds.contains(convert(event.locationInWindow, from: nil)) { clicked() }
+    }
+}
+
 @MainActor
 final class AppDelegate: NSObject, NSApplicationDelegate, NSTextFieldDelegate, NSWindowDelegate {
     let launcher = Launcher()
@@ -21,7 +57,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSTextFieldDelegate, N
     let field = NSTextField()
     let results = NSView()
     var items: [Item] = []
-    var picked = 0
+    var picked = 0 {
+        didSet { highlightPicked() }
+    }
     var summoned: CFAbsoluteTime?
     var hotkey: EventHotKeyRef?
 
@@ -104,8 +142,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSTextFieldDelegate, N
 
     func refresh() {
         items = launcher.query(query: field.stringValue)
-        picked = 0
         layout()
+        picked = 0
     }
 
     func layout() {
@@ -120,9 +158,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSTextFieldDelegate, N
         results.frame = NSRect(x: 0, y: 0, width: 640, height: listHeight)
         results.subviews.forEach { $0.removeFromSuperview() }
         for (index, item) in items.enumerated() {
-            let row = NSView(frame: NSRect(
+            let row = Row(frame: NSRect(
                 x: 6, y: listHeight - 6 - CGFloat(index + 1) * (rowHeight + 2), width: 628, height: rowHeight
             ))
+            row.clicked = { [unowned self] in choose(index) }
+            row.hovered = { [unowned self] in if picked != index { picked = index } }
             row.wantsLayer = true
             // Concentric with the glass: its 18 pt radius less the row's 6 pt inset.
             row.layer?.cornerRadius = 12
@@ -145,7 +185,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSTextFieldDelegate, N
             row.addSubview(subtitle)
             results.addSubview(row)
         }
-        highlightPicked()
     }
 
     /// Moving the selection only recolours rows; rebuilding them would fetch every icon again.
@@ -212,7 +251,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSTextFieldDelegate, N
         default:
             return false
         }
-        highlightPicked()
         return true
     }
 }
