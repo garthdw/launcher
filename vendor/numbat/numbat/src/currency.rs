@@ -28,12 +28,13 @@ impl ExchangeRatesCache {
             .cloned()
     }
 
+    /// Replaces any rates set or fetched before. Contexts that already loaded
+    /// `units::currencies` keep the rates they loaded with.
     pub fn set_from_xml(xml_content: &str) {
-        EXCHANGE_RATES
-            .set(Mutex::new(
-                parse_exchange_rates(xml_content).map(ExchangeRates::Real),
-            ))
-            .unwrap();
+        *EXCHANGE_RATES
+            .get_or_init(|| Mutex::new(None))
+            .lock()
+            .unwrap() = parse_exchange_rates(xml_content).map(ExchangeRates::Real);
     }
 
     #[cfg(feature = "fetch-exchangerates")]

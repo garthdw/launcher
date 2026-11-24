@@ -342,8 +342,36 @@ mod tests {
 	</Cube>
 </gesmes:Envelope>";
 
+    /// numbat holds exchange rates process-wide, so tests that set them take turns.
+    static RATES: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    #[test]
+    fn replaced_rates_reach_a_new_context() -> Result<(), Box<NumbatError>> {
+        let _turn = RATES.lock();
+        let usd_in_eur = || -> Result<String, Box<NumbatError>> {
+            let mut context = Context::new(BuiltinModuleImporter::default());
+            context.load_currency_module_on_demand(true);
+            context
+                .interpret("use prelude", CodeSource::Internal)
+                .map(drop)?;
+            match context.interpret("100 USD -> EUR", CodeSource::Text)? {
+                (_, InterpreterResult::Value(value)) => {
+                    Ok(plain_text(&value, &FormatOptions::default()))
+                }
+                (_, result) => panic!("not a value: {result:?}"),
+            }
+        };
+        Context::set_exchange_rates(ECB_XML);
+        assert_eq!(usd_in_eur()?, "80 €");
+        Context::set_exchange_rates(&ECB_XML.replace("1.25", "2"));
+        assert_eq!(usd_in_eur()?, "50 €");
+        Context::set_exchange_rates(ECB_XML);
+        Ok(())
+    }
+
     #[test]
     fn currency_uses_cached_rates() -> Result<(), Box<dyn std::error::Error>> {
+        let _turn = RATES.lock();
         let cache = tempfile::tempdir()?;
         std::fs::write(cache.path().join(RATES_FILE), ECB_XML)?;
         Calc::load_exchange_rates(cache.path());
