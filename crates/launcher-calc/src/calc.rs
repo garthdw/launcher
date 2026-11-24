@@ -302,6 +302,14 @@ impl Plugin for Calc {
         // Bare words such as an app name are often valid numbat ("m", "day"), but echoing them
         // back as "1 m" is noise in a launcher. Only a plain number, as `pi` is, says something.
         let relevance = match &value {
+            // A row that looks empty.
+            Value::String(text)
+                if text
+                    .chars()
+                    .all(|character| character.is_whitespace() || character.is_control()) =>
+            {
+                return Vec::new();
+            }
             _ if has_number => CALCULATION,
             Value::Quantity(quantity) if quantity.unit().is_scalar() => CONSTANT,
             _ => return Vec::new(),
@@ -465,6 +473,22 @@ mod tests {
                 .map(|item| (item.title, item.action))
                 .collect::<Vec<_>>(),
             [(binary.clone(), Action::Copy(binary))]
+        );
+    }
+
+    #[test]
+    fn empty_strings_answer_nothing() {
+        assert_eq!(titles("str_slice(1, 1, \"abc\")"), Vec::<String>::new());
+        assert_eq!(titles("str_slice(1, 2, \"a b\")"), Vec::<String>::new());
+        assert_eq!(
+            titles("\"\\0\""),
+            Vec::<String>::new(),
+            "control characters"
+        );
+        assert_eq!(
+            titles("str_slice(0, 2, \"a b\")"),
+            ["a "],
+            "whitespace is kept"
         );
     }
 
