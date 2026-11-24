@@ -2,9 +2,12 @@ import AppKit
 
 /// Sends the log to `~/Library/Logs/launcher.log` when stderr is `/dev/null`, as it is for an app
 /// opened by Finder, `open` or at login, then notes the launch there. Moving file descriptor 2
-/// catches the Rust core's `eprintln!` as well as `log`. A terminal, pipe or file on stderr is
+/// catches the Rust core's `log!` as well as `log`. A terminal, pipe or file on stderr is
 /// left alone: whoever started the app is reading it there.
 func startLog() {
+    // A Rust binary ignores SIGPIPE at startup, and the core expects it to, but this one is Swift:
+    // without this, logging to a pipe whose reader has gone (`just run | tee`) kills the app.
+    signal(SIGPIPE, SIG_IGN)
     if stderrIsDiscarded() {
         let path = FileManager.default.homeDirectoryForCurrentUser
             .appending(path: "Library/Logs/launcher.log").path

@@ -817,7 +817,7 @@ mod tests {
         let (sender, receiver) = mpsc::channel();
         let changed: ResultsChanged = Arc::new(move || {
             if sender.send(()).is_err() {
-                eprintln!("the test stopped listening");
+                log!("the test stopped listening");
             }
         });
         let mut plugin = Apps::watching(vec![root.path().to_path_buf()], None, changed);

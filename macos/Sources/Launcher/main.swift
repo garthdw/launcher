@@ -671,7 +671,9 @@ func copyToPasteboard(_ text: String) -> Bool {
 }
 
 func log(_ message: String) {
-    FileHandle.standardError.write(Data((message + "\n").utf8))
+    // The non-throwing `write` raises when stderr is a file a full disk refuses, and there's
+    // nowhere left to report that.
+    try? FileHandle.standardError.write(contentsOf: Data((message + "\n").utf8))
 }
 
 // `Launcher config init`, from the app's own binary, so there's no separate tool to build and sign.

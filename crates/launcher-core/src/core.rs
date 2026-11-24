@@ -179,12 +179,21 @@ pub fn cache_directory() -> Option<PathBuf> {
     })
 }
 
-/// Writes a line to the log, which is stderr.
+/// Writes a line to the log, which is stderr. Unlike `eprintln!`, a failed write doesn't panic:
+/// the shell may point stderr at a file, which a full disk refuses.
 #[macro_export]
 macro_rules! log {
     ($($argument:tt)*) => {
-        eprintln!($($argument)*)
+        $crate::write_log(format_args!($($argument)*))
     };
+}
+
+#[doc(hidden)]
+pub fn write_log(line: fmt::Arguments) {
+    use std::io::Write;
+    if let Err(_error) = writeln!(std::io::stderr(), "{line}") {
+        // There's nowhere left to report that the log can't be written.
+    }
 }
 
 /// Called from a plugin's background work when it may have changed the plugin's results, so the
@@ -439,5 +448,35 @@ mod tests {
             "`left` needs ctrl, alt or cmd, so it doesn't take over typing"
         );
         assert!("ctrl + x".parse::<Hotkey>().is_err());
+    }
+
+    /// The shell may point stderr at a log file, where a write fails on a full disk. Runs itself
+    /// again with stderr on a pipe nobody reads, since macOS has no `/dev/full`.
+    #[test]
+    fn logging_survives_a_failed_write() -> Result<(), Box<dyn std::error::Error>> {
+        if std::env::var_os("LAUNCHER_TEST_LOG_CHILD").is_some() {
+            log!("nobody reads this");
+            return Ok(());
+        }
+        let (reader, writer) = std::io::pipe()?;
+        drop(reader);
+        // `--nocapture`, so a regression to `eprintln!` reaches the pipe rather than libtest.
+        let child = std::process::Command::new(std::env::current_exe()?)
+            .args([
+                "--exact",
+                "tests::logging_survives_a_failed_write",
+                "--nocapture",
+            ])
+            .env("LAUNCHER_TEST_LOG_CHILD", "1")
+            .stderr(writer)
+            .output()?;
+        assert!(
+            child.status.success(),
+            "logging failed the test: {}",
+            child.status
+        );
+        // A stale test name would run nothing and pass.
+        assert!(String::from_utf8(child.stdout)?.contains("1 passed"));
+        Ok(())
     }
 }
