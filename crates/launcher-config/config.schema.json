@@ -10,6 +10,11 @@
       "description": "Opens the launcher.",
       "default": "alt+space"
     },
+    "menu_bar": {
+      "type": "boolean",
+      "description": "Shows an item in the menu bar to open the launcher, reload settings, launch at login and quit.",
+      "default": true
+    },
     "plugins": {
       "description": "Which plugins answer queries.",
       "type": "object",

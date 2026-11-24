@@ -175,10 +175,11 @@ pub struct HotkeyBinding {
     pub setting: String,
 }
 
-/// The settings a shell applies itself: its global hotkeys.
+/// The settings a shell applies itself: its global hotkeys and menu bar item.
 #[derive(uniffi::Record)]
 pub struct Settings {
     pub bindings: Vec<HotkeyBinding>,
+    pub menu_bar: bool,
     /// Why the config file can't be used, naming it; the settings are then the ones from before,
     /// or the defaults.
     pub problem: Option<String>,
@@ -247,6 +248,7 @@ impl From<&launcher_plugins::Launcher> for Settings {
                     setting: format!("{} = \"{}\"", setting.name, setting.hotkey),
                 })
                 .collect(),
+            menu_bar: launcher.config().menu_bar,
             problem: launcher.problem().map(String::from),
         }
     }
@@ -286,6 +288,7 @@ impl Launcher {
             Some(launcher) => Settings::from(&*launcher),
             None => Settings {
                 bindings: Vec::new(),
+                menu_bar: launcher_config::Config::default().menu_bar,
                 problem: Some("a plugin crashed; relaunch to get the settings back".into()),
             },
         }
@@ -369,6 +372,7 @@ mod tests {
                 ),
             ]
         );
+        assert!(settings.menu_bar);
         assert_eq!(settings.problem, None);
     }
 

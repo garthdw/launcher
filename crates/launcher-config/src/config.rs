@@ -27,6 +27,9 @@ pub struct Config {
     /// Opens the launcher.
     #[serde(deserialize_with = "hotkey")]
     pub hotkey: Hotkey,
+    /// Shows an item in the menu bar to open the launcher, reload settings, launch at login and
+    /// quit.
+    pub menu_bar: bool,
     pub plugins: EnabledPlugins,
     /// The window actions with a hotkey, in `DEFAULT_BINDINGS`' order.
     #[serde(deserialize_with = "window_bindings")]
@@ -43,6 +46,7 @@ impl Default for Config {
                 command: false,
                 shift: false,
             },
+            menu_bar: true,
             plugins: EnabledPlugins::default(),
             window: DEFAULT_BINDINGS.to_vec(),
         }
@@ -360,6 +364,7 @@ mod tests {
         let config = parse(
             r#"
             hotkey = "cmd+space"
+            menu_bar = false
             [plugins]
             jwt = false
             [window]
@@ -371,6 +376,7 @@ mod tests {
             panic!("{config:?}");
         };
         assert_eq!(config.hotkey, parsed("cmd+space"));
+        assert!(!config.menu_bar);
         assert_eq!(
             config.plugins,
             EnabledPlugins {
@@ -557,6 +563,7 @@ mod tests {
             .collect();
         let expected = serde_json::json!({
             "hotkey": config.hotkey.to_string(),
+            "menu_bar": config.menu_bar,
             "plugins": serde_json::to_value(config.plugins)?,
             "window": window,
         });

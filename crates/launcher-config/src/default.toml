@@ -12,6 +12,10 @@
 # Opens the launcher.
 #hotkey = "alt+space"
 
+# Shows an item in the menu bar to open the launcher, reload settings, launch at login and
+# quit.
+#menu_bar = true
+
 # Which plugins answer queries.
 [plugins]
 # Arithmetic, units and currencies.

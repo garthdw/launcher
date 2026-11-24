@@ -1,5 +1,6 @@
 import AppKit
 import Carbon.HIToolbox
+import ServiceManagement
 
 let started = CFAbsoluteTimeGetCurrent()
 
@@ -219,7 +220,7 @@ final class DetailText: NSTextView {
 }
 
 @MainActor
-final class AppDelegate: NSObject, NSApplicationDelegate, NSTextFieldDelegate, NSWindowDelegate {
+final class AppDelegate: NSObject, NSApplicationDelegate, NSTextFieldDelegate, NSWindowDelegate, NSMenuDelegate {
     lazy var launcher = Launcher(
         listener: MainRelay { [weak self] in self?.resultsChanged() },
         settingsListener: MainRelay { [weak self] in self?.reloadSettings() }
@@ -252,6 +253,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSTextFieldDelegate, N
     /// after it, rather than in an alert on top.
     var pendingProblems: [String]?
     var showingProblems = false
+    /// Built only while the settings show it, so hiding it frees it.
+    var statusItem: NSStatusItem?
 
     func applicationDidFinishLaunching(_: Notification) {
         // Lazy only so the relays can reach `self`; plugins start their background work, and the
@@ -317,7 +320,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSTextFieldDelegate, N
         }, 1, &pressed, delegate, nil)
     }
 
-    func reloadSettings() {
+    @objc func reloadSettings() {
         if let settings = launcher.reloadSettings() { apply(settings) }
     }
 
@@ -328,6 +331,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSTextFieldDelegate, N
             UnregisterEventHotKey(hotkey.ref)
         }
         hotkeys = [:]
+        showStatusItem(settings.menuBar)
         let problems = [settings.problem].compactMap { $0 } + settings.bindings.compactMap(register)
         problems.forEach(log)
         // The alert's modal loop still runs reloads, so a save while it shows lands here.
@@ -343,6 +347,68 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSTextFieldDelegate, N
             showing = pendingProblems ?? []
         }
         showingProblems = false
+    }
+
+    func showStatusItem(_ shown: Bool) {
+        if !shown, let statusItem {
+            NSStatusBar.system.removeStatusItem(statusItem)
+            self.statusItem = nil
+        } else if shown, statusItem == nil {
+            let item = NSStatusBar.system.statusItem(withLength: NSStatusItem.squareLength)
+            item.button?.image = NSImage(systemSymbolName: "command", accessibilityDescription: "Launcher")
+            let menu = NSMenu()
+            for (title, action, key, target) in [
+                ("Open Launcher", #selector(openPanel), "", self),
+                ("Reload Settings", #selector(reloadSettings), "", self),
+                ("Launch at Login", #selector(toggleLaunchAtLogin), "", self),
+                ("Quit Launcher", #selector(NSApplication.terminate(_:)), "q", NSApp),
+            ] as [(String, Selector, String, AnyObject?)] {
+                menu.addItem(withTitle: title, action: action, keyEquivalent: key).target = target
+            }
+            menu.insertItem(.separator(), at: menu.items.count - 1)
+            menu.delegate = self
+            item.menu = menu
+            statusItem = item
+        }
+    }
+
+    @objc func openPanel() {
+        summon(at: CFAbsoluteTimeGetCurrent())
+    }
+
+    /// Ticks Launch at Login from the system's state each time the menu opens, since System
+    /// Settings can change it too.
+    func menuNeedsUpdate(_ menu: NSMenu) {
+        let state: NSControl.StateValue = switch SMAppService.mainApp.status {
+        case .enabled: .on
+        case .requiresApproval: .mixed
+        default: .off
+        }
+        menu.items.first { $0.action == #selector(toggleLaunchAtLogin) }?.state = state
+    }
+
+    @objc func toggleLaunchAtLogin() {
+        let app = SMAppService.mainApp
+        let enabled = app.status == .enabled
+        do {
+            if enabled {
+                try app.unregister()
+            } else if app.status != .requiresApproval {
+                try app.register()
+            }
+        } catch {
+            log("can't change launch at login: \(error)")
+            showAlert("Can't turn \(enabled ? "off" : "on") Launch at Login", error.localizedDescription)
+            return
+        }
+        // Registered, but off in System Settings, as when the user turned it off there.
+        guard app.status == .requiresApproval else { return }
+        let response = showAlert(
+            "Turn on Launcher in Login Items",
+            "Launcher is in System Settings > General > Login Items, but turned off. Turn it on there to open Launcher at login.",
+            buttons: ["Open Login Items", "Cancel"]
+        )
+        if response == .alertFirstButtonReturn { SMAppService.openSystemSettingsLoginItems() }
     }
 
     /// Its action runs when the hotkey is pressed, whichever app is frontmost. Returns why it
