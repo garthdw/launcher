@@ -6,6 +6,7 @@ use std::sync::{Arc, Mutex};
 use launcher_apps::Apps;
 use launcher_calc::Calc;
 use launcher_core::{Found, Plugin, PluginId, Plugins};
+use launcher_jwt::Jwt;
 
 uniffi::setup_scaffolding!();
 
@@ -91,6 +92,7 @@ impl Launcher {
             Ok(calc) => plugins.push(Box::new(calc)),
             Err(error) => eprintln!("calculator unavailable: {error}"),
         }
+        plugins.push(Box::new(Jwt));
         plugins.push(Box::new(Apps::start()));
         Arc::new(Self::with(plugins))
     }
