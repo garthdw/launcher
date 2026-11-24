@@ -129,8 +129,8 @@ impl Plugin for Apps {
             .collect()
     }
 
-    fn opened(&mut self, path: &Path) {
-        let Some(saver) = &self.saver else {
+    fn ran(&mut self, action: &Action) {
+        let (Action::Open(path), Some(saver)) = (action, &self.saver) else {
             return;
         };
         let now = now();
@@ -649,13 +649,14 @@ mod tests {
     }
 
     #[test]
-    fn opened_records_usage() -> io::Result<()> {
+    fn opening_records_usage() -> io::Result<()> {
         let folder = tempfile::tempdir()?;
         let path = folder.path().join("frecency");
         let mut plugin = Apps::watching(Vec::new(), Some(path.clone()));
         let safari = Path::new("/Applications/Safari.app");
-        plugin.opened(safari);
-        plugin.opened(safari);
+        let open = Action::Open(safari.into());
+        plugin.ran(&open);
+        plugin.ran(&open);
         assert!(eventually(|| load_usage(&path)
             .get(safari)
             .is_some_and(|usage| usage.count == 2)));
@@ -766,7 +767,7 @@ mod tests {
             })
             .collect();
         let safari = Path::new("/Applications/Safari.app");
-        plugin.opened(safari);
+        plugin.ran(&Action::Open(safari.into()));
         assert!(plugin.usage.contains_key(safari));
         assert_eq!(plugin.usage.len(), MAX_REMEMBERED);
         Ok(())

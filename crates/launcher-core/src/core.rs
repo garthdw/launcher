@@ -1,4 +1,4 @@
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct Item {
@@ -22,6 +22,6 @@ pub trait Plugin {
     /// Runs on the UI thread for every keystroke, so it must stay well under a frame.
     fn query(&mut self, query: &str) -> Vec<Item>;
 
-    /// The shell opened `path` from some plugin's `Action::Open`.
-    fn opened(&mut self, _path: &Path) {}
+    /// The shell ran `action` from one of this plugin's items.
+    fn ran(&mut self, _action: &Action) {}
 }

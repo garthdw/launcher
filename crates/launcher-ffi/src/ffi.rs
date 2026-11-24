@@ -1,7 +1,7 @@
 //! The boundary the native shells call. Its types mirror `launcher-core`'s so the core stays
 //! free of FFI derives; a Rust shell (Linux) uses the core directly.
 
-use std::path::Path;
+use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
 use launcher_apps::Apps;
@@ -15,6 +15,8 @@ pub struct Item {
     pub title: String,
     pub subtitle: String,
     pub action: Action,
+    /// Which plugin produced the item, so `Launcher::ran` reaches only that one.
+    pub plugin: u32,
 }
 
 #[derive(uniffi::Enum)]
@@ -23,18 +25,22 @@ pub enum Action {
     Open { path: String },
 }
 
-impl From<launcher_core::Item> for Item {
-    fn from(item: launcher_core::Item) -> Self {
-        let action = match item.action {
-            launcher_core::Action::Copy(text) => Action::Copy { text },
-            launcher_core::Action::Open(path) => Action::Open {
+impl From<launcher_core::Action> for Action {
+    fn from(action: launcher_core::Action) -> Self {
+        match action {
+            launcher_core::Action::Copy(text) => Self::Copy { text },
+            launcher_core::Action::Open(path) => Self::Open {
                 path: path.to_string_lossy().into_owned(),
             },
-        };
-        Self {
-            title: item.title,
-            subtitle: item.subtitle,
-            action,
+        }
+    }
+}
+
+impl From<Action> for launcher_core::Action {
+    fn from(action: Action) -> Self {
+        match action {
+            Action::Copy { text } => Self::Copy(text),
+            Action::Open { path } => Self::Open(PathBuf::from(path)),
         }
     }
 }
@@ -69,22 +75,33 @@ impl Launcher {
             eprintln!("a plugin panicked; skipping queries");
             return Vec::new();
         };
-        plugins
-            .iter_mut()
-            .flat_map(|plugin| plugin.query(query))
-            .map(Item::from)
+        (0..)
+            .zip(plugins.iter_mut())
+            .flat_map(|(index, plugin)| {
+                plugin.query(query).into_iter().map(move |item| Item {
+                    title: item.title,
+                    subtitle: item.subtitle,
+                    action: item.action.into(),
+                    plugin: index,
+                })
+            })
             .collect()
     }
 
-    /// The shell opened `path` from an `Action::Open` result.
-    pub fn opened(&self, path: String) {
+    /// The shell ran `item`'s action successfully.
+    pub fn ran(&self, item: Item) {
         let Ok(mut plugins) = self.plugins.lock() else {
-            eprintln!("a plugin panicked; not recording {path}");
+            eprintln!("a plugin panicked; not telling it {} ran", item.title);
             return;
         };
-        for plugin in plugins.iter_mut() {
-            plugin.opened(Path::new(&path));
-        }
+        let Some(plugin) = usize::try_from(item.plugin)
+            .ok()
+            .and_then(|index| plugins.get_mut(index))
+        else {
+            eprintln!("no plugin {} for {}", item.plugin, item.title);
+            return;
+        };
+        plugin.ran(&item.action.into());
     }
 }
 
@@ -110,5 +127,53 @@ mod tests {
         assert!(matches!(&items[0].action, Action::Copy { text } if text == "5"));
         assert!(launcher.query("   ".into()).is_empty());
         Ok(())
+    }
+
+    struct Recorder {
+        title: &'static str,
+        ran: Arc<Mutex<Vec<launcher_core::Action>>>,
+    }
+
+    impl Plugin for Recorder {
+        fn query(&mut self, _query: &str) -> Vec<launcher_core::Item> {
+            vec![launcher_core::Item {
+                title: self.title.into(),
+                subtitle: String::new(),
+                action: launcher_core::Action::Copy(self.title.into()),
+            }]
+        }
+
+        fn ran(&mut self, action: &launcher_core::Action) {
+            if let Ok(mut ran) = self.ran.lock() {
+                ran.push(action.clone());
+            }
+        }
+    }
+
+    #[test]
+    fn ran_reaches_only_the_producing_plugin() {
+        let first = Arc::new(Mutex::new(Vec::new()));
+        let second = Arc::new(Mutex::new(Vec::new()));
+        let launcher = Launcher {
+            plugins: Mutex::new(vec![
+                Box::new(Recorder {
+                    title: "first",
+                    ran: first.clone(),
+                }),
+                Box::new(Recorder {
+                    title: "second",
+                    ran: second.clone(),
+                }),
+            ]),
+        };
+        let mut items = launcher.query("anything".into());
+        assert_eq!(items.len(), 2);
+        launcher.ran(items.remove(1));
+        assert!(first.lock().is_ok_and(|ran| ran.is_empty()));
+        assert!(
+            second
+                .lock()
+                .is_ok_and(|ran| { *ran == [launcher_core::Action::Copy("second".into())] })
+        );
     }
 }

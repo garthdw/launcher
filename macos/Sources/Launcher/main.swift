@@ -159,7 +159,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSTextFieldDelegate, N
         switch item.action {
         case let .copy(text):
             NSPasteboard.general.clearContents()
-            NSPasteboard.general.setString(text, forType: .string)
+            if NSPasteboard.general.setString(text, forType: .string) {
+                launcher.ran(item: item)
+            } else {
+                log("can't copy \(text)")
+            }
         case let .open(path):
             NSWorkspace.shared.open(
                 URL(fileURLWithPath: path), configuration: NSWorkspace.OpenConfiguration()
@@ -167,7 +171,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSTextFieldDelegate, N
                 let failure = error?.localizedDescription
                 Task { @MainActor in
                     guard let failure else {
-                        self.launcher.opened(path: path)
+                        self.launcher.ran(item: item)
                         return
                     }
                     log("can't open \(path): \(failure)")
