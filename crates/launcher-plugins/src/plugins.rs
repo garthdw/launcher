@@ -187,6 +187,7 @@ mod tests {
             vec![Item {
                 title: query.into(),
                 subtitle: String::new(),
+                icon: launcher_core::Icon::Calculator,
                 action: launcher_core::Action::Nothing,
                 detail: Vec::new(),
                 relevance: 50,

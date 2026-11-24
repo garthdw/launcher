@@ -6,7 +6,7 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use jiff::civil::Date;
-use launcher_core::{Action, Item, Plugin, ResultsChanged, Section, log};
+use launcher_core::{Action, Icon, Item, Plugin, ResultsChanged, Section, log};
 use numbat::markup::plain_text_format;
 use numbat::module_importer::{BuiltinModuleImporter, ModuleImporter};
 use numbat::pretty_print::PrettyPrint;
@@ -111,6 +111,7 @@ impl Calc {
         mentions_currency(query).then(|| Item {
             title: title.into(),
             subtitle: String::new(),
+            icon: Icon::Calculator,
             action: Action::Nothing,
             detail: Vec::new(),
             relevance: CALCULATION,
@@ -341,6 +342,7 @@ impl Plugin for Calc {
         vec![Item {
             title: plain_text(&value, &FormatOptions::default()),
             subtitle,
+            icon: Icon::Calculator,
             action: Action::Copy(copied),
             detail,
             relevance,
@@ -500,6 +502,7 @@ mod tests {
             [Item {
                 title: "Loading exchange rates…".into(),
                 subtitle: String::new(),
+                icon: Icon::Calculator,
                 action: Action::Nothing,
                 detail: Vec::new(),
                 relevance: CALCULATION,

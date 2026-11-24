@@ -10,6 +10,7 @@ pub struct Item {
     /// More about the item, such as an app's folder; the group's header already names the
     /// plugin. The shell adds the keys that act on it.
     pub subtitle: String,
+    pub icon: Icon,
     pub action: Action,
     /// Shown on request in a scrolling, monospaced view; empty for items without one.
     pub detail: Vec<Section>,
@@ -18,6 +19,16 @@ pub struct Item {
     /// such as a pasted token. About 90: a calculation, or an app whose name starts with the
     /// query. Lower: looser matches.
     pub relevance: u8,
+}
+
+/// What shows beside an item's title. Kinds rather than images keep the core free of platform
+/// code: each shell draws them its own way, as macOS does with SF Symbols.
+#[derive(Clone, Debug, PartialEq)]
+pub enum Icon {
+    /// The icon the system shows for the file, such as an app's own.
+    File(PathBuf),
+    Calculator,
+    Token,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -325,6 +336,7 @@ mod tests {
                 .map(|(place, &relevance)| Item {
                     title: format!("{} {query} {place}", self.name),
                     subtitle: String::new(),
+                    icon: Icon::Calculator,
                     action: Action::Copy(self.name.into()),
                     detail: Vec::new(),
                     relevance,

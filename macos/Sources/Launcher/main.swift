@@ -321,6 +321,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSTextFieldDelegate, N
         field.focusRingType = .none
         field.font = .systemFont(ofSize: 20)
         field.placeholderString = "Search apps, calculate, convert…"
+        // One line that scrolls sideways: a pasted token would otherwise wrap onto a clipped second line.
+        field.usesSingleLineMode = true
+        field.cell?.isScrollable = true
         field.delegate = self
         field.autoresizingMask = [.width, .minYMargin]
         // A fixed height: `resize` reads it as the list's, so the panel growing mustn't stretch it.
@@ -578,13 +581,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSTextFieldDelegate, N
         row.hovered = { [unowned self] in if picked != index { picked = index } }
         row.wantsLayer = true
         row.layer?.cornerRadius = Metrics.selectionRadius
-        var titleX: CGFloat = 12
-        if case let .open(path) = item.action {
-            let icon = NSImageView(image: NSWorkspace.shared.icon(forFile: path))
-            icon.frame = NSRect(x: 10, y: 8, width: 28, height: 28)
-            row.addSubview(icon)
-            titleX = 46
-        }
+        let icon = NSImageView(image: item.icon.image)
+        icon.frame = NSRect(x: 10, y: 8, width: 28, height: 28)
+        icon.contentTintColor = .secondaryLabelColor
+        row.addSubview(icon)
+        let titleX = icon.frame.maxX + 8
         let title = titleLabel(item.title)
         // The shell names its own keys, so plugins' subtitles say only what an item is.
         var keys = ""
@@ -598,11 +599,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSTextFieldDelegate, N
                 .filter { !$0.isEmpty }
                 .joined(separator: " · ")
         )
-        // Long subtitles such as app folders lose their start, not the keys. A subtitle may
-        // take room a short title leaves, but never squeezes a long title further.
+        // Long subtitles such as app folders lose their start, not the keys. Title and subtitle each
+        // take room the other leaves, but a long subtitle leaves a long title at least up to 396.
         subtitle.lineBreakMode = .byTruncatingHead
+        title.lineBreakMode = .byTruncatingTail
         let end = row.frame.width - 12
-        let subtitleX = min(396, max(titleX + title.fittingSize.width + 4, end - subtitle.fittingSize.width))
+        let wholeSubtitleX = end - subtitle.fittingSize.width
+        let subtitleX = min(max(titleX + title.fittingSize.width + 4, wholeSubtitleX), max(396, wholeSubtitleX))
         subtitle.frame = NSRect(x: subtitleX, y: 13, width: end - subtitleX, height: 18)
         title.frame = NSRect(x: titleX, y: 11, width: subtitleX - 4 - titleX, height: 22)
         row.addSubview(title)
@@ -788,6 +791,23 @@ func showAlert(_ message: String, _ detail: String, buttons: [String] = []) -> N
     let response = alert.runModal()
     previous?.activate()
     return response
+}
+
+extension Icon {
+    /// A file's own icon, or an SF Symbol for the kinds the core names.
+    @MainActor
+    var image: NSImage {
+        switch self {
+        case let .file(path): NSWorkspace.shared.icon(forFile: path)
+        case .calculator: symbol("plus.forwardslash.minus")
+        case .token: symbol("key.horizontal")
+        }
+    }
+
+    private func symbol(_ name: String) -> NSImage {
+        NSImage(systemSymbolName: name, accessibilityDescription: nil)?
+            .withSymbolConfiguration(NSImage.SymbolConfiguration(pointSize: 18, weight: .medium)) ?? NSImage()
+    }
 }
 
 extension Hotkey {

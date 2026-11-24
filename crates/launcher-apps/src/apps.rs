@@ -8,7 +8,7 @@ use std::sync::{Arc, Mutex, Weak};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-use launcher_core::{Action, Item, Plugin, ResultsChanged, config_directory, log};
+use launcher_core::{Action, Icon, Item, Plugin, ResultsChanged, config_directory, log};
 use notify::{RecommendedWatcher, RecursiveMode, Watcher};
 
 const MAX_RESULTS: usize = 8;
@@ -121,6 +121,7 @@ impl Plugin for Apps {
                     .parent()
                     .map(|folder| folder.display().to_string())
                     .unwrap_or_default(),
+                icon: Icon::File(app.path.clone()),
                 action: Action::Open(app.path.clone()),
                 detail: Vec::new(),
                 relevance,
@@ -894,6 +895,9 @@ mod tests {
         let mut plugin = Apps::watching(vec![root.path().to_path_buf()], None, changed);
         receiver.recv_timeout(Duration::from_secs(5))?;
         assert_eq!(titles(&mut plugin, "saf"), ["Safari"]);
+        assert!(plugin.query("saf").iter().all(
+            |item| matches!((&item.icon, &item.action), (Icon::File(icon), Action::Open(app)) if icon == app)
+        ), "an app shows its own icon");
         fs::create_dir(root.path().join("Zed.app"))?;
         receiver.recv_timeout(Duration::from_secs(10))?;
         assert_eq!(titles(&mut plugin, "zed"), ["Zed"]);
