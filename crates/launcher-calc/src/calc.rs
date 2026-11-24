@@ -127,17 +127,16 @@ fn x_as_times(query: &str) -> String {
 mod tests {
     use super::*;
 
+    fn items(query: &str) -> Vec<Item> {
+        Calc::new().expect("prelude loads").query(query)
+    }
+
     fn titles(query: &str) -> Vec<String> {
-        let mut calc = Calc::new().expect("prelude loads");
-        calc.query(query)
-            .into_iter()
-            .map(|item| item.title)
-            .collect()
+        items(query).into_iter().map(|item| item.title).collect()
     }
 
     fn detail(query: &str) -> Vec<(String, String)> {
-        let mut calc = Calc::new().expect("prelude loads");
-        calc.query(query)
+        items(query)
             .into_iter()
             .flat_map(|item| item.detail)
             .map(|section| (section.title, section.text))
@@ -167,14 +166,12 @@ mod tests {
 
     #[test]
     fn copies_large_numbers_without_separators() {
-        let mut calc = Calc::new().expect("prelude loads");
-        let items = calc.query("2 x 1000000 m");
         assert_eq!(
-            items
-                .iter()
-                .map(|item| (item.title.as_str(), &item.action))
+            items("2 x 1000000 m")
+                .into_iter()
+                .map(|item| (item.title, item.action))
                 .collect::<Vec<_>>(),
-            [("2_000_000 m", &Action::Copy("2000000 m".into()))]
+            [("2_000_000 m".into(), Action::Copy("2000000 m".into()))]
         );
     }
 

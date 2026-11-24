@@ -25,6 +25,15 @@ pub struct Section {
     pub text: String,
 }
 
+impl From<launcher_core::Section> for Section {
+    fn from(section: launcher_core::Section) -> Self {
+        Self {
+            title: section.title,
+            text: section.text,
+        }
+    }
+}
+
 #[derive(uniffi::Enum)]
 pub enum Action {
     Copy { text: String },
@@ -51,15 +60,7 @@ impl From<Found> for Item {
             title: found.item.title,
             subtitle: found.item.subtitle,
             action,
-            detail: found
-                .item
-                .detail
-                .into_iter()
-                .map(|section| Section {
-                    title: section.title,
-                    text: section.text,
-                })
-                .collect(),
+            detail: found.item.detail.into_iter().map(Section::from).collect(),
             choice: Arc::new(Choice {
                 plugin: found.plugin,
                 action: found.item.action,
