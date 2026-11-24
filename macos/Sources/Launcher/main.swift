@@ -599,11 +599,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSTextFieldDelegate, N
                 .filter { !$0.isEmpty }
                 .joined(separator: " · ")
         )
-        // Long subtitles such as app folders lose their start, not the keys. A subtitle may
-        // take room a short title leaves, but never squeezes a long title further.
+        // Long subtitles such as app folders lose their start, not the keys. Title and subtitle each
+        // take room the other leaves, but a long subtitle leaves a long title at least up to 396.
         subtitle.lineBreakMode = .byTruncatingHead
+        title.lineBreakMode = .byTruncatingTail
         let end = row.frame.width - 12
-        let subtitleX = min(396, max(titleX + title.fittingSize.width + 4, end - subtitle.fittingSize.width))
+        let wholeSubtitleX = end - subtitle.fittingSize.width
+        let subtitleX = min(max(titleX + title.fittingSize.width + 4, wholeSubtitleX), max(396, wholeSubtitleX))
         subtitle.frame = NSRect(x: subtitleX, y: 13, width: end - subtitleX, height: 18)
         title.frame = NSRect(x: titleX, y: 11, width: subtitleX - 4 - titleX, height: 22)
         row.addSubview(title)
