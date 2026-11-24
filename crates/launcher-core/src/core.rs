@@ -1,4 +1,5 @@
 use std::cmp::Reverse;
+use std::ffi::OsString;
 use std::fmt;
 use std::path::PathBuf;
 use std::str::FromStr;
@@ -183,9 +184,20 @@ impl fmt::Display for Hotkey {
     }
 }
 
-/// Where settings and state live: `~/.config/launcher` on every platform.
+/// Where settings and state live: `LAUNCHER_CONFIG_DIR` when set, as when measuring or testing
+/// the app without the user's own, or else `~/.config/launcher` on every platform.
 pub fn config_directory() -> Option<PathBuf> {
-    std::env::home_dir().map(|home| home.join(".config/launcher"))
+    config_directory_from(
+        std::env::var_os("LAUNCHER_CONFIG_DIR"),
+        std::env::home_dir(),
+    )
+}
+
+fn config_directory_from(moved: Option<OsString>, home: Option<PathBuf>) -> Option<PathBuf> {
+    match moved {
+        Some(directory) if !directory.is_empty() => Some(PathBuf::from(directory)),
+        _ => home.map(|home| home.join(".config/launcher")),
+    }
 }
 
 /// Where downloads that can be fetched again live: the platform's cache folder, which backups
@@ -391,6 +403,30 @@ mod tests {
                 (group.name, titles)
             })
             .collect()
+    }
+
+    #[test]
+    fn the_environment_can_move_the_config_directory() {
+        let home = Some(PathBuf::from("/Users/someone"));
+        let moved = Some(PathBuf::from("/tmp/measure"));
+        assert_eq!(
+            config_directory_from(None, home.clone()),
+            Some(PathBuf::from("/Users/someone/.config/launcher"))
+        );
+        assert_eq!(
+            config_directory_from(Some("/tmp/measure".into()), home.clone()),
+            moved
+        );
+        assert_eq!(
+            config_directory_from(Some("".into()), home),
+            Some(PathBuf::from("/Users/someone/.config/launcher")),
+            "set but empty, as `LAUNCHER_CONFIG_DIR= Launcher` leaves it"
+        );
+        assert_eq!(
+            config_directory_from(Some("/tmp/measure".into()), None),
+            moved
+        );
+        assert_eq!(config_directory_from(None, None), None);
     }
 
     #[test]

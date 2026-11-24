@@ -52,7 +52,8 @@ Settings live in `~/.config/launcher/config.toml`: the launcher's hotkey, whethe
 item shows, each window action's hotkey (or `"none"`), and which plugins are on. ⌘, in the
 launcher opens the file, first writing one with every setting commented out at its default, with
 comments explaining them; uncomment only what you change, so later defaults still reach the rest.
-`config init` writes the same file from a terminal:
+`LAUNCHER_CONFIG_DIR` moves the folder, with the app's other state, elsewhere. `config init`
+writes the same file from a terminal:
 
 ```sh
 target/release/Launcher.app/Contents/MacOS/Launcher config init
