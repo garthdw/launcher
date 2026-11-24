@@ -23,8 +23,9 @@ yours) to keep macOS permissions across rebuilds; without it the app is signed a
 ## Settings
 
 Settings live in `~/.config/launcher/config.toml`: the launcher's hotkey, each window action's
-hotkey (or `"none"`), and which plugins are on. Write one with every setting at its default and
-comments explaining them:
+hotkey (or `"none"`), and which plugins are on. Write one with every setting commented out at its
+default, with comments explaining them; uncomment only what you change, so later defaults still
+reach the rest:
 
 ```sh
 target/release/Launcher.app/Contents/MacOS/Launcher config init

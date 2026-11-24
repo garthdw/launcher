@@ -15,7 +15,8 @@ use notify::{RecommendedWatcher, RecursiveMode, Watcher};
 use serde::Deserialize;
 use serde::de::{self, Deserializer};
 
-/// What `config init` writes: every setting at its default, with comments.
+/// What `config init` writes: every setting commented out at its default, so the file overrides
+/// only what the user uncomments. Settings are commented with a bare `#`, prose with `# `.
 pub const DEFAULT_FILE: &str = include_str!("default.toml");
 /// Editors save in bursts (a temporary file, then a rename over the old one); reload once quiet.
 const SETTLE: Duration = Duration::from_millis(100);
@@ -220,7 +221,7 @@ pub fn run_command(arguments: &[String]) -> Option<i32> {
     };
     if command != ["init"] {
         eprintln!(
-            "usage: config init\n  writes every setting at its default to {}",
+            "usage: config init\n  writes every setting, commented out at its default, to {}",
             path.display()
         );
         return Some(64);
@@ -332,9 +333,26 @@ mod tests {
         assert_eq!(Config::default().hotkey, parsed("alt+space"));
     }
 
+    /// `DEFAULT_FILE` with every setting uncommented, as a user would.
+    fn uncommented_default_file() -> String {
+        DEFAULT_FILE
+            .lines()
+            .map(|line| match line.strip_prefix('#') {
+                Some(setting) if setting.starts_with(|first: char| first.is_ascii_alphabetic()) => {
+                    setting
+                }
+                _ => line,
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
     #[test]
-    fn the_default_file_is_the_defaults() {
+    fn the_default_file_is_the_defaults_commented_or_not() {
         assert_eq!(parse(DEFAULT_FILE), Ok(Config::default()));
+        let uncommented = uncommented_default_file();
+        assert!(uncommented.contains("\nhotkey = \"alt+space\"\n"));
+        assert_eq!(parse(&uncommented), Ok(Config::default()));
     }
 
     #[test]
@@ -539,7 +557,7 @@ mod tests {
         });
         let schema = schema()?;
         assert_eq!(schema_defaults(&schema), expected);
-        let file: toml::Table = toml::from_str(DEFAULT_FILE)?;
+        let file: toml::Table = toml::from_str(&uncommented_default_file())?;
         assert_eq!(serde_json::to_value(file)?, expected);
         // Maps compare regardless of order, but editors list the schema's in its order.
         let window_order: Vec<&String> = schema["properties"]["window"]["properties"]

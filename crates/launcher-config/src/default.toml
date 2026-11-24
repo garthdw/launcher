@@ -1,7 +1,8 @@
 #:schema https://raw.githubusercontent.com/garthdw/launcher/main/crates/launcher-config/config.schema.json
 
-# Launcher settings, every one at its default. The launcher reloads this file when it's saved;
-# a mistake keeps the settings from before and says what's wrong.
+# Launcher settings. Every setting is commented out at its default: remove the "#" in front
+# of one to change it, and later versions' defaults still reach the rest. The launcher reloads
+# this file when it's saved; a mistake keeps the settings from before and says what's wrong.
 #
 # A hotkey is modifiers and a key joined by "+", such as "ctrl+alt+left".
 #   Modifiers: ctrl, alt (or opt), cmd and shift. Each hotkey needs ctrl, alt or cmd.
@@ -9,35 +10,35 @@
 #   place on a US keyboard.
 
 # Opens the launcher.
-hotkey = "alt+space"
+#hotkey = "alt+space"
 
 # Which plugins answer queries.
 [plugins]
 # Arithmetic, units and currencies.
-calculator = true
+#calculator = true
 # Decodes a pasted JSON Web Token.
-jwt = true
+#jwt = true
 # Finds and opens apps.
-apps = true
+#apps = true
 
 # Lay out the frontmost window. "none" turns a hotkey off.
 [window]
-left_half = "ctrl+alt+left"
-right_half = "ctrl+alt+right"
-top_half = "ctrl+alt+up"
-bottom_half = "ctrl+alt+down"
-top_left = "ctrl+alt+u"
-top_right = "ctrl+alt+i"
-bottom_left = "ctrl+alt+j"
-bottom_right = "ctrl+alt+k"
-first_third = "ctrl+alt+d"
-centre_third = "ctrl+alt+f"
-last_third = "ctrl+alt+g"
-maximise = "ctrl+alt+return"
+#left_half = "ctrl+alt+left"
+#right_half = "ctrl+alt+right"
+#top_half = "ctrl+alt+up"
+#bottom_half = "ctrl+alt+down"
+#top_left = "ctrl+alt+u"
+#top_right = "ctrl+alt+i"
+#bottom_left = "ctrl+alt+j"
+#bottom_right = "ctrl+alt+k"
+#first_third = "ctrl+alt+d"
+#centre_third = "ctrl+alt+f"
+#last_third = "ctrl+alt+g"
+#maximise = "ctrl+alt+return"
 # Keeps the window's size.
-centre = "ctrl+alt+c"
+#centre = "ctrl+alt+c"
 # Back to where the window was before its first layout or display move.
-restore = "ctrl+alt+delete"
+#restore = "ctrl+alt+delete"
 # To the display on the right or left, keeping the window's layout.
-next_display = "ctrl+alt+cmd+right"
-previous_display = "ctrl+alt+cmd+left"
+#next_display = "ctrl+alt+cmd+right"
+#previous_display = "ctrl+alt+cmd+left"

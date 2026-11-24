@@ -15,7 +15,7 @@ just                                         # bundle, stop any running copy, ru
 just run '100 N to lbf'                      # the same, opening the panel with this query
 scripts/bundle                               # macOS: Rust core, Swift bindings, signed target/release/Launcher.app
 LAUNCHER_OPEN='100 N to lbf' target/release/Launcher.app/Contents/MacOS/Launcher   # open the panel at launch
-target/release/Launcher.app/Contents/MacOS/Launcher config init   # write ~/.config/launcher/config.toml at its defaults
+target/release/Launcher.app/Contents/MacOS/Launcher config init   # write ~/.config/launcher/config.toml, every setting commented out
 footprint "$(pgrep -x Launcher)"             # memory, as Activity Monitor reports it
 cargo build --profile profiling              # release with full symbols, for samply or xctrace
 ```
