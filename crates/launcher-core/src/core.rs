@@ -1,4 +1,5 @@
 use std::path::PathBuf;
+use std::sync::Arc;
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct Item {
@@ -39,6 +40,10 @@ pub fn cache_directory() -> Option<PathBuf> {
         home.join(".cache/launcher")
     })
 }
+
+/// Called from a plugin's background work when it may have changed the plugin's results, so the
+/// shell asks again for the query it shows. Any thread may call it.
+pub type ResultsChanged = Arc<dyn Fn() + Send + Sync>;
 
 pub trait Plugin {
     /// Runs on the UI thread for every keystroke, so it must stay well under a frame.

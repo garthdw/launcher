@@ -2,11 +2,12 @@
 
 use launcher_apps::Apps;
 use launcher_calc::Calc;
-use launcher_core::{Plugin, Plugins, cache_directory};
+use launcher_core::{Plugin, Plugins, ResultsChanged, cache_directory};
 use launcher_jwt::Jwt;
 
-/// Builds the plugins in the order their results show, and starts their background work.
-pub fn start() -> Plugins {
+/// Builds the plugins in the order their results show, and starts their background work, which
+/// calls `changed` when it may have changed the results.
+pub fn start(changed: ResultsChanged) -> Plugins {
     let mut plugins: Vec<Box<dyn Plugin + Send>> = Vec::new();
     match Calc::new() {
         Ok(calc) => {
@@ -19,6 +20,6 @@ pub fn start() -> Plugins {
         Err(error) => eprintln!("calculator unavailable: {error}"),
     }
     plugins.push(Box::new(Jwt));
-    plugins.push(Box::new(Apps::start()));
+    plugins.push(Box::new(Apps::start(changed)));
     Plugins::new(plugins)
 }

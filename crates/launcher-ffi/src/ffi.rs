@@ -82,11 +82,21 @@ impl Launcher {
     }
 }
 
+/// The shell's side of `launcher_core::ResultsChanged`.
+#[uniffi::export(callback_interface)]
+pub trait ResultsListener: Send + Sync {
+    /// Called from any thread when the results for the shown query may have changed.
+    fn results_changed(&self);
+}
+
 #[uniffi::export]
 impl Launcher {
     #[uniffi::constructor]
-    pub fn new() -> Arc<Self> {
-        Arc::new(Self::with(launcher_plugins::start()))
+    pub fn new(listener: Box<dyn ResultsListener>) -> Arc<Self> {
+        let listener: Arc<dyn ResultsListener> = Arc::from(listener);
+        Arc::new(Self::with(launcher_plugins::start(Arc::new(move || {
+            listener.results_changed()
+        }))))
     }
 
     /// Called on every keystroke from the UI thread, so plugins must answer well inside a frame.

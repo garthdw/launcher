@@ -220,7 +220,9 @@ final class DetailText: NSTextView {
 
 @MainActor
 final class AppDelegate: NSObject, NSApplicationDelegate, NSTextFieldDelegate, NSWindowDelegate {
-    let launcher = Launcher()
+    lazy var launcher = Launcher(listener: ResultsRelay { [weak self] in
+        DispatchQueue.main.async { MainActor.assumeIsolated { self?.resultsChanged() } }
+    })
     // Non-activating, so the app the user was in stays frontmost: window snapping acts on it.
     let panel = Panel(
         contentRect: NSRect(x: 0, y: 0, width: Metrics.width, height: Metrics.headerHeight),
@@ -238,9 +240,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSTextFieldDelegate, N
         didSet { highlightPicked() }
     }
     var summoned: CFAbsoluteTime?
+    /// A plugin's results changed while the panel was hidden or showed a detail.
+    var resultsStale = false
     var hotkey: EventHotKeyRef?
 
     func applicationDidFinishLaunching(_: Notification) {
+        // Lazy only so the relay can reach `self`; plugins start their background work now, not
+        // on the first keystroke.
+        _ = launcher
         buildPanel()
         registerHotkey()
         // Opens the panel at launch with this query, for measuring without the hotkey.
@@ -300,6 +307,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSTextFieldDelegate, N
         summoned = time
         // ⌥Space while the panel is still key comes here without hiding it first.
         closeDetail()
+        refreshIfStale()
         if let screen = NSScreen.main {
             let frame = screen.visibleFrame
             panel.setFrameTopLeftPoint(NSPoint(x: frame.midX - panel.frame.width / 2, y: frame.maxY - 180))
@@ -323,7 +331,26 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSTextFieldDelegate, N
         hide()
     }
 
+    /// A plugin's background work finished, so the shown query may have other results now.
+    func resultsChanged() {
+        guard panel.isVisible, detail == nil else {
+            resultsStale = true
+            return
+        }
+        // Rows may come and go, so the selection follows the item rather than its position.
+        let kept = items.indices.contains(picked) ? (items[picked].title, items[picked].subtitle) : nil
+        refresh()
+        if let kept, let index = items.firstIndex(where: { ($0.title, $0.subtitle) == kept }) {
+            picked = index
+        }
+    }
+
+    func refreshIfStale() {
+        if resultsStale { refresh() }
+    }
+
     func refresh() {
+        resultsStale = false
         items = launcher.query(query: field.stringValue)
         let rowHeight: CGFloat = 44
         let listHeight = items.isEmpty ? 0 : CGFloat(items.count) * (rowHeight + 2) + Metrics.inset * 2
@@ -397,6 +424,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSTextFieldDelegate, N
         let pane = DetailPane(item: items[index])
         pane.text.back = { [unowned self] in
             closeDetail()
+            refreshIfStale()
             panel.makeFirstResponder(field)
             field.currentEditor()?.moveToEndOfDocument(nil)
         }
@@ -482,6 +510,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSTextFieldDelegate, N
             return false
         }
         return true
+    }
+}
+
+/// Hands `results_changed` calls, which come on plugins' threads, to the app delegate.
+final class ResultsRelay: ResultsListener, Sendable {
+    let changed: @Sendable () -> Void
+
+    init(_ changed: @escaping @Sendable () -> Void) {
+        self.changed = changed
+    }
+
+    func resultsChanged() {
+        changed()
     }
 }
 
