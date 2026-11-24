@@ -20,7 +20,7 @@ use crate::typed_ast::{
 use crate::unit::{CanonicalName, Unit};
 use crate::unit_registry::{UnitMetadata, UnitRegistry};
 use crate::value::{FunctionReference, Value};
-use crate::vm::{Constant, ExecutionContext, FfiCallArg, FfiCallArgs, Op, Vm};
+use crate::vm::{Constant, ExecutionContext, FfiCallArg, FfiCallArgs, Op, Vm, VmLengths};
 use crate::{Type, decorator};
 
 #[derive(Debug, Clone, Default)]
@@ -52,6 +52,14 @@ impl BytecodeInterpreter {
     /// Return a runtime error on the current instruction.
     pub fn runtime_error(&self, kind: RuntimeErrorKind) -> RuntimeError {
         self.vm.runtime_error(kind)
+    }
+
+    pub(crate) fn lengths(&self) -> VmLengths {
+        self.vm.lengths()
+    }
+
+    pub(crate) fn truncate(&mut self, lengths: VmLengths) {
+        self.vm.truncate(lengths);
     }
 
     fn compile_expression(&mut self, expr: &Expression) {

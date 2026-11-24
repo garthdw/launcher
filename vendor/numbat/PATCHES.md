@@ -24,3 +24,15 @@ So the app links one jiff, shared with its own crates, numbat depends on `jiff` 
 0.2. jiff 1.0 renamed `Zoned` to `ZonedDateTime` and `to_zoned` to `to_zoned_datetime`; nothing
 else needed changing. `js` still exists in 1.0 and only matters on wasm, so it stays. numbat's
 tests give the same results as before this patch.
+
+## 3. `Context::interpret_and_forget` (`numbat/src/{lib,vm,bytecode_interpreter,resolver,diagnostic}.rs`)
+
+Upstream keeps everything a `Context` compiles: each `interpret` appends its bytecode and spans to
+the VM's main chunk, its numbers to the constant table, and its source to the resolver's files.
+`add_constant` asserts there are at most 65,535 constants, so a context answering every keystroke
+panics after about 32,000 queries, slowing down and growing on the way, since the constants are
+cloned on every call. `interpret_and_forget` records the lengths of those tables, interprets, and
+truncates them again, whether the code succeeded or not. It refuses any statement other than an
+expression or procedure call with the new `ResolverError::Definition`, as a definition or import
+would outlive the call while referring to what it dropped. The resolver's files are a `SourceFiles`
+instead of codespan's `SimpleFiles`, which can't be truncated; it implements the same `Files` trait.

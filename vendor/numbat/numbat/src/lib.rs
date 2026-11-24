@@ -71,6 +71,7 @@ use pretty_print::PrettyPrint;
 use resolver::CodeSource;
 use resolver::Resolver;
 use resolver::ResolverError;
+use resolver::ResolverLengths;
 use thiserror::Error;
 use typechecker::TypeChecker;
 
@@ -88,6 +89,7 @@ pub use typed_ast::Statement;
 pub use typed_ast::Type;
 use unit::BaseUnitAndFactor;
 use unit_registry::UnitMetadata;
+use vm::VmLengths;
 
 use crate::prefix_parser::PrefixParserResult;
 use crate::unicode_input::UNICODE_INPUT;
@@ -116,6 +118,12 @@ pub struct Context {
     resolver: Resolver,
     load_currency_module_on_demand: bool,
     terminal_width: Option<usize>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct Lengths {
+    interpreter: VmLengths,
+    resolver: ResolverLengths,
 }
 
 pub struct FunctionInfo {
@@ -701,6 +709,53 @@ impl Context {
         self.interpret_with_settings(&mut InterpreterSettings::default(), code, code_source)
     }
 
+    /// Interprets `code` that defines nothing, such as an expression, then drops what it compiled
+    /// and the source kept for diagnostics, so a context answering many queries stays the same
+    /// size. Definitions and imports are refused: they would outlive the call, referring to
+    /// what it dropped. Its errors can't be shown with `print_diagnostic`.
+    pub fn interpret_and_forget<'a>(
+        &mut self,
+        code: &'a str,
+        code_source: CodeSource,
+    ) -> Result<(Vec<typed_ast::Statement<'a>>, InterpreterResult)> {
+        let kept = self.lengths();
+        let result = match self.resolver.resolve(code, code_source.clone()) {
+            Ok(statements)
+                if statements.iter().all(|statement| {
+                    matches!(
+                        statement,
+                        ast::Statement::Expression(_) | ast::Statement::ProcedureCall(..)
+                    )
+                }) =>
+            {
+                self.interpret_resolved(
+                    &mut InterpreterSettings::default(),
+                    statements,
+                    code,
+                    code_source,
+                )
+            }
+            Ok(_) => Err(Box::new(NumbatError::ResolverError(
+                ResolverError::Definition,
+            ))),
+            Err(error) => Err(Box::new(NumbatError::ResolverError(error))),
+        };
+        self.truncate(kept);
+        result
+    }
+
+    fn lengths(&self) -> Lengths {
+        Lengths {
+            interpreter: self.interpreter.lengths(),
+            resolver: self.resolver.lengths(),
+        }
+    }
+
+    fn truncate(&mut self, lengths: Lengths) {
+        self.interpreter.truncate(lengths.interpreter);
+        self.resolver.truncate(lengths.resolver);
+    }
+
     pub fn interpret_with_settings<'a>(
         &mut self,
         settings: &mut InterpreterSettings,
@@ -711,7 +766,18 @@ impl Context {
             .resolver
             .resolve(code, code_source.clone())
             .map_err(NumbatError::ResolverError)?;
+        self.interpret_resolved(settings, statements, code, code_source)
+    }
 
+    /// `code` and `code_source` are those `statements` were resolved from, interpreted again
+    /// after loading currencies on demand.
+    fn interpret_resolved<'a>(
+        &mut self,
+        settings: &mut InterpreterSettings,
+        statements: Vec<ast::Statement<'a>>,
+        code: &'a str,
+        code_source: CodeSource,
+    ) -> Result<(Vec<typed_ast::Statement<'a>>, InterpreterResult)> {
         let prefix_transformer_old = self.prefix_transformer.clone();
 
         let result = self
@@ -859,5 +925,83 @@ impl Context {
 
     pub fn set_terminal_width(&mut self, width: Option<usize>) {
         self.terminal_width = width;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::module_importer::BuiltinModuleImporter;
+
+    fn prelude() -> Context {
+        let mut context = Context::new(BuiltinModuleImporter::default());
+        context
+            .interpret("use prelude", CodeSource::Internal)
+            .map(drop)
+            .expect("the prelude loads");
+        context
+    }
+
+    #[test]
+    fn interpret_and_forget_answers_every_time() {
+        let mut context = prelude();
+        for _ in 0..3 {
+            let (_, result) = context
+                .interpret_and_forget("2 * 21 m", CodeSource::Text)
+                .expect("an expression");
+            let InterpreterResult::Value(value) = result else {
+                panic!("no value");
+            };
+            assert_eq!(value.to_string(), "42 m");
+        }
+    }
+
+    #[test]
+    fn interpret_and_forget_keeps_nothing() {
+        let mut context = prelude();
+        let kept = context.lengths();
+        for code in [
+            "1 + 2",
+            "3 ft -> cm",
+            "sqrt(2) m",
+            "\"a {1 + 1} b\"",
+            "now() -> tz(\"UTC\")",
+            "1 / 0",
+            "2 +",
+            "3 m + 2 s",
+            "unknown_word",
+        ] {
+            // Errors forget their state too.
+            context.interpret_and_forget(code, CodeSource::Text).ok();
+            assert_eq!(context.lengths(), kept, "{code}");
+        }
+    }
+
+    #[test]
+    fn interpret_and_forget_refuses_definitions() {
+        let mut context = prelude();
+        let kept = context.lengths();
+        for code in [
+            "let x = 3",
+            "fn double(y) = 2 y",
+            "unit widget = 3 m",
+            "dimension Foo",
+            "struct Point2 { x: Scalar }",
+            "use units::currencies",
+            "1 + 1\nlet x = 2",
+        ] {
+            let error = context
+                .interpret_and_forget(code, CodeSource::Text)
+                .expect_err(code);
+            assert!(
+                matches!(
+                    *error,
+                    NumbatError::ResolverError(ResolverError::Definition)
+                ),
+                "{code}: {error}"
+            );
+            assert_eq!(context.lengths(), kept, "{code}");
+        }
+        assert!(context.interpret_and_forget("x", CodeSource::Text).is_err());
     }
 }

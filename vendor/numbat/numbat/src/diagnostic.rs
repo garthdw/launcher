@@ -44,6 +44,7 @@ impl ErrorDiagnostic for ResolverError {
             ResolverError::ParseErrors(errors) => {
                 errors.iter().flat_map(|e| e.diagnostics()).collect()
             }
+            ResolverError::Definition => vec![Diagnostic::error().with_message(self.to_string())],
         }
     }
 }
