@@ -367,8 +367,29 @@ fn scan(roots: &[PathBuf]) -> Vec<App> {
         // One level of plain folders, for vendor folders such as `/Applications/Adobe …/`.
         collect_apps(root, 1, &mut apps);
     }
+    distinguish(apps)
+}
+
+/// `apps` in name order, without the copies overlapping roots find twice. Finder can give
+/// different bundles one name (`Siri.app` and `Siri AI.app` are both "Siri"); those take their
+/// file names, so their rows differ. One app in several folders keeps Finder's name, as its
+/// folders tell its rows apart.
+fn distinguish(mut apps: Vec<App>) -> Vec<App> {
     apps.sort();
     apps.dedup();
+    for alike in apps.chunk_by_mut(|left, right| left.name == right.name) {
+        let mut file_names = alike.iter().map(|app| app.path.file_stem());
+        let first = file_names.next();
+        if file_names.all(|file_name| Some(file_name) == first) {
+            continue;
+        }
+        for app in alike {
+            if let Some(file_name) = app.path.file_stem() {
+                app.name = file_name.to_string_lossy().into_owned();
+            }
+        }
+    }
+    apps.sort();
     apps
 }
 
@@ -871,6 +892,33 @@ mod tests {
             ["Hidden", "Safari", "Tool"]
         );
         Ok(())
+    }
+
+    #[test]
+    fn apps_finder_names_alike_take_their_file_names() {
+        let app = |name: &str, path: &str| App {
+            name: name.into(),
+            path: path.into(),
+        };
+        let index = distinguish(vec![
+            app("Siri", "/System/Applications/Siri.app"),
+            app("Safari", "/Applications/Safari.app"),
+            app("Siri", "/System/Applications/Siri AI.app"),
+            app("Safari", "/Applications/Safari.app"),
+            app("Zed Éditeur", "/Applications/Zed.app"),
+            app("Zed Éditeur", "/Users/me/Applications/Zed.app"),
+        ]);
+        assert_eq!(
+            index,
+            [
+                app("Safari", "/Applications/Safari.app"),
+                app("Siri", "/System/Applications/Siri.app"),
+                app("Siri AI", "/System/Applications/Siri AI.app"),
+                app("Zed Éditeur", "/Applications/Zed.app"),
+                app("Zed Éditeur", "/Users/me/Applications/Zed.app"),
+            ],
+            "an app found twice is one app, and copies in two folders keep Finder's name"
+        );
     }
 
     #[test]
