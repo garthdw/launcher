@@ -7,6 +7,7 @@ use std::path::Path;
 use std::time::Duration;
 
 use jiff::civil::Date;
+use launcher_core::log;
 
 const ECB_URL: &str = "https://www.ecb.europa.eu/stats/eurofxref/eurofxref-daily.xml";
 pub(crate) const RATES_FILE: &str = "eurofxref-daily.xml";
@@ -22,12 +23,12 @@ pub(crate) fn current(directory: &Path) -> Option<(String, Date)> {
         stale => match fetch() {
             Ok(xml) => {
                 if let Err(error) = store(directory, &path, &xml) {
-                    eprintln!("could not cache exchange rates: {error}");
+                    log!("could not cache exchange rates: {error}");
                 }
                 xml
             }
             Err(error) => {
-                eprintln!("could not fetch exchange rates: {error}");
+                log!("could not fetch exchange rates: {error}");
                 stale?.0
             }
         },
@@ -51,12 +52,12 @@ fn read_cache(path: &Path) -> Option<(String, bool)> {
         Ok(xml) => xml,
         Err(error) if error.kind() == ErrorKind::NotFound => return None,
         Err(error) => {
-            eprintln!("could not read {}: {error}", path.display());
+            log!("could not read {}: {error}", path.display());
             return None;
         }
     };
     if rates_date(&xml).is_none() {
-        eprintln!("no exchange rates in {}", path.display());
+        log!("no exchange rates in {}", path.display());
         return None;
     }
     let fresh = fs::metadata(path)

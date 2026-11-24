@@ -3,7 +3,7 @@
 
 use std::sync::{Arc, Mutex, MutexGuard};
 
-use launcher_core::{Found, PluginId};
+use launcher_core::{Found, PluginId, log};
 use launcher_window::{Display, Placement, Rect, WindowAction};
 
 uniffi::setup_scaffolding!();
@@ -228,7 +228,7 @@ impl Launcher {
     fn lock(&self) -> Option<MutexGuard<'_, launcher_plugins::Launcher>> {
         let locked = self.0.lock().ok();
         if locked.is_none() {
-            eprintln!("a plugin panicked; the launcher is unavailable");
+            log!("a plugin panicked; the launcher is unavailable");
         }
         locked
     }

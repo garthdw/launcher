@@ -6,7 +6,7 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use jiff::civil::Date;
-use launcher_core::{Action, Item, Plugin, ResultsChanged, Section};
+use launcher_core::{Action, Item, Plugin, ResultsChanged, Section, log};
 use numbat::markup::plain_text_format;
 use numbat::module_importer::{BuiltinModuleImporter, ModuleImporter};
 use numbat::pretty_print::PrettyPrint;
@@ -81,7 +81,7 @@ impl Calc {
         let update = match self.pending.lock() {
             Ok(mut pending) => pending.take(),
             Err(_) => {
-                eprintln!("the exchange rates thread panicked; keeping the rates there are");
+                log!("the exchange rates thread panicked; keeping the rates there are");
                 None
             }
         };
@@ -131,7 +131,7 @@ fn context(currencies: bool) -> Result<Context, Box<NumbatError>> {
 fn publish(pending: &Mutex<Option<Update>>, update: Update) {
     match pending.lock() {
         Ok(mut pending) => *pending = Some(update),
-        Err(_) => eprintln!("the calculator panicked; not updating exchange rates"),
+        Err(_) => log!("the calculator panicked; not updating exchange rates"),
     }
 }
 
@@ -160,7 +160,7 @@ fn keep_rates_current(
                 Context::set_exchange_rates(&xml);
                 match context(true) {
                     Ok(context) => {
-                        eprintln!(
+                        log!(
                             "exchange rates of {date} loaded in {} ms",
                             started.elapsed().as_millis()
                         );
@@ -168,7 +168,7 @@ fn keep_rates_current(
                         Some(Update::Loaded(Box::new(context), date))
                     }
                     Err(error) => {
-                        eprintln!("could not load exchange rates: {error}");
+                        log!("could not load exchange rates: {error}");
                         None
                     }
                 }
@@ -202,7 +202,7 @@ static CURRENCY_NAMES: LazyLock<Vec<String>> = LazyLock::new(currency_names);
 fn currency_names() -> Vec<String> {
     let path = ModulePath(vec!["units".into(), "currencies".into()]);
     let Some((module, _)) = BuiltinModuleImporter::default().import(&path) else {
-        eprintln!("numbat has no currency module");
+        log!("numbat has no currency module");
         return Vec::new();
     };
     module

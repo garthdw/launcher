@@ -9,7 +9,7 @@ use std::sync::mpsc;
 use std::thread;
 use std::time::Duration;
 
-use launcher_core::{Hotkey, Key, config_directory};
+use launcher_core::{Hotkey, Key, config_directory, log};
 use launcher_window::{Binding, DEFAULT_BINDINGS, WindowAction};
 use notify::{RecommendedWatcher, RecursiveMode, Watcher};
 use serde::Deserialize;
@@ -290,11 +290,11 @@ pub fn watch(
                         .any(|name| names.iter().any(|watched| watched == name)) =>
             {
                 if sender.send(()).is_err() {
-                    eprintln!("the config reload thread stopped; ignoring changes");
+                    log!("the config reload thread stopped; ignoring changes");
                 }
             }
             Ok(_) => {}
-            Err(error) => eprintln!("config watcher: {error}"),
+            Err(error) => log!("config watcher: {error}"),
         })?;
     watcher.watch(directory, RecursiveMode::NonRecursive)?;
     if let Some(target_directory) = target_directory {

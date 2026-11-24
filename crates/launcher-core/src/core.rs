@@ -179,6 +179,14 @@ pub fn cache_directory() -> Option<PathBuf> {
     })
 }
 
+/// Writes a line to the log, which is stderr.
+#[macro_export]
+macro_rules! log {
+    ($($argument:tt)*) => {
+        eprintln!($($argument)*)
+    };
+}
+
 /// Called from a plugin's background work when it may have changed the plugin's results, so the
 /// shell asks again for the query it shows. Any thread may call it.
 pub type ResultsChanged = Arc<dyn Fn() + Send + Sync>;
@@ -218,7 +226,7 @@ impl Plugins {
     pub fn set(&mut self, place: usize, plugin: Option<Box<dyn Plugin + Send>>) {
         match self.0.get_mut(place) {
             Some(slot) => *slot = plugin,
-            None => eprintln!("no place {place} for a plugin"),
+            None => log!("no place {place} for a plugin"),
         }
     }
 
@@ -245,7 +253,7 @@ impl Plugins {
     pub fn ran(&mut self, plugin: PluginId, action: &Action) {
         match self.0.get_mut(plugin.0).and_then(Option::as_mut) {
             Some(plugin) => plugin.ran(action),
-            None => eprintln!("no plugin {} to tell it ran {action:?}", plugin.0),
+            None => log!("no plugin {} to tell it ran {action:?}", plugin.0),
         }
     }
 }
