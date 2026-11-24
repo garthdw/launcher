@@ -123,10 +123,21 @@ final class FlippedView: NSView {
     override var isFlipped: Bool { true }
 }
 
+/// Its scroller always overlays the content: a legacy one, as with "Show scroll bars: Always" or a
+/// mouse plugged in, would cover the right end of rows laid out at the panel's width.
+final class OverlayScrollView: NSScrollView {
+    override var scrollerStyle: NSScroller.Style {
+        get { .overlay }
+        set {}
+    }
+}
+
 /// Scrolls `document` on the glass, its scroller showing only while it scrolls.
 @MainActor
 func scrollView(holding document: FlippedView) -> NSScrollView {
-    let scroll = NSScrollView()
+    // Sized as the document, so a document that tracks the width doesn't grow by the whole
+    // panel width when the caller sizes the scroll view.
+    let scroll = OverlayScrollView(frame: document.frame)
     scroll.drawsBackground = false
     scroll.hasVerticalScroller = true
     scroll.autohidesScrollers = true
@@ -534,7 +545,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSTextFieldDelegate, N
         let titleX = Metrics.inset + 12
         var y = Metrics.inset
         for group in groups {
-            let header = groupLabel(group.name)
+            let header = NSTextField(labelWithString: group.name)
+            header.font = .systemFont(ofSize: 12, weight: .semibold)
+            header.textColor = .secondaryLabelColor
             header.frame = NSRect(x: titleX, y: y + 9, width: Metrics.width - titleX * 2, height: 16)
             list.addSubview(header)
             // A group's first row reaches up over its header.
@@ -727,15 +740,6 @@ func step(_ index: Int, by offset: Int, count: Int) -> Int {
 func titleLabel(_ string: String) -> NSTextField {
     let label = NSTextField(labelWithString: string)
     label.font = .systemFont(ofSize: 17, weight: .semibold)
-    return label
-}
-
-/// Heads a plugin's results.
-@MainActor
-func groupLabel(_ string: String) -> NSTextField {
-    let label = NSTextField(labelWithString: string)
-    label.font = .systemFont(ofSize: 12, weight: .semibold)
-    label.textColor = .secondaryLabelColor
     return label
 }
 

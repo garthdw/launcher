@@ -399,10 +399,13 @@ mod tests {
     fn ran_reaches_only_the_producing_plugin() {
         let (mut plugins, first, second) = recorders();
         let groups = plugins.query("anything");
-        let Some(chosen) = groups.get(1) else {
-            panic!("expected two groups, got {}", groups.len());
+        let Some((group, item)) = groups
+            .get(1)
+            .and_then(|group| Some((group, group.items.first()?)))
+        else {
+            panic!("expected a second group with an item, got {}", groups.len());
         };
-        plugins.ran(chosen.plugin, &chosen.items[0].action);
+        plugins.ran(group.plugin, &item.action);
         assert!(first.lock().is_ok_and(|ran| ran.is_empty()));
         assert!(
             second
@@ -421,7 +424,9 @@ mod tests {
             [("second", vec!["second again 0".to_owned()])]
         );
         for group in &groups {
-            plugins.ran(group.plugin, &group.items[0].action);
+            for item in &group.items {
+                plugins.ran(group.plugin, &item.action);
+            }
         }
         assert!(
             second
