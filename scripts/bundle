@@ -47,4 +47,8 @@ cat >"$app/Contents/Info.plist" <<EOF
 EOF
 plutil -lint "$app/Contents/Info.plist" >/dev/null
 codesign --force --sign "${MAC_APP_SIGN:--}" "$app"
+if [[ -z ${MAC_APP_SIGN:-} ]]; then
+  echo "warning: MAC_APP_SIGN is unset, so $app is signed ad hoc and macOS will ask again for" \
+    "the Accessibility permission after every build and install; see Signing in README.md" >&2
+fi
 echo "$app"

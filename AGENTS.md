@@ -14,6 +14,7 @@ cargo test -p launcher-calc units            # single test, by name substring
 just                                         # bundle, stop any running copy, run in the foreground
 just run '100 N to lbf'                      # the same, opening the panel with this query
 scripts/bundle                               # macOS: Rust core, Swift bindings, signed target/release/Launcher.app
+scripts/install                              # bundle, install as ~/Applications/Launcher.app, quit any running copy and open it
 LAUNCHER_OPEN='100 N to lbf' target/release/Launcher.app/Contents/MacOS/Launcher   # open the panel at launch
 target/release/Launcher.app/Contents/MacOS/Launcher config init   # write ~/.config/launcher/config.toml, every setting commented out
 footprint "$(pgrep -x Launcher)"             # memory, as Activity Monitor reports it

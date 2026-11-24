@@ -6,6 +6,10 @@ run query="":
     -pkill -x Launcher
     {{ if query == "" { "" } else { "LAUNCHER_OPEN=" + quote(query) } }} target/release/Launcher.app/Contents/MacOS/Launcher
 
+# Bundle the app and install it in ~/Applications
+install:
+    scripts/install
+
 # Keys by name with cmd+, opt+, ctrl+, shift+, or `--text '2 x 3'`; see scripts/press.swift.
 # Press keys in the open panel: `just press right down cmd+c`
 [positional-arguments]
