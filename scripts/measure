@@ -1,9 +1,9 @@
 #!/bin/sh
 # Bundles the app, then measures it against the budget below over several launches: summon to
 # focus, and the footprint with the panel open and after Esc hides it, as medians of the runs
-# after a warm-up. Fails when one is over budget. The footprints leave out LaunchServices' pages of
-# its database, shown apart: they change by several MB in every app with the system's state. Raise a budget only deliberately, in the commit
-# that needs it, saying why.
+# after a warm-up. Fails when one is over budget. The footprints leave out LaunchServices' pages of its
+# database, shown apart: they change by several MB in every app with the system's state. Raise a
+# budget only deliberately, in the commit that needs it, saying why.
 #
 # Usage: scripts/measure [runs] [query]
 #
@@ -63,25 +63,25 @@ footprints_kb() {
         END { printf "%d %d %d\n", now - services, peak - services, services }'
 }
 
-# On-screen windows the process owns, so the panel's state is known without the Accessibility
-# permission.
-windows() {
+# The height of the on-screen windows the process owns, 0 when the panel is hidden, so the panel's
+# state is known without the Accessibility permission. Keys are pressed only once it's as expected:
+# they go to the frontmost app, which once the panel hides is the terminal running this.
+shown_height() {
     osascript -l JavaScript -e "ObjC.import('CoreGraphics');
         ObjC.deepUnwrap(ObjC.castRefToObject(\$.CGWindowListCopyWindowInfo(1, 0)))
-            .filter(window => window.kCGWindowOwnerPID === $1).length"
+            .filter(window => window.kCGWindowOwnerPID === $1)
+            .reduce((height, window) => height + Math.round(window.kCGWindowBounds.Height), 0)"
 }
 
 median() {
     sort -n | awk '{ values[NR] = $1 } END { print values[int((NR + 1) / 2)] }'
 }
 
-pkill -x Launcher || true
-while pgrep -x Launcher >/dev/null; do wait_seconds 0.1; done
-
-printf '%-7s %10s %10s %10s %10s %12s\n' run summon_ms open_kb hidden_kb peak_kb services_kb
-for run in $(seq 0 "$runs"); do
-    log=$work/run-$run.log
-    LAUNCHER_OPEN=$query "$app" 2>"$log" &
+# Launches the app with the panel open on a query and waits for it to take focus, setting `pid`
+# and `log`.
+launch() {
+    log=$work/run-$run-$2.log
+    LAUNCHER_OPEN=$1 "$app" 2>"$log" &
     pid=$!
     waited=0
     until rg -q 'summon to focus' "$log"; do
@@ -93,32 +93,50 @@ for run in $(seq 0 "$runs"); do
         fi
         wait_seconds 0.1
     done
-    summon=$(rg -o 'summon to focus: ([0-9.]+)' -r '$1' "$log")
     wait_seconds 2
-    if [ "$(windows "$pid")" -eq 0 ]; then
-        echo "run $run: the panel isn't on screen" >&2
+    expect_height "the panel isn't on screen" -ne
+}
+
+# Fails the run with a message unless the panel's height compares to `$3` (0 by default) as asked.
+expect_height() {
+    if ! [ "$(shown_height "$pid")" "$2" "${3:-0}" ]; then
+        echo "run $run: $1" >&2
         exit 1
     fi
+}
+
+quit() {
+    kill "$pid"
+    wait "$pid" 2>/dev/null || true
+}
+
+pkill -x Launcher || true
+while pgrep -x Launcher >/dev/null; do wait_seconds 0.1; done
+
+row='%-7s %10s %10s %10s %10s %12s\n'
+printf "$row" run summon_ms open_kb hidden_kb peak_kb services_kb
+for run in $(seq 0 "$runs"); do
+    launch "$query" query
+    summon=$(rg -o 'summon to focus: ([0-9.]+)' -r '$1' "$log")
     read -r open_kb _ _ <<EOF
 $(footprints_kb "$pid")
 EOF
     "$root/scripts/press" esc
     wait_seconds 2
-    if [ "$(windows "$pid")" -ne 0 ]; then
-        echo "run $run: Esc didn't hide the panel" >&2
-        exit 1
-    fi
+    expect_height "Esc didn't hide the panel" -eq
     read -r hidden_kb peak_kb services_kb <<EOF
 $(footprints_kb "$pid")
 EOF
-    kill "$pid"
-    wait "$pid" 2>/dev/null || true
+    quit
+
+    label=$run
     if [ "$run" -eq 0 ]; then
-        printf '%-7s %10s %10s %10s %10s %12s\n' warm-up "$summon" "$open_kb" "$hidden_kb" "$peak_kb" "$services_kb"
-        continue
+        label=warm-up
     fi
-    printf '%-7s %10s %10s %10s %10s %12s\n' "$run" "$summon" "$open_kb" "$hidden_kb" "$peak_kb" "$services_kb"
-    echo "$summon $open_kb $hidden_kb $peak_kb" >>"$work/runs"
+    printf "$row" "$label" "$summon" "$open_kb" "$hidden_kb" "$peak_kb" "$services_kb"
+    if [ "$run" -ne 0 ]; then
+        echo "$summon $open_kb $hidden_kb $peak_kb" >>"$work/runs"
+    fi
 done
 
 over=0
