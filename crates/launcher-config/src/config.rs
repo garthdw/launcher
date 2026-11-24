@@ -263,7 +263,16 @@ fn init(path: &Path) -> io::Result<bool> {
         fs::create_dir_all(directory)?;
     }
     match OpenOptions::new().write(true).create_new(true).open(path) {
-        Ok(mut file) => file.write_all(DEFAULT_FILE.as_bytes()).map(|()| true),
+        Ok(mut file) => match file.write_all(DEFAULT_FILE.as_bytes()) {
+            Ok(()) => Ok(true),
+            Err(error) => {
+                // Left in place, a partial file would pass for the user's own from then on.
+                if let Err(removing) = fs::remove_file(path) {
+                    eprintln!("can't remove the partial {}: {removing}", path.display());
+                }
+                Err(error)
+            }
+        },
         Err(error) if error.kind() == io::ErrorKind::AlreadyExists => Ok(false),
         Err(error) => Err(error),
     }
