@@ -596,7 +596,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSTextFieldDelegate, N
         row.hovered = { [unowned self] in if picked != index { picked = index } }
         row.wantsLayer = true
         row.layer?.cornerRadius = Metrics.selectionRadius
-        let icon = NSImageView(image: item.icon.image)
+        let icon = NSImageView(image: item.icon.image(side: Metrics.icon))
         icon.frame = NSRect(x: 10, y: 8, width: Metrics.icon, height: Metrics.icon)
         icon.contentTintColor = .secondaryLabelColor
         row.addSubview(icon)
@@ -811,14 +811,28 @@ func showAlert(_ message: String, _ detail: String, buttons: [String] = []) -> N
 }
 
 extension Icon {
-    /// A file's own icon, or an SF Symbol for the kinds the core names.
+    /// A file's own icon, or an SF Symbol for the kinds the core names, shown `side` points square.
     @MainActor
-    var image: NSImage {
+    func image(side: CGFloat) -> NSImage {
         switch self {
-        case let .file(path): NSWorkspace.shared.icon(forFile: path)
+        case let .file(path): fileIcon(path, side: side)
         case .calculator: symbol("plus.forwardslash.minus")
         case .token: symbol("key.horizontal")
         }
+    }
+
+    /// The file's icon without representations of more than twice the pixels `side` points take
+    /// on the sharpest screen. NSImageView prepares the one it picks off the main thread, and for
+    /// some apps' icons renders a 4 MB bitmap, whose pages the allocator keeps after freeing it.
+    @MainActor
+    private func fileIcon(_ path: String, side: CGFloat) -> NSImage {
+        let icon = NSWorkspace.shared.icon(forFile: path)
+        let pixels = side * (NSScreen.screens.map(\.backingScaleFactor).max() ?? 2)
+        let small = icon.representations.filter { CGFloat($0.pixelsWide) < 2 * pixels }
+        guard !small.isEmpty else { return icon }
+        let image = NSImage(size: NSSize(width: side, height: side))
+        image.addRepresentations(small)
+        return image
     }
 
     private func symbol(_ name: String) -> NSImage {
