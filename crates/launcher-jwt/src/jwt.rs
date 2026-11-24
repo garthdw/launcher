@@ -10,6 +10,10 @@ use serde_json::{Map, Value};
 pub struct Jwt;
 
 impl Plugin for Jwt {
+    fn name(&self) -> &'static str {
+        "JSON Web Token"
+    }
+
     fn query(&mut self, query: &str) -> Vec<Item> {
         // The clock and zone are read only for a token, so other queries never load the zone.
         claims(query)
@@ -127,9 +131,11 @@ fn item(
     }
     Item {
         title: format!("{name} · {status}"),
-        subtitle: "JWT".into(),
+        subtitle: String::new(),
         action: Action::Copy(payload),
         detail,
+        // Three base64url JSON objects can only be a token.
+        relevance: 100,
     }
 }
 
@@ -179,6 +185,7 @@ mod tests {
             panic!("{token} didn't decode");
         };
         assert_eq!(item.title, "ada · valid for 12 min");
+        assert_eq!(item.subtitle, "", "the group's header names it");
         let payload = "{\n  \"sub\": \"ada\",\n  \"iat\": 1799996400,\n  \"exp\": 1800000720\n}";
         assert_eq!(item.action, Action::Copy(payload.into()));
         assert_eq!(

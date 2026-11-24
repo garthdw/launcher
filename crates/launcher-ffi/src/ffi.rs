@@ -4,10 +4,30 @@
 use std::fmt;
 use std::sync::{Arc, Mutex, MutexGuard};
 
-use launcher_core::{Found, PluginId, log};
+use launcher_core::{PluginId, log};
 use launcher_window::{Display, Placement, Rect, WindowAction};
 
 uniffi::setup_scaffolding!();
+
+/// One plugin's results, under its name.
+#[derive(uniffi::Record)]
+pub struct Group {
+    pub name: String,
+    pub items: Vec<Item>,
+}
+
+impl From<launcher_core::Group> for Group {
+    fn from(group: launcher_core::Group) -> Self {
+        Self {
+            name: group.name.into(),
+            items: group
+                .items
+                .into_iter()
+                .map(|item| Item::new(group.plugin, item))
+                .collect(),
+        }
+    }
+}
 
 #[derive(uniffi::Record)]
 pub struct Item {
@@ -49,9 +69,9 @@ pub struct Choice {
     action: launcher_core::Action,
 }
 
-impl From<Found> for Item {
-    fn from(found: Found) -> Self {
-        let action = match &found.item.action {
+impl Item {
+    fn new(plugin: PluginId, item: launcher_core::Item) -> Self {
+        let action = match &item.action {
             launcher_core::Action::Copy(text) => Action::Copy { text: text.clone() },
             launcher_core::Action::Open(path) => Action::Open {
                 path: path.to_string_lossy().into_owned(),
@@ -59,13 +79,13 @@ impl From<Found> for Item {
             launcher_core::Action::Nothing => Action::Nothing,
         };
         Self {
-            title: found.item.title,
-            subtitle: found.item.subtitle,
+            title: item.title,
+            subtitle: item.subtitle,
             action,
-            detail: found.item.detail.into_iter().map(Section::from).collect(),
+            detail: item.detail.into_iter().map(Section::from).collect(),
             choice: Arc::new(Choice {
-                plugin: found.plugin,
-                action: found.item.action,
+                plugin,
+                action: item.action,
             }),
         }
     }
@@ -327,8 +347,9 @@ impl Launcher {
         launcher.reload().then(|| Settings::from(&*launcher))
     }
 
-    /// Called on every keystroke from the UI thread, so plugins must answer well inside a frame.
-    pub fn query(&self, query: String) -> Vec<Item> {
+    /// Each plugin's results, most relevant group first. Called on every keystroke from the UI
+    /// thread, so plugins must answer well inside a frame.
+    pub fn query(&self, query: String) -> Vec<Group> {
         let Some(mut launcher) = self.lock() else {
             return Vec::new();
         };
@@ -336,7 +357,7 @@ impl Launcher {
             .plugins()
             .query(&query)
             .into_iter()
-            .map(Item::from)
+            .map(Group::from)
             .collect()
     }
 
@@ -359,12 +380,17 @@ mod tests {
     struct Pending;
 
     impl Plugin for Pending {
+        fn name(&self) -> &'static str {
+            "Pending"
+        }
+
         fn query(&mut self, _query: &str) -> Vec<launcher_core::Item> {
             vec![launcher_core::Item {
                 title: "Loading…".into(),
                 subtitle: String::new(),
                 action: launcher_core::Action::Nothing,
                 detail: Vec::new(),
+                relevance: 0,
             }]
         }
     }
@@ -406,7 +432,11 @@ mod tests {
     #[test]
     fn query_converts_items_without_an_action() {
         let launcher = launcher(Plugins::new(vec![Box::new(Pending)]));
-        let items = launcher.query("anything".into());
+        let groups = launcher.query("anything".into());
+        let [Group { name, items }] = groups.as_slice() else {
+            panic!("expected one group, got {}", groups.len());
+        };
+        assert_eq!(name, "Pending");
         assert!(matches!(
             items.as_slice(),
             [Item {
@@ -420,7 +450,11 @@ mod tests {
     fn query_converts_items() -> Result<(), Box<dyn std::error::Error>> {
         // Only the calculator, so installed apps can't add results.
         let launcher = launcher(Plugins::new(vec![Box::new(Calc::new()?)]));
-        let items = launcher.query("2 + 3".into());
+        let groups = launcher.query("2 + 3".into());
+        let [Group { name, items }] = groups.as_slice() else {
+            panic!("expected one group, got {}", groups.len());
+        };
+        assert_eq!(name, "Calculator");
         assert_eq!(items.len(), 1);
         assert_eq!(items[0].title, "5");
         assert!(matches!(&items[0].action, Action::Copy { text } if text == "5"));

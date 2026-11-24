@@ -102,6 +102,10 @@ impl Apps {
 }
 
 impl Plugin for Apps {
+    fn name(&self) -> &'static str {
+        "Apps"
+    }
+
     fn query(&mut self, query: &str) -> Vec<Item> {
         let Ok(index) = self.index.lock() else {
             log!("the app index thread panicked; skipping apps");
@@ -110,7 +114,7 @@ impl Plugin for Apps {
         rank(&index, &self.usage, query, now())
             .into_iter()
             .take(MAX_RESULTS)
-            .map(|app| Item {
+            .map(|(app, relevance)| Item {
                 title: app.name.clone(),
                 subtitle: app
                     .path
@@ -119,6 +123,7 @@ impl Plugin for Apps {
                     .unwrap_or_default(),
                 action: Action::Open(app.path.clone()),
                 detail: Vec::new(),
+                relevance,
             })
             .collect()
     }
@@ -402,18 +407,18 @@ fn collect_apps(folder: &Path, depth: usize, apps: &mut Vec<App>) {
     }
 }
 
-/// Matching apps, best first. Ties keep the index's name order.
+/// Matching apps, best first, with their relevance. Ties keep the index's name order.
 fn rank<'a>(
     apps: &'a [App],
     usage: &HashMap<PathBuf, Usage>,
     query: &str,
     now: u64,
-) -> Vec<&'a App> {
+) -> Vec<(&'a App, u8)> {
     let query = fold_query(query);
     if query.is_empty() {
         return Vec::new();
     }
-    let mut ranked: Vec<(i32, &App)> = apps
+    let mut ranked: Vec<(i32, &App, u8)> = apps
         .iter()
         .filter_map(|app| {
             let score = score(&app.name, &query)?;
@@ -423,11 +428,27 @@ fn rank<'a>(
                 .map_or(0, |usage| {
                     ((usage.weight(now).ln_1p() * 8.0) as i32).min(MAX_FRECENCY_BONUS)
                 });
-            Some((score + bonus, app))
+            // Frecency orders apps among themselves, but says nothing of how well the name
+            // matches, which other plugins' results are weighed against.
+            Some((score + bonus, app, relevance(score, query.len())))
         })
         .collect();
-    ranked.sort_by_key(|(score, _)| Reverse(*score));
-    ranked.into_iter().map(|(_, app)| app).collect()
+    ranked.sort_by_key(|(score, _, _)| Reverse(*score));
+    ranked
+        .into_iter()
+        .map(|(_, app, relevance)| (app, relevance))
+        .collect()
+}
+
+/// A score as a share of the best `score` gives a query of `length` letters, its start of a name
+/// with nothing after: 100 for that, about 90 for the start of a short name, lower for gaps and
+/// mid-word letters. Word starts past the first can push past 100; they're capped.
+fn relevance(score: i32, length: usize) -> u8 {
+    let consecutive = i32::try_from(length.saturating_sub(1)).unwrap_or(i32::MAX);
+    let best = consecutive
+        .saturating_mul(MATCH + CONSECUTIVE)
+        .saturating_add(MATCH + WORD_START);
+    u8::try_from((score.max(0).saturating_mul(100) / best).min(100)).unwrap_or(100)
 }
 
 /// The query's letters, case-folded and without spaces, so "studio code" matches as well.
@@ -576,8 +597,58 @@ mod tests {
     fn ranked_names(apps: &[App], usage: &HashMap<PathBuf, Usage>, query: &str) -> Vec<String> {
         rank(apps, usage, query, 1_000_000)
             .into_iter()
-            .map(|app| app.name.clone())
+            .map(|(app, _)| app.name.clone())
             .collect()
+    }
+
+    /// The calculator scores 90 for a calculation and 80 for a bare constant such as `pi`.
+    #[test]
+    fn relevance_is_a_share_of_the_best_match() {
+        let installed = apps(&[
+            "1Password",
+            "Notes",
+            "Pixelmator Pro",
+            "Preview",
+            "Safari",
+            "Safe Exam Browser",
+            "TextEdit",
+            "Visual Studio Code",
+        ]);
+        let relevance = |query, name: &str| {
+            rank(&installed, &HashMap::new(), query, 1_000_000)
+                .into_iter()
+                .find(|(app, _)| app.name == name)
+                .map(|(_, relevance)| relevance)
+        };
+        assert_eq!(relevance("safari", "Safari"), Some(97));
+        assert_eq!(relevance("saf", "Safari"), Some(95));
+        assert_eq!(relevance("1pass", "1Password"), Some(96));
+        assert_eq!(relevance("vsc", "Visual Studio Code"), Some(86));
+        assert_eq!(relevance("pi", "Pixelmator Pro"), Some(85));
+        assert_eq!(relevance("e", "TextEdit"), Some(85));
+        assert_eq!(relevance("pi", "Preview"), Some(75), "a gap");
+        assert_eq!(relevance("e", "Notes"), Some(50), "mid-word");
+    }
+
+    #[test]
+    fn frecency_orders_apps_but_leaves_relevance_alone() {
+        let installed = apps(&["Notes", "TextEdit"]);
+        let usage = HashMap::from([(
+            PathBuf::from("/Applications/Notes.app"),
+            Usage {
+                count: 10_000,
+                last_opened: 1_000_000,
+            },
+        )]);
+        let ranked: Vec<(&str, u8)> = rank(&installed, &usage, "e", 1_000_000)
+            .into_iter()
+            .map(|(app, relevance)| (app.name.as_str(), relevance))
+            .collect();
+        assert_eq!(
+            ranked,
+            [("Notes", 50), ("TextEdit", 85)],
+            "a mid-word match stays below the calculator, however often it's opened"
+        );
     }
 
     fn matches(name: &str, query: &str) -> Option<i32> {

@@ -41,6 +41,9 @@ final class Panel: NSPanel {
 final class Row: NSView {
     var clicked: () -> Void = {}
     var hovered: () -> Void = {}
+    /// What scrolling to the row brings into view: the row with room around it, and its group's
+    /// header when it's the group's first row.
+    var reach = NSRect.zero
 
     override init(frame: NSRect) {
         super.init(frame: frame)
@@ -95,18 +98,15 @@ final class DetailPane: NSView {
         hint.frame = NSRect(x: 402, y: bodyHeight + 19, width: 220, height: 18)
         hint.autoresizingMask = [.minYMargin]
 
-        let scroll = NSScrollView(frame: NSRect(x: 0, y: 0, width: Metrics.width, height: bodyHeight))
-        scroll.autoresizingMask = [.width, .height]
-        scroll.drawsBackground = false
-        scroll.hasVerticalScroller = true
-        scroll.autohidesScrollers = true
         let document = FlippedView(frame: NSRect(x: 0, y: 0, width: Metrics.width, height: contentHeight))
         document.autoresizingMask = [.width]
         text.frame = document.bounds
         text.autoresizingMask = [.width]
         document.addSubview(text.highlight)
         document.addSubview(text)
-        scroll.documentView = document
+        let scroll = scrollView(holding: document)
+        scroll.frame = NSRect(x: 0, y: 0, width: Metrics.width, height: bodyHeight)
+        scroll.autoresizingMask = [.width, .height]
         addSubview(title)
         addSubview(hint)
         addSubview(scroll)
@@ -118,9 +118,31 @@ final class DetailPane: NSView {
     }
 }
 
-/// Top-down, like the text view it holds, so a long detail opens scrolled to its start.
+/// Top-down, so scrolled content opens at its start, and a scroll view's document grows down.
 final class FlippedView: NSView {
     override var isFlipped: Bool { true }
+}
+
+/// Its scroller always overlays the content: a legacy one, as with "Show scroll bars: Always" or a
+/// mouse plugged in, would cover the right end of rows laid out at the panel's width.
+final class OverlayScrollView: NSScrollView {
+    override var scrollerStyle: NSScroller.Style {
+        get { .overlay }
+        set {}
+    }
+}
+
+/// Scrolls `document` on the glass, its scroller showing only while it scrolls.
+@MainActor
+func scrollView(holding document: FlippedView) -> NSScrollView {
+    // Sized as the document, so a document that tracks the width doesn't grow by the whole
+    // panel width when the caller sizes the scroll view.
+    let scroll = OverlayScrollView(frame: document.frame)
+    scroll.drawsBackground = false
+    scroll.hasVerticalScroller = true
+    scroll.autohidesScrollers = true
+    scroll.documentView = document
+    return scroll
 }
 
 /// Read-only and selectable, so the mouse can copy any part; ↑ and ↓ step through the sections
@@ -238,10 +260,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSTextFieldDelegate, N
     )
     let content = NSView()
     let field = NSTextField()
-    let results = NSView()
+    /// The scrolled content of `results`.
+    let list = FlippedView()
+    lazy var results = scrollView(holding: list)
     /// Shown in place of the field and list while an item's detail is open.
     var detail: DetailPane?
+    /// Every group's items, in the order shown.
     var items: [Item] = []
+    /// Each item's row; group headers sit between them in `list`.
+    var rows: [Row] = []
     var picked = 0 {
         didSet { highlightPicked() }
     }
@@ -497,7 +524,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSTextFieldDelegate, N
         let kept = items.indices.contains(picked) ? (items[picked].title, items[picked].subtitle) : nil
         refresh()
         if let kept, let index = items.firstIndex(where: { ($0.title, $0.subtitle) == kept }) {
-            picked = index
+            pick(index)
         }
     }
 
@@ -507,53 +534,80 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSTextFieldDelegate, N
 
     func refresh() {
         resultsStale = false
-        items = launcher.query(query: field.stringValue)
+        let groups = launcher.query(query: field.stringValue)
+        items = groups.flatMap(\.items)
+        rows = []
+        list.subviews.forEach { $0.removeFromSuperview() }
         let rowHeight: CGFloat = 44
-        let listHeight = items.isEmpty ? 0 : CGFloat(items.count) * (rowHeight + 2) + Metrics.inset * 2
-        results.frame = NSRect(x: 0, y: 0, width: Metrics.width, height: listHeight)
-        results.subviews.forEach { $0.removeFromSuperview() }
-        for (index, item) in items.enumerated() {
-            let row = Row(frame: NSRect(
-                x: Metrics.inset, y: listHeight - Metrics.inset - CGFloat(index + 1) * (rowHeight + 2),
-                width: Metrics.width - Metrics.inset * 2, height: rowHeight
-            ))
-            row.clicked = { [unowned self] in choose(index) }
-            row.hovered = { [unowned self] in if picked != index { picked = index } }
-            row.wantsLayer = true
-            row.layer?.cornerRadius = Metrics.selectionRadius
-            var titleX: CGFloat = 12
-            if case let .open(path) = item.action {
-                let icon = NSImageView(image: NSWorkspace.shared.icon(forFile: path))
-                icon.frame = NSRect(x: 10, y: 8, width: 28, height: 28)
-                row.addSubview(icon)
-                titleX = 46
+        let headerHeight: CGFloat = 28
+        // Eight rows under their header, and room for the next group's header to show there's more.
+        let maxHeight = Metrics.inset * 2 + headerHeight * 2 + 8 * (rowHeight + 2)
+        let titleX = Metrics.inset + 12
+        var y = Metrics.inset
+        for group in groups {
+            let header = NSTextField(labelWithString: group.name)
+            header.font = .systemFont(ofSize: 12, weight: .semibold)
+            header.textColor = .secondaryLabelColor
+            header.frame = NSRect(x: titleX, y: y + 9, width: Metrics.width - titleX * 2, height: 16)
+            list.addSubview(header)
+            // A group's first row reaches up over its header.
+            var top = y - Metrics.inset
+            y += headerHeight
+            for item in group.items {
+                let row = row(for: item, at: rows.count, frame: NSRect(
+                    x: Metrics.inset, y: y, width: Metrics.width - Metrics.inset * 2, height: rowHeight
+                ))
+                row.reach = NSRect(x: 0, y: top, width: Metrics.width, height: y + rowHeight + Metrics.inset - top)
+                list.addSubview(row)
+                rows.append(row)
+                y += rowHeight + 2
+                top = y - Metrics.inset
             }
-            let title = titleLabel(item.title)
-            // The shell names its own keys, so plugins' subtitles say only what an item is.
-            var keys = ""
-            switch item.action {
-            case .copy: keys = "↵ copies"
-            case .open: keys = "↵ opens"
-            case .nothing: title.textColor = .secondaryLabelColor
-            }
-            let subtitle = hintLabel(
-                ([item.subtitle, keys] + (item.detail.isEmpty ? [] : ["→ details"]))
-                    .filter { !$0.isEmpty }
-                    .joined(separator: " · ")
-            )
-            // Long subtitles such as app folders lose their start, not the keys. A subtitle may
-            // take room a short title leaves, but never squeezes a long title further.
-            subtitle.lineBreakMode = .byTruncatingHead
-            let end = row.frame.width - 12
-            let subtitleX = min(396, max(titleX + title.fittingSize.width + 4, end - subtitle.fittingSize.width))
-            subtitle.frame = NSRect(x: subtitleX, y: 13, width: end - subtitleX, height: 18)
-            title.frame = NSRect(x: titleX, y: 11, width: subtitleX - 4 - titleX, height: 22)
-            row.addSubview(title)
-            row.addSubview(subtitle)
-            results.addSubview(row)
         }
+        let height = groups.isEmpty ? 0 : y + Metrics.inset
+        list.frame = NSRect(x: 0, y: 0, width: Metrics.width, height: height)
+        results.frame = NSRect(x: 0, y: 0, width: Metrics.width, height: min(height, maxHeight))
         resize()
-        picked = 0
+        pick(0)
+    }
+
+    /// `item`'s row, the `index`th in `items`.
+    func row(for item: Item, at index: Int, frame: NSRect) -> Row {
+        let row = Row(frame: frame)
+        row.clicked = { [unowned self] in choose(index) }
+        row.hovered = { [unowned self] in if picked != index { picked = index } }
+        row.wantsLayer = true
+        row.layer?.cornerRadius = Metrics.selectionRadius
+        var titleX: CGFloat = 12
+        if case let .open(path) = item.action {
+            let icon = NSImageView(image: NSWorkspace.shared.icon(forFile: path))
+            icon.frame = NSRect(x: 10, y: 8, width: 28, height: 28)
+            row.addSubview(icon)
+            titleX = 46
+        }
+        let title = titleLabel(item.title)
+        // The shell names its own keys, so plugins' subtitles say only what an item is.
+        var keys = ""
+        switch item.action {
+        case .copy: keys = "↵ copies"
+        case .open: keys = "↵ opens"
+        case .nothing: title.textColor = .secondaryLabelColor
+        }
+        let subtitle = hintLabel(
+            ([item.subtitle, keys] + (item.detail.isEmpty ? [] : ["→ details"]))
+                .filter { !$0.isEmpty }
+                .joined(separator: " · ")
+        )
+        // Long subtitles such as app folders lose their start, not the keys. A subtitle may
+        // take room a short title leaves, but never squeezes a long title further.
+        subtitle.lineBreakMode = .byTruncatingHead
+        let end = row.frame.width - 12
+        let subtitleX = min(396, max(titleX + title.fittingSize.width + 4, end - subtitle.fittingSize.width))
+        subtitle.frame = NSRect(x: subtitleX, y: 13, width: end - subtitleX, height: 18)
+        title.frame = NSRect(x: titleX, y: 11, width: subtitleX - 4 - titleX, height: 22)
+        row.addSubview(title)
+        row.addSubview(subtitle)
+        return row
     }
 
     /// Fits the panel to what it shows, keeping its top edge where it is.
@@ -571,9 +625,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSTextFieldDelegate, N
 
     /// Moving the selection only recolours rows; rebuilding them would fetch every icon again.
     func highlightPicked() {
-        for (index, row) in results.subviews.enumerated() {
+        for (index, row) in rows.enumerated() {
             row.layer?.backgroundColor = index == picked ? NSColor.controlAccentColor.cgColor : nil
         }
+    }
+
+    /// Picks the `index`th item and scrolls its row into view. Hover sets `picked` alone: scrolling
+    /// under the pointer would pick the row that slides beneath it, and scroll again.
+    func pick(_ index: Int) {
+        picked = index
+        if rows.indices.contains(index) { list.scrollToVisible(rows[index].reach) }
     }
 
     func showDetail(of index: Int) {
@@ -628,9 +689,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSTextFieldDelegate, N
     func control(_: NSControl, textView: NSTextView, doCommandBy selector: Selector) -> Bool {
         switch selector {
         case #selector(NSResponder.moveDown(_:)) where !items.isEmpty:
-            picked = step(picked, by: 1, count: items.count)
+            pick(step(picked, by: 1, count: items.count))
         case #selector(NSResponder.moveUp(_:)) where !items.isEmpty:
-            picked = step(picked, by: -1, count: items.count)
+            pick(step(picked, by: -1, count: items.count))
         // Only from the end of the query, so → still moves the caret elsewhere.
         case #selector(NSResponder.moveRight(_:))
             where textView.selectedRange() == NSRange(location: (textView.string as NSString).length, length: 0)

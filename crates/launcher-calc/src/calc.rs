@@ -19,6 +19,12 @@ use numbat::{Context, FormatOptions, InterpreterResult, NumbatError};
 const RATES_CHECK: Duration = Duration::from_secs(60 * 60);
 /// How soon to try again while no rates have loaded, as at login before the network is up.
 const RATES_RETRY: Duration = Duration::from_secs(60);
+/// A query with a number is almost surely a calculation. Only an app whose name starts with it,
+/// as "1Password" does with "1pass", ranks higher.
+const CALCULATION: u8 = 90;
+/// A word such as `pi` may as well be the start of an app's name: below an app with a word
+/// starting with it (Pixelmator), above looser matches (Preview).
+const CONSTANT: u8 = 80;
 
 pub struct Calc {
     context: Context,
@@ -104,9 +110,10 @@ impl Calc {
         };
         mentions_currency(query).then(|| Item {
             title: title.into(),
-            subtitle: "Calculator".into(),
+            subtitle: String::new(),
             action: Action::Nothing,
             detail: Vec::new(),
+            relevance: CALCULATION,
         })
     }
 }
@@ -256,18 +263,29 @@ fn is_money(value: &Value) -> bool {
 }
 
 impl Plugin for Calc {
+    fn name(&self) -> &'static str {
+        "Calculator"
+    }
+
     fn query(&mut self, query: &str) -> Vec<Item> {
         self.take_update();
-        // Bare words such as an app name are valid numbat identifiers ("m", "day"), but echoing
-        // them back as "1 m" is noise in a launcher.
-        if !query.chars().any(|c| c.is_ascii_digit()) {
+        let has_number = query.chars().any(|c| c.is_ascii_digit());
+        // A lone letter such as `e` is more likely the start of an app's name than a constant.
+        if !has_number && query.chars().nth(1).is_none() {
             return Vec::new();
         }
-        // An import stays in the context for good: before rates load, the currency module would
-        // keep NaN rates, and `use all` would hold every module in memory.
+        // Imports and definitions stay in the context for good: `let x = 3` would leave `x` in
+        // later answers, before rates load the currency module would keep NaN rates, and
+        // `use all` would hold every module in memory. `ans` and `_` name the last result,
+        // which every keystroke replaces, so they'd answer with a half-typed query's.
         if query
             .split(|c: char| !c.is_alphanumeric() && c != '_')
-            .any(|word| word == "use")
+            .any(|word| {
+                matches!(
+                    word,
+                    "use" | "let" | "fn" | "unit" | "dimension" | "struct" | "ans" | "_"
+                )
+            })
         {
             return Vec::new();
         }
@@ -275,7 +293,17 @@ impl Plugin for Calc {
         let Ok((statements, InterpreterResult::Value(value))) =
             self.context.interpret(&rewritten, CodeSource::Text)
         else {
+            if !has_number {
+                return Vec::new();
+            }
             return self.rates_missing(query).into_iter().collect();
+        };
+        // Bare words such as an app name are often valid numbat ("m", "day"), but echoing them
+        // back as "1 m" is noise in a launcher. Only a plain number, as `pi` is, says something.
+        let relevance = match &value {
+            _ if has_number => CALCULATION,
+            Value::Quantity(quantity) if quantity.unit().is_scalar() => CONSTANT,
+            _ => return Vec::new(),
         };
         // Digit separators read well but break pasting into most other apps.
         let unseparated = FormatOptions {
@@ -308,13 +336,14 @@ impl Plugin for Calc {
             Rates::Loaded(date) if is_money(&value) => {
                 format!("ECB rates of {}", date.strftime("%-d %b"))
             }
-            _ => "Calculator".into(),
+            _ => String::new(),
         };
         vec![Item {
             title: plain_text(&value, &FormatOptions::default()),
             subtitle,
             action: Action::Copy(copied),
             detail,
+            relevance,
         }]
     }
 }
@@ -470,9 +499,10 @@ mod tests {
             calc.query("100 USD to EUR"),
             [Item {
                 title: "Loading exchange rates…".into(),
-                subtitle: "Calculator".into(),
+                subtitle: String::new(),
                 action: Action::Nothing,
                 detail: Vec::new(),
+                relevance: CALCULATION,
             }]
         );
         assert_eq!(
@@ -497,7 +527,7 @@ mod tests {
         publish(&calc.pending, Update::Unavailable);
         assert_eq!(
             shown(&mut calc, "100 USD to EUR"),
-            [("Exchange rates unavailable".into(), "Calculator".into())]
+            [("Exchange rates unavailable".into(), String::new())]
         );
         Ok(())
     }
@@ -514,7 +544,7 @@ mod tests {
         );
         assert_eq!(
             shown(&mut calc, "2 m"),
-            [("2 m".into(), "Calculator".into())],
+            [("2 m".into(), String::new())],
             "only money is dated"
         );
         Ok(())
@@ -578,6 +608,50 @@ mod tests {
     fn ignores_imports() {
         assert!(titles("use units::currencies; 1").is_empty());
         assert!(titles("2; use all").is_empty());
+    }
+
+    #[test]
+    fn words_answer_only_with_a_plain_number() {
+        let answer = |query| {
+            items(query)
+                .into_iter()
+                .map(|item| (item.title, item.relevance))
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(answer("pi"), [("3.14159".into(), CONSTANT)]);
+        assert_eq!(answer("e"), [], "a lone letter is the start of a word");
+        assert_eq!(answer("e*e"), [("7.38906".into(), CONSTANT)]);
+        assert_eq!(answer("e * 2"), [("5.43656".into(), CALCULATION)]);
+        assert_eq!(answer("2e"), [("5.43656".into(), CALCULATION)]);
+        assert_eq!(answer("pi * e"), [("8.53973".into(), CONSTANT)]);
+        assert_eq!(answer("2 pi"), [("6.28319".into(), CALCULATION)]);
+        for word in [
+            "m", "day", "c", "kg to lb", "dollar", "true", "now()", "firefox",
+        ] {
+            assert_eq!(answer(word), [], "{word}");
+        }
+    }
+
+    #[test]
+    fn nothing_outlives_its_query() -> Result<(), Box<NumbatError>> {
+        let mut calc = Calc::new()?;
+        for definition in [
+            "let x = 3",
+            "fn double(y) = 2 y",
+            "unit widget = 3 m",
+            "dimension Foo",
+            "struct Point2 { x: Scalar }",
+        ] {
+            calc.query(definition);
+        }
+        for uses in ["x + 1", "double(2)", "2 widget", "1 x", "x"] {
+            assert_eq!(shown(&mut calc, uses), [], "{uses}");
+        }
+        calc.query("2 + 3");
+        for earlier in ["ans", "_", "ans + 1", "_ * 2"] {
+            assert_eq!(shown(&mut calc, earlier), [], "{earlier}");
+        }
+        Ok(())
     }
 
     #[test]
