@@ -4,7 +4,7 @@
 use std::sync::{Arc, Mutex};
 
 use launcher_core::{Found, PluginId, Plugins};
-use launcher_window::{DEFAULT_BINDINGS, Rect, WindowAction};
+use launcher_window::{DEFAULT_BINDINGS, Display, Placement, Rect, WindowAction};
 
 uniffi::setup_scaffolding!();
 
@@ -77,6 +77,18 @@ pub struct Rect {
     pub y: f64,
     pub width: f64,
     pub height: f64,
+}
+
+#[uniffi::remote(Record)]
+pub struct Display {
+    pub frame: Rect,
+    pub visible: Rect,
+}
+
+#[uniffi::remote(Record)]
+pub struct Placement {
+    pub frame: Rect,
+    pub visible: Rect,
 }
 
 #[uniffi::remote(Enum)]
@@ -168,17 +180,14 @@ pub fn window_bindings() -> Vec<WindowBinding> {
         .collect()
 }
 
-/// The index of the display, among `displays`' frames, whose layouts `window` uses.
+/// Where `action` puts `window`, all in top-left-origin global coordinates; `None` for `Restore`.
 #[uniffi::export]
-pub fn window_display(window: Rect, displays: Vec<Rect>) -> Option<u32> {
-    launcher_window::display_holding(window, &displays).and_then(|index| u32::try_from(index).ok())
-}
-
-/// Where `action` puts `window` within `visible`, both in top-left-origin global coordinates;
-/// `None` for `Restore`.
-#[uniffi::export]
-pub fn window_frame(action: WindowAction, window: Rect, visible: Rect) -> Option<Rect> {
-    action.frame(window, visible)
+pub fn window_placement(
+    action: WindowAction,
+    window: Rect,
+    displays: Vec<Display>,
+) -> Option<Placement> {
+    action.place(window, &displays)
 }
 
 /// `frame` moved as little as it takes to lie within `visible`, keeping its size.

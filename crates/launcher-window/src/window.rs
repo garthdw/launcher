@@ -13,6 +13,21 @@ pub struct Rect {
     pub height: f64,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Display {
+    pub frame: Rect,
+    /// The frame less the menu bar and dock.
+    pub visible: Rect,
+}
+
+/// Where an action puts a window.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Placement {
+    pub frame: Rect,
+    /// The visible frame of the display the window lands on, to keep it within.
+    pub visible: Rect,
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum WindowAction {
     LeftHalf,
@@ -35,9 +50,16 @@ pub enum WindowAction {
 }
 
 impl WindowAction {
-    /// Where this action puts `window` within `visible`, a display's frame less its menu bar and
-    /// dock; `None` for `Restore`, which has no frame of its own.
-    pub fn frame(self, window: Rect, visible: Rect) -> Option<Rect> {
+    /// Where this action puts `window`, laid out on the display holding it; `None` for `Restore`,
+    /// which has no frame of its own, and without displays.
+    pub fn place(self, window: Rect, displays: &[Display]) -> Option<Placement> {
+        let visible = displays.get(display_holding(window, displays)?)?.visible;
+        self.frame(window, visible)
+            .map(|frame| Placement { frame, visible })
+    }
+
+    /// Where this action puts `window` within `visible`; `None` for `Restore`.
+    fn frame(self, window: Rect, visible: Rect) -> Option<Rect> {
         let whole = Span::new(0, 1, 1);
         let first_half = Span::new(0, 1, 2);
         let second_half = Span::new(1, 2, 2);
@@ -90,8 +112,9 @@ impl Span {
 
 /// Which of `displays`' frames holds most of `window`: the display its layouts use. The first
 /// when it's off every display.
-pub fn display_holding(window: Rect, displays: &[Rect]) -> Option<usize> {
-    let overlap = |display: &Rect| {
+fn display_holding(window: Rect, displays: &[Display]) -> Option<usize> {
+    let overlap = |display: &Display| {
+        let display = display.frame;
         let width =
             (window.x + window.width).min(display.x + display.width) - window.x.max(display.x);
         let height =
@@ -184,6 +207,14 @@ mod tests {
         }
     }
 
+    /// A display with no menu bar or dock.
+    fn display(frame: Rect) -> Display {
+        Display {
+            frame,
+            visible: frame,
+        }
+    }
+
     /// A 1512 × 982 display less a 33-point menu bar.
     const VISIBLE: Rect = Rect {
         x: 0.0,
@@ -263,8 +294,8 @@ mod tests {
     #[test]
     fn display_holding_picks_the_largest_overlap() {
         let displays = [
-            rect(0.0, 0.0, 1512.0, 982.0),
-            rect(1512.0, -200.0, 1920.0, 1080.0),
+            display(rect(0.0, 0.0, 1512.0, 982.0)),
+            display(rect(1512.0, -200.0, 1920.0, 1080.0)),
         ];
         let straddling = rect(1300.0, 100.0, 800.0, 600.0);
         assert_eq!(display_holding(straddling, &displays), Some(1));
@@ -272,6 +303,31 @@ mod tests {
         let lost = rect(-5000.0, -5000.0, 100.0, 100.0);
         assert_eq!(display_holding(lost, &displays), Some(0));
         assert_eq!(display_holding(WINDOW, &[]), None);
+    }
+
+    #[test]
+    fn place_lays_out_on_the_display_holding_the_window() {
+        let external = Display {
+            frame: rect(1512.0, -200.0, 1920.0, 1080.0),
+            visible: rect(1512.0, -175.0, 1920.0, 1055.0),
+        };
+        let displays = [
+            Display {
+                frame: rect(0.0, 0.0, 1512.0, 982.0),
+                visible: VISIBLE,
+            },
+            external,
+        ];
+        let window = rect(2000.0, 0.0, 800.0, 600.0);
+        assert_eq!(
+            WindowAction::LeftHalf.place(window, &displays),
+            Some(Placement {
+                frame: rect(1512.0, -175.0, 960.0, 1055.0),
+                visible: external.visible,
+            })
+        );
+        assert_eq!(WindowAction::Restore.place(window, &displays), None);
+        assert_eq!(WindowAction::LeftHalf.place(window, &[]), None);
     }
 
     #[test]

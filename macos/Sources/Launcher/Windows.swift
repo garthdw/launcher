@@ -39,18 +39,17 @@ final class Windows {
             window.setFrame(original)
             return
         }
-        let screens = NSScreen.screens
-        guard let index = windowDisplay(window: Rect(frame), displays: screens.map { Rect(axFrame($0.frame)) })
-        else { return }
-        let visible = Rect(axFrame(screens[Int(index)].visibleFrame))
-        guard let target = windowFrame(action: action, window: Rect(frame), visible: visible).map(CGRect.init)
+        let displays = NSScreen.screens.map {
+            Display(frame: Rect(axFrame($0.frame)), visible: Rect(axFrame($0.visibleFrame)))
+        }
+        guard let placement = windowPlacement(action: action, window: Rect(frame), displays: displays)
         else { return }
         if originals[window] == nil { originals[window] = frame }
-        window.setFrame(target)
+        window.setFrame(CGRect(placement.frame))
         // A window whose minimum size is larger than the target hangs off the display's edge. Apps
         // that resize asynchronously (Electron, Chrome) still report the old frame, so leave those.
         if let placed = window.frame, placed != frame {
-            let within = CGRect(windowMovedWithin(frame: Rect(placed), visible: visible))
+            let within = CGRect(windowMovedWithin(frame: Rect(placed), visible: placement.visible))
             if within.origin != placed.origin { window.setPosition(within.origin) }
         }
     }
