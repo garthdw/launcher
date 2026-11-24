@@ -15,6 +15,9 @@ let keys: [String: Int] = [
     "space": kVK_Space, "delete": kVK_Delete, "left": kVK_LeftArrow, "right": kVK_RightArrow,
     "up": kVK_UpArrow, "down": kVK_DownArrow,
     "a": kVK_ANSI_A, "c": kVK_ANSI_C, "v": kVK_ANSI_V, "x": kVK_ANSI_X, "z": kVK_ANSI_Z,
+    // The window layouts' hotkeys.
+    "d": kVK_ANSI_D, "f": kVK_ANSI_F, "g": kVK_ANSI_G,
+    "i": kVK_ANSI_I, "j": kVK_ANSI_J, "k": kVK_ANSI_K, "u": kVK_ANSI_U,
 ]
 let modifiers: [String: CGEventFlags] = [
     "cmd": .maskCommand, "opt": .maskAlternate, "ctrl": .maskControl, "shift": .maskShift,
@@ -55,7 +58,9 @@ while let argument = arguments.popFirst() {
         FileHandle.standardError.write(Data("press: unknown key \(argument)\n".utf8))
         exit(1)
     }
-    var flags: CGEventFlags = []
+    // A keyboard marks arrow keys as Fn and keypad keys; global hotkeys on arrows only match then.
+    var flags: CGEventFlags = [kVK_LeftArrow, kVK_RightArrow, kVK_UpArrow, kVK_DownArrow].contains(code)
+        ? [.maskSecondaryFn, .maskNumericPad] : []
     for modifier in parts {
         guard let flag = modifiers[modifier] else {
             FileHandle.standardError.write(Data("press: unknown modifier \(modifier)\n".utf8))
