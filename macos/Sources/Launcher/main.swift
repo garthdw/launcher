@@ -323,7 +323,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSTextFieldDelegate, N
         field.placeholderString = "Search apps, calculate, convert…"
         // One line that scrolls sideways: a pasted token would otherwise wrap onto a clipped second line.
         field.usesSingleLineMode = true
-        field.cell?.wraps = false
         field.cell?.isScrollable = true
         field.delegate = self
         field.autoresizingMask = [.width, .minYMargin]
@@ -586,7 +585,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSTextFieldDelegate, N
         icon.frame = NSRect(x: 10, y: 8, width: 28, height: 28)
         icon.contentTintColor = .secondaryLabelColor
         row.addSubview(icon)
-        let titleX: CGFloat = 46
+        let titleX = icon.frame.maxX + 8
         let title = titleLabel(item.title)
         // The shell names its own keys, so plugins' subtitles say only what an item is.
         var keys = ""
@@ -796,15 +795,16 @@ extension Icon {
     /// A file's own icon, or an SF Symbol for the kinds the core names.
     @MainActor
     var image: NSImage {
-        let symbol: String
         switch self {
-        case let .file(path): return NSWorkspace.shared.icon(forFile: path)
-        case .calculator: symbol = "plus.forwardslash.minus"
-        case .token: symbol = "key.horizontal"
+        case let .file(path): NSWorkspace.shared.icon(forFile: path)
+        case .calculator: symbol("plus.forwardslash.minus")
+        case .token: symbol("key.horizontal")
         }
-        let configuration = NSImage.SymbolConfiguration(pointSize: 18, weight: .medium)
-        return NSImage(systemSymbolName: symbol, accessibilityDescription: nil)?
-            .withSymbolConfiguration(configuration) ?? NSImage()
+    }
+
+    private func symbol(_ name: String) -> NSImage {
+        NSImage(systemSymbolName: name, accessibilityDescription: nil)?
+            .withSymbolConfiguration(NSImage.SymbolConfiguration(pointSize: 18, weight: .medium)) ?? NSImage()
     }
 }
 

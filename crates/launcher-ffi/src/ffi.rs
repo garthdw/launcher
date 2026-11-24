@@ -55,7 +55,7 @@ impl From<launcher_core::Section> for Section {
     }
 }
 
-#[derive(Debug, PartialEq, uniffi::Enum)]
+#[derive(uniffi::Enum)]
 pub enum Icon {
     File { path: String },
     Calculator,
@@ -81,6 +81,18 @@ pub enum Action {
     Nothing,
 }
 
+impl From<&launcher_core::Action> for Action {
+    fn from(action: &launcher_core::Action) -> Self {
+        match action {
+            launcher_core::Action::Copy(text) => Self::Copy { text: text.clone() },
+            launcher_core::Action::Open(path) => Self::Open {
+                path: path.to_string_lossy().into_owned(),
+            },
+            launcher_core::Action::Nothing => Self::Nothing,
+        }
+    }
+}
+
 /// Which plugin an item came from, and its action as the plugin made it: paths stay `PathBuf`s
 /// rather than the lossy strings the shell sees.
 #[derive(uniffi::Object)]
@@ -91,18 +103,11 @@ pub struct Choice {
 
 impl Item {
     fn new(plugin: PluginId, item: launcher_core::Item) -> Self {
-        let action = match &item.action {
-            launcher_core::Action::Copy(text) => Action::Copy { text: text.clone() },
-            launcher_core::Action::Open(path) => Action::Open {
-                path: path.to_string_lossy().into_owned(),
-            },
-            launcher_core::Action::Nothing => Action::Nothing,
-        };
         Self {
             title: item.title,
             subtitle: item.subtitle,
             icon: item.icon.into(),
-            action,
+            action: (&item.action).into(),
             detail: item.detail.into_iter().map(Section::from).collect(),
             choice: Arc::new(Choice {
                 plugin,
@@ -479,7 +484,7 @@ mod tests {
         assert_eq!(name, "Calculator");
         assert_eq!(items.len(), 1);
         assert_eq!(items[0].title, "5");
-        assert_eq!(items[0].icon, Icon::Calculator);
+        assert!(matches!(items[0].icon, Icon::Calculator));
         assert!(matches!(&items[0].action, Action::Copy { text } if text == "5"));
         assert_eq!(
             items[0].choice.action,
