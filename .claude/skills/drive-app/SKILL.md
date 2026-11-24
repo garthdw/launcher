@@ -24,7 +24,7 @@ Wait for its log to print `summon to focus: … ms` before pressing anything: th
 ## Press keys
 
 ```sh
-scripts/press right right        # keys by name: return esc tab space delete left right up down a c v x z
+scripts/press right right        # keys by name: return esc tab space delete left right up down a c r v x z
 scripts/press down cmd+c         # modifiers: cmd+ opt+ ctrl+ shift+
 scripts/press opt+space          # the global hotkey, to summon the panel again
 scripts/press --text '2 x 3'     # type text
