@@ -223,6 +223,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSTextFieldDelegate, N
     lazy var launcher = Launcher(listener: ResultsRelay { [weak self] in
         DispatchQueue.main.async { MainActor.assumeIsolated { self?.resultsChanged() } }
     })
+    let windows = Windows()
     // Non-activating, so the app the user was in stays frontmost: window snapping acts on it.
     let panel = Panel(
         contentRect: NSRect(x: 0, y: 0, width: Metrics.width, height: Metrics.headerHeight),
@@ -307,20 +308,28 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSTextFieldDelegate, N
                 return noErr
             }
         }, 1, &pressed, delegate, nil)
-        registerHotkey(code: kVK_Space, modifiers: optionKey, name: "⌥Space") { [unowned self] in
-            summon(at: CFAbsoluteTimeGetCurrent())
+        registerHotkey(Hotkey(key: .space, control: false, option: true, command: false, shift: false)) {
+            [unowned self] in summon(at: CFAbsoluteTimeGetCurrent())
+        }
+        for binding in windowBindings() {
+            registerHotkey(binding.hotkey) { [unowned self, action = binding.action] in windows.perform(action) }
         }
     }
 
     /// `action` runs when the hotkey is pressed, whichever app is frontmost.
-    func registerHotkey(code: Int, modifiers: Int, name: String, action: @escaping () -> Void) {
-        var hotkey: EventHotKeyRef?
+    func registerHotkey(_ hotkey: Hotkey, action: @escaping () -> Void) {
+        guard let keyCode = hotkey.keyCode else {
+            log("can't register \(hotkey.name): no such key")
+            return
+        }
+        var registered: EventHotKeyRef?
         let status = RegisterEventHotKey(
-            UInt32(code), UInt32(modifiers), EventHotKeyID(signature: 0x4C4E_4348, id: UInt32(hotkeyActions.count)),
-            GetApplicationEventTarget(), 0, &hotkey
+            UInt32(keyCode), UInt32(hotkey.carbonModifiers),
+            EventHotKeyID(signature: 0x4C4E_4348, id: UInt32(hotkeyActions.count)),
+            GetApplicationEventTarget(), 0, &registered
         )
         guard status == noErr else {
-            log("can't register \(name): \(status)")
+            log("can't register \(hotkey.name): \(status)")
             return
         }
         hotkeyActions.append(action)
@@ -564,17 +573,66 @@ func hintLabel(_ string: String) -> NSTextField {
 }
 
 /// Activates the app to show the alert, then gives focus back: window management acts on the
-/// frontmost app.
+/// frontmost app. Returns which of `buttons` was clicked, from `.alertFirstButtonReturn`.
 @MainActor
-func showAlert(_ message: String, _ detail: String) {
+@discardableResult
+func showAlert(_ message: String, _ detail: String, buttons: [String] = []) -> NSApplication.ModalResponse {
     let alert = NSAlert()
     alert.messageText = message
     alert.informativeText = detail
+    for button in buttons {
+        alert.addButton(withTitle: button)
+    }
     let previous = NSWorkspace.shared.frontmostApplication
     NSApp.activate()
-    alert.runModal()
+    let response = alert.runModal()
     previous?.activate()
+    return response
 }
+
+extension Hotkey {
+    /// Carbon's virtual key code: the key's position on a US layout.
+    var keyCode: Int? {
+        switch key {
+        case .left: kVK_LeftArrow
+        case .right: kVK_RightArrow
+        case .up: kVK_UpArrow
+        case .down: kVK_DownArrow
+        case .return: kVK_Return
+        case .delete: kVK_Delete
+        case .space: kVK_Space
+        case let .character(character): characterKeyCodes[character]
+        }
+    }
+
+    var carbonModifiers: Int {
+        (control ? controlKey : 0) | (option ? optionKey : 0) | (shift ? shiftKey : 0) | (command ? cmdKey : 0)
+    }
+
+    /// As menus show it, such as ⌃⌥←.
+    var name: String {
+        let key = switch key {
+        case .left: "←"
+        case .right: "→"
+        case .up: "↑"
+        case .down: "↓"
+        case .return: "↩"
+        case .delete: "⌫"
+        case .space: "Space"
+        case let .character(character): character.uppercased()
+        }
+        return (control ? "⌃" : "") + (option ? "⌥" : "") + (shift ? "⇧" : "") + (command ? "⌘" : "") + key
+    }
+}
+
+let characterKeyCodes: [String: Int] = [
+    "a": kVK_ANSI_A, "b": kVK_ANSI_B, "c": kVK_ANSI_C, "d": kVK_ANSI_D, "e": kVK_ANSI_E, "f": kVK_ANSI_F,
+    "g": kVK_ANSI_G, "h": kVK_ANSI_H, "i": kVK_ANSI_I, "j": kVK_ANSI_J, "k": kVK_ANSI_K, "l": kVK_ANSI_L,
+    "m": kVK_ANSI_M, "n": kVK_ANSI_N, "o": kVK_ANSI_O, "p": kVK_ANSI_P, "q": kVK_ANSI_Q, "r": kVK_ANSI_R,
+    "s": kVK_ANSI_S, "t": kVK_ANSI_T, "u": kVK_ANSI_U, "v": kVK_ANSI_V, "w": kVK_ANSI_W, "x": kVK_ANSI_X,
+    "y": kVK_ANSI_Y, "z": kVK_ANSI_Z, "0": kVK_ANSI_0, "1": kVK_ANSI_1, "2": kVK_ANSI_2, "3": kVK_ANSI_3,
+    "4": kVK_ANSI_4, "5": kVK_ANSI_5, "6": kVK_ANSI_6, "7": kVK_ANSI_7, "8": kVK_ANSI_8, "9": kVK_ANSI_9,
+]
 
 @discardableResult
 func copyToPasteboard(_ text: String) -> Bool {
