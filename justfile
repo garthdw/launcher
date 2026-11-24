@@ -6,6 +6,11 @@ run query="":
     -pkill -x Launcher
     {{ if query == "" { "" } else { "LAUNCHER_OPEN=" + quote(query) } }} target/release/Launcher.app/Contents/MacOS/Launcher
 
+# Bundle the app, then check its memory and launch time against the budget in scripts/measure
+[positional-arguments]
+measure *arguments:
+    scripts/measure "$@"
+
 # Bundle the app and install it in ~/Applications
 install:
     scripts/install
