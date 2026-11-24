@@ -3,7 +3,7 @@ use std::collections::HashMap;
 use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
-use std::sync::mpsc::{self, Receiver, Sender};
+use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender};
 use std::sync::{Arc, Mutex, Weak};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
@@ -17,6 +17,8 @@ const MAX_REMEMBERED: usize = 500;
 const SETTLE: Duration = Duration::from_millis(500);
 /// A folder that never goes quiet (a helper logging next to its app) still gets rescanned.
 const MAX_SETTLE: Duration = Duration::from_secs(3);
+/// How often an app folder that doesn't exist yet is looked for.
+const CHECK_MISSING: Duration = Duration::from_secs(5);
 
 const MATCH: i32 = 16;
 const WORD_START: i32 = 12;
@@ -84,7 +86,7 @@ impl Apps {
         let roots: Vec<PathBuf> = roots.iter().map(|root| resolve(root)).collect();
         let index = Arc::new(Mutex::new(Vec::new()));
         let (sender, receiver) = mpsc::channel();
-        let watcher = watch(&roots, sender).map(|watcher| Arc::new(Mutex::new(watcher)));
+        let watcher = watch(sender).map(|watcher| Arc::new(Mutex::new(watcher)));
         thread::spawn({
             let index = index.clone();
             let watcher = watcher.as_ref().map_or_else(Weak::new, Arc::downgrade);
@@ -261,23 +263,42 @@ fn keep_index(
             changed();
         }
     };
+    let missing = || -> Vec<bool> { roots.iter().map(|root| !root.is_dir()).collect() };
+    let mut was_missing = missing();
     refresh();
-    while changes.recv().is_ok() {
-        let deadline = Instant::now() + MAX_SETTLE;
-        while Instant::now() < deadline && changes.recv_timeout(SETTLE).is_ok() {}
+    loop {
+        // A root that doesn't exist yet (`~/Applications` often doesn't) is looked for now and
+        // then. Watching its parent instead would wake for every write anywhere under home.
+        let change = if was_missing.contains(&true) {
+            changes.recv_timeout(CHECK_MISSING)
+        } else {
+            changes.recv().map_err(RecvTimeoutError::from)
+        };
+        match change {
+            Ok(()) => {
+                let deadline = Instant::now() + MAX_SETTLE;
+                while Instant::now() < deadline && changes.recv_timeout(SETTLE).is_ok() {}
+            }
+            Err(RecvTimeoutError::Timeout) => {
+                let appeared = was_missing
+                    .iter()
+                    .zip(roots)
+                    .any(|(was_missing, root)| *was_missing && root.is_dir());
+                if !appeared {
+                    continue;
+                }
+            }
+            Err(RecvTimeoutError::Disconnected) => return,
+        }
+        was_missing = missing();
         refresh();
     }
 }
 
-/// Watches the parent of each root that doesn't exist yet (`~/Applications` often doesn't), so
-/// `keep_index` hears when it's created; it watches the roots themselves.
-fn watch(roots: &[PathBuf], changes: Sender<()>) -> Option<RecommendedWatcher> {
-    let relevant_roots = roots.to_vec();
-    let relevant = move |path: &PathBuf| {
-        !inside_bundle(path) && relevant_roots.iter().any(|root| path.starts_with(root))
-    };
+/// A watcher that tells `changes` of bundles appearing or going away; `keep_index` adds the roots.
+fn watch(changes: Sender<()>) -> Option<RecommendedWatcher> {
     let handler = move |result: notify::Result<notify::Event>| match result {
-        Ok(event) if event.paths.iter().any(&relevant) => {
+        Ok(event) if event.paths.iter().any(|path| !inside_bundle(path)) => {
             if changes.send(()).is_err() {
                 log!("the app index thread stopped; ignoring folder changes");
             }
@@ -285,24 +306,9 @@ fn watch(roots: &[PathBuf], changes: Sender<()>) -> Option<RecommendedWatcher> {
         Ok(_) => {}
         Err(error) => log!("app folder watcher: {error}"),
     };
-    let mut watcher = match notify::recommended_watcher(handler) {
-        Ok(watcher) => watcher,
-        Err(error) => {
-            log!("can't watch app folders, so new apps need a restart: {error}");
-            return None;
-        }
-    };
-    let missing_parents = roots
-        .iter()
-        .filter(|root| !root.exists())
-        .filter_map(|root| root.parent())
-        .filter(|parent| parent.is_dir());
-    for parent in missing_parents {
-        if let Err(error) = watcher.watch(parent, RecursiveMode::NonRecursive) {
-            log!("can't watch {}: {error}", parent.display());
-        }
-    }
-    Some(watcher)
+    notify::recommended_watcher(handler)
+        .inspect_err(|error| log!("can't watch app folders, so new apps need a restart: {error}"))
+        .ok()
 }
 
 /// Resolves symlinks in the part of `path` that exists, since watchers report resolved paths
@@ -689,8 +695,13 @@ mod tests {
         Arc::new(|| {})
     }
 
-    fn eventually(mut condition: impl FnMut() -> bool) -> bool {
-        for _ in 0..100 {
+    fn eventually(condition: impl FnMut() -> bool) -> bool {
+        eventually_within(Duration::from_secs(5), condition)
+    }
+
+    fn eventually_within(timeout: Duration, mut condition: impl FnMut() -> bool) -> bool {
+        let deadline = Instant::now() + timeout;
+        while Instant::now() < deadline {
             if condition() {
                 return true;
             }
@@ -958,7 +969,8 @@ mod tests {
         let applications = home.path().join("Applications");
         let mut plugin = Apps::watching(vec![applications.clone()], None, quiet());
         fs::create_dir_all(applications.join("Zed.app"))?;
-        assert!(eventually(|| titles(&mut plugin, "zed") == ["Zed"]));
+        let found = eventually_within(CHECK_MISSING * 2, || titles(&mut plugin, "zed") == ["Zed"]);
+        assert!(found);
         fs::create_dir(applications.join("Yak.app"))?;
         assert!(eventually(|| titles(&mut plugin, "yak") == ["Yak"]));
         Ok(())
