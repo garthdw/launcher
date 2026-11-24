@@ -718,6 +718,7 @@ version = "0.1.0"
 dependencies = [
  "launcher-core",
  "notify",
+ "objc2-core-foundation",
  "tempfile",
 ]
 
