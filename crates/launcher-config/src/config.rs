@@ -209,8 +209,8 @@ fn read(path: &Path) -> Result<Config, String> {
 }
 
 /// Runs `config` commands, which every shell shares: the shell hands over its arguments, after
-/// trying its own commands (macOS's `login`), before starting its UI. `None` when they aren't a command, so the UI starts; else
-/// the exit status.
+/// trying its own commands (macOS's `login`), before starting its UI. `None` when they aren't a
+/// command, so the UI starts; else the exit status.
 #[expect(
     clippy::disallowed_macros,
     reason = "a command's messages go to its terminal, not the log"
@@ -272,7 +272,7 @@ fn init(path: &Path) -> io::Result<bool> {
             Err(error) => {
                 // Left in place, a partial file would pass for the user's own from then on.
                 if let Err(removing) = fs::remove_file(path) {
-                    eprintln!("can't remove the partial {}: {removing}", path.display());
+                    log!("can't remove the partial {}: {removing}", path.display());
                 }
                 Err(error)
             }
