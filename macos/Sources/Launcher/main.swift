@@ -775,8 +775,10 @@ func log(_ message: String) {
     FileHandle.standardError.write(Data((message + "\n").utf8))
 }
 
-// `Launcher config init`, from the app's own binary, so there's no separate tool to build and sign.
-if let status = configCommand(arguments: Array(CommandLine.arguments.dropFirst())) {
+// `Launcher config init` and `Launcher login on`, from the app's own binary, so there's no separate
+// tool to build and sign.
+let arguments = Array(CommandLine.arguments.dropFirst())
+if let status = loginCommand(arguments) ?? configCommand(arguments: arguments) {
     exit(status)
 }
 
