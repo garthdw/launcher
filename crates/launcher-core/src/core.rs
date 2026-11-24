@@ -6,6 +6,8 @@ use std::sync::Arc;
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct Item {
+    /// Shown on one line, as is the subtitle: `Plugins::query` turns each run of control
+    /// characters or line separators into one space, and drops runs at either end.
     pub title: String,
     /// More about the item, such as an app's folder; the group's header already names the
     /// plugin. The shell adds the keys that act on it.
@@ -276,7 +278,11 @@ impl Plugins {
             .enumerate()
             .filter_map(|(index, plugin)| {
                 let plugin = plugin.as_mut()?;
-                let items = plugin.query(query);
+                let mut items = plugin.query(query);
+                for item in &mut items {
+                    make_one_line(&mut item.title);
+                    make_one_line(&mut item.subtitle);
+                }
                 (!items.is_empty()).then(|| Group {
                     plugin: PluginId(index),
                     name: plugin.name(),
@@ -295,6 +301,22 @@ impl Plugins {
             // Not the action: a copy's text can be a token's claims, and the log is kept on disk.
             None => log!("no plugin {} to tell it ran an action", plugin.0),
         }
+    }
+}
+
+/// The shell draws titles and subtitles on one line, but plugins can pass on text with line
+/// breaks or tabs, as a calculator string or a token's claims. Each run of control characters
+/// or Unicode line and paragraph separators becomes one space, and runs at either end go.
+fn make_one_line(text: &mut String) {
+    let breaks =
+        |character: char| character.is_control() || matches!(character, '\u{2028}' | '\u{2029}');
+    // Almost no text has any, and this runs for every item on every keystroke.
+    if text.contains(breaks) {
+        *text = text
+            .split(breaks)
+            .filter(|part| !part.is_empty())
+            .collect::<Vec<_>>()
+            .join(" ");
     }
 }
 
@@ -423,6 +445,47 @@ mod tests {
             second
                 .lock()
                 .is_ok_and(|ran| *ran == [Action::Copy("second".into())])
+        );
+    }
+
+    /// Answers with an item whose title, subtitle and copied text are all `text`.
+    struct Echo(&'static str);
+
+    impl Plugin for Echo {
+        fn name(&self) -> &'static str {
+            "echo"
+        }
+
+        fn query(&mut self, _query: &str) -> Vec<Item> {
+            vec![Item {
+                title: self.0.into(),
+                subtitle: self.0.into(),
+                icon: Icon::Calculator,
+                action: Action::Copy(self.0.into()),
+                detail: Vec::new(),
+                relevance: 50,
+            }]
+        }
+    }
+
+    #[test]
+    fn titles_and_subtitles_show_on_one_line() {
+        let text = "\na\nb\r\n\tc\u{2028}\u{2029}d  e \t";
+        let mut plugins = Plugins::new(vec![Box::new(Echo(text))]);
+        let items: Vec<(String, String, Action)> = plugins
+            .query("anything")
+            .into_iter()
+            .flat_map(|group| group.items)
+            .map(|item| (item.title, item.subtitle, item.action))
+            .collect();
+        assert_eq!(
+            items,
+            [(
+                "a b c d  e ".into(),
+                "a b c d  e ".into(),
+                Action::Copy(text.into())
+            )],
+            "each run of control characters is one space, spaces stay, and the copy is exact"
         );
     }
 
