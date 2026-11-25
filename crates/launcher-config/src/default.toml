@@ -1,8 +1,8 @@
 #:schema https://raw.githubusercontent.com/garthdw/launcher/main/crates/launcher-config/config.schema.json
 
 # Launcher settings. Every setting is commented out at its default: remove the "#" in front
-# of one to change it, and later versions' defaults still reach the rest. The launcher reloads
-# this file when it's saved; a mistake keeps the settings from before and says what's wrong.
+# of one to change it, and later versions' defaults still reach the rest. The launcher reads
+# this file again on ⌘R in its panel; a mistake keeps the settings from before and says what's wrong.
 #
 # A hotkey is modifiers and a key joined by "+", such as "ctrl+alt+left".
 #   Modifiers: ctrl, alt (or opt), cmd and shift. Each hotkey needs ctrl, alt or cmd.
