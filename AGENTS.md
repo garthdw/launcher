@@ -18,12 +18,13 @@ scripts/install                              # bundle, install as ~/Applications
 LAUNCHER_OPEN='100 N to lbf' target/release/Launcher.app/Contents/MacOS/Launcher   # open the panel at launch
 target/release/Launcher.app/Contents/MacOS/Launcher config init   # write ~/.config/launcher/config.toml, every setting commented out
 target/release/Launcher.app/Contents/MacOS/Launcher login status   # launch at login: on, off or status; registers this copy of the app
+pbpaste | target/release/Launcher.app/Contents/MacOS/Launcher secret set kagi   # store the Kagi API token in the keychain; `secret remove kagi` removes it
 scripts/measure                              # bundle, then check memory and summon time against the budget over 6 launches
 footprint "$(pgrep -x Launcher)"             # memory, as Activity Monitor reports it
 cargo build --profile profiling              # release with full symbols, for samply or xctrace
 ```
 
-`scripts/bundle` signs with the identity in `MAC_APP_SIGN`, or ad hoc without one, in which case macOS asks again for the Accessibility permission after every build. It writes the UniFFI bindings into `macos/Sources/launcher_ffiFFI` and `macos/Sources/Launcher/Generated` (both ignored), so run it before `swift build --package-path macos`.
+`scripts/bundle` signs with the identity in `MAC_APP_SIGN`, or ad hoc without one, in which case macOS asks again for the Accessibility permission after every build, and may ask again for access to the keychain item holding the Kagi token. It writes the UniFFI bindings into `macos/Sources/launcher_ffiFFI` and `macos/Sources/Launcher/Generated` (both ignored), so run it before `swift build --package-path macos`.
 
 The app logs to stderr (`log(…)` in Swift, `launcher_core::log!` in Rust). When stderr is `/dev/null`, as it is when launched by Finder or `open`, `Log.swift` points it at `~/Library/Logs/launcher.log`.
 
@@ -36,9 +37,11 @@ The app logs to stderr (`log(…)` in Swift, `launcher_core::log!` in Rust). Whe
 - `crates/launcher-calc`: numbat for arithmetic, units and currency, with ECB exchange rates cached on disk and refreshed in the background. The numbat context builds in the background, and each query is interpreted and forgotten so the context doesn't grow.
 - `vendor/numbat`: numbat with the patches in its `PATCHES.md`, through `[patch.crates-io]`.
 - `crates/launcher-jwt`: decodes a pasted JSON Web Token (signature not verified).
+- `crates/launcher-kagi`: web search with Kagi for queries starting with its prefix: a row that opens kagi.com in the browser, and with an API token, results from Kagi's Search API fetched on a background thread once typing pauses.
+- `crates/launcher-secret`: secrets such as API tokens in the platform's secret store (the login keychain through Security.framework on macOS; Linux to come), read on demand, and the `secret` command.
 - `crates/launcher-window`: window layouts and moves between displays as pure geometry, and their default hotkeys. Shells only read and move windows.
 - `crates/launcher-ffi`: the UniFFI boundary the Swift shell calls, mirroring the core's types so the core stays free of FFI derives. Built as a static library linked into the app. `crates/uniffi-bindgen` is the matching bindgen CLI.
-- `macos/`: the AppKit shell. A non-activating `NSPanel`, so the app the user was in stays frontmost for window management; global hotkeys through Carbon's `RegisterEventHotKey`; no Dock icon or main menu, so the panel handles ⌘Q, ⌘, and ⌘R itself; an optional menu bar item; launch at login through `SMAppService`. Given arguments, the binary runs the `login` and `config` commands before starting AppKit. `Windows.swift` moves windows through the Accessibility API.
+- `macos/`: the AppKit shell. A non-activating `NSPanel`, so the app the user was in stays frontmost for window management; global hotkeys through Carbon's `RegisterEventHotKey`; no Dock icon or main menu, so the panel handles ⌘Q, ⌘, and ⌘R itself; an optional menu bar item; launch at login through `SMAppService`. Given arguments, the binary runs the `login`, `config` and `secret` commands before starting AppKit. `Windows.swift` moves windows through the Accessibility API.
 
 Logic belongs in the shared Rust crates; shells stay thin: they draw results, register hotkeys, name the keys and run actions.
 

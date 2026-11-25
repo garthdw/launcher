@@ -82,6 +82,20 @@ detected. Editors that read `#:schema` lines
 (Taplo, the Even Better TOML extension) check and complete the file against
 [`config.schema.json`](crates/launcher-config/config.schema.json).
 
+## Kagi web search
+
+A query that starts with `k` and a space (the `[kagi]` prefix setting), such as `k rust`, offers
+to search kagi.com in the browser, which uses your browser's Kagi session. With a
+[Kagi API](https://kagi.com/api) token, it also shows Kagi's results in the panel once typing
+pauses for 400 ms (`pause_ms`); each search is billed by Kagi. Nothing else you type reaches Kagi. The token lives in the
+login keychain, never in the settings file; set it from stdin, so it stays out of shell history,
+and remove it the same way:
+
+```sh
+pbpaste | ~/Applications/Launcher.app/Contents/MacOS/Launcher secret set kagi
+~/Applications/Launcher.app/Contents/MacOS/Launcher secret remove kagi
+```
+
 ## Contributing
 
 See [`AGENTS.md`](AGENTS.md) for the architecture, commands and coding guidelines.

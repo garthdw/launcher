@@ -60,6 +60,7 @@ pub enum Icon {
     File { path: String },
     Calculator,
     Token,
+    Search,
 }
 
 impl From<launcher_core::Icon> for Icon {
@@ -70,6 +71,7 @@ impl From<launcher_core::Icon> for Icon {
             },
             launcher_core::Icon::Calculator => Self::Calculator,
             launcher_core::Icon::Token => Self::Token,
+            launcher_core::Icon::Search => Self::Search,
         }
     }
 }
@@ -78,6 +80,7 @@ impl From<launcher_core::Icon> for Icon {
 pub enum Action {
     Copy { text: String },
     Open { path: String },
+    OpenUrl { url: String },
     Nothing,
 }
 
@@ -88,6 +91,7 @@ impl From<&launcher_core::Action> for Action {
             launcher_core::Action::Open(path) => Self::Open {
                 path: path.to_string_lossy().into_owned(),
             },
+            launcher_core::Action::OpenUrl(url) => Self::OpenUrl { url: url.clone() },
             launcher_core::Action::Nothing => Self::Nothing,
         }
     }
@@ -232,11 +236,11 @@ pub struct Settings {
     pub problem: Option<String>,
 }
 
-/// Runs `config` commands, such as `config init`, before the shell starts its UI: `None` when
-/// `arguments` aren't one, else the exit status.
+/// Runs the commands every shell shares, such as `config init` and `secret set kagi`, before the
+/// shell starts its UI: `None` when `arguments` aren't one, else the exit status.
 #[uniffi::export]
-pub fn config_command(arguments: Vec<String>) -> Option<i32> {
-    launcher_config::run_command(&arguments)
+pub fn run_command(arguments: Vec<String>) -> Option<i32> {
+    launcher_plugins::run_command(&arguments)
 }
 
 #[derive(Debug, uniffi::Error)]
@@ -374,6 +378,14 @@ impl Launcher {
             .into_iter()
             .map(Group::from)
             .collect()
+    }
+
+    /// The shell hid the panel, or is about to run an item's action, so plugins drop work for
+    /// the query it showed.
+    pub fn hidden(&self) {
+        if let Some(mut launcher) = self.lock() {
+            launcher.plugins().hidden();
+        }
     }
 
     /// The shell ran an item's action successfully.

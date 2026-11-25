@@ -1,11 +1,24 @@
 //! The plugins every shell runs and the settings that choose them, so a shell only draws
 //! results, registers hotkeys and runs actions.
 
+use std::time::Duration;
+
 use launcher_apps::Apps;
 use launcher_calc::Calc;
-use launcher_config::{Config, EnabledPlugins};
+use launcher_config::Config;
 use launcher_core::{Plugin, Plugins, ResultsChanged, cache_directory, log};
 use launcher_jwt::Jwt;
+use launcher_kagi::Kagi;
+
+/// The secrets plugins read, which the `secret` command sets.
+const SECRETS: [&str; 1] = [launcher_kagi::SECRET];
+
+/// Runs the commands every shell shares, such as `config init` and `secret set kagi`, before the
+/// shell starts its UI: `None` when `arguments` aren't one, else the exit status.
+pub fn run_command(arguments: &[String]) -> Option<i32> {
+    launcher_config::run_command(arguments)
+        .or_else(|| launcher_secret::run_command(arguments, &SECRETS))
+}
 
 /// The plugins, in the order their results show when equally relevant; each has a place in
 /// `Plugins`, empty while it's off.
@@ -14,32 +27,55 @@ enum Place {
     Calculator,
     Jwt,
     Apps,
+    Kagi,
 }
 
-const PLACES: [Place; 3] = [Place::Calculator, Place::Jwt, Place::Apps];
+const PLACES: [Place; 4] = [Place::Calculator, Place::Jwt, Place::Apps, Place::Kagi];
+
+/// Everything a plugin reads from the settings, and all `start` has to go on, so a plugin
+/// restarts whenever any of it changes.
+#[derive(PartialEq)]
+enum PluginSettings {
+    Calculator,
+    Jwt,
+    Apps,
+    Kagi(launcher_config::Kagi),
+}
 
 impl Place {
-    fn enabled(self, enabled: EnabledPlugins) -> bool {
+    /// What the plugin in this place reads from `config`; `None` while it's off.
+    fn settings(self, config: &Config) -> Option<PluginSettings> {
+        let enabled = config.plugins;
         match self {
-            Self::Calculator => enabled.calculator,
-            Self::Jwt => enabled.jwt,
-            Self::Apps => enabled.apps,
+            Self::Calculator => enabled.calculator.then_some(PluginSettings::Calculator),
+            Self::Jwt => enabled.jwt.then_some(PluginSettings::Jwt),
+            Self::Apps => enabled.apps.then_some(PluginSettings::Apps),
+            Self::Kagi => enabled
+                .kagi
+                .then(|| PluginSettings::Kagi(config.kagi.clone())),
         }
     }
+}
 
-    /// Starts the plugin's background work, which calls `changed` when it may have changed the
-    /// results.
-    fn start(self, changed: &ResultsChanged) -> Option<Box<dyn Plugin + Send>> {
+impl PluginSettings {
+    /// Starts the plugin, and its background work, which calls `changed` when it may have
+    /// changed the results.
+    fn start(self, changed: &ResultsChanged) -> Box<dyn Plugin + Send> {
         match self {
             Self::Calculator => {
                 let rates_directory = cache_directory().unwrap_or_else(|| {
                     log!("no home folder, so exchange rates are cached in the temporary folder");
                     std::env::temp_dir()
                 });
-                Some(Box::new(Calc::start(rates_directory, changed.clone())))
+                Box::new(Calc::start(rates_directory, changed.clone()))
             }
-            Self::Jwt => Some(Box::new(Jwt)),
-            Self::Apps => Some(Box::new(Apps::start(changed.clone()))),
+            Self::Jwt => Box::new(Jwt),
+            Self::Apps => Box::new(Apps::start(changed.clone())),
+            Self::Kagi(settings) => Box::new(Kagi::new(
+                settings.prefix,
+                Duration::from_millis(settings.pause_ms),
+                changed.clone(),
+            )),
         }
     }
 }
@@ -51,7 +87,7 @@ pub struct Launcher {
     /// Why the config file can't be used; `config` is then the settings from before, or the
     /// defaults.
     problem: Option<String>,
-    /// Handed to plugins restarted when the settings turn them on or off.
+    /// Handed to plugins restarted when the settings change.
     results_changed: ResultsChanged,
 }
 
@@ -64,9 +100,10 @@ impl Launcher {
         };
         let mut plugins = Plugins::empty(PLACES.len());
         for (index, place) in PLACES.into_iter().enumerate() {
-            if place.enabled(config.plugins) {
-                plugins.set(index, place.start(&results_changed));
-            }
+            let plugin = place
+                .settings(&config)
+                .map(|settings| settings.start(&results_changed));
+            plugins.set(index, plugin);
         }
         Self::with(plugins, config, problem, results_changed)
     }
@@ -102,9 +139,9 @@ impl Launcher {
         self.apply(launcher_config::load())
     }
 
-    /// Takes `loaded` settings, starting or dropping only the plugins they turn on or off. On a
-    /// problem, keeps the settings from before; the problem always counts as a change, so the
-    /// shell says it again.
+    /// Takes `loaded` settings, starting or dropping only the plugins they turn on or off, or
+    /// whose settings they change. On a problem, keeps the settings from before; the problem
+    /// always counts as a change, so the shell says it again.
     fn apply(&mut self, loaded: Result<Config, String>) -> bool {
         let config = match loaded {
             Ok(config) => config,
@@ -116,17 +153,16 @@ impl Launcher {
         if config == self.config && self.problem.is_none() {
             return false;
         }
-        if config.plugins != self.config.plugins {
-            let toggled = PLACES.into_iter().enumerate().filter(|(_, place)| {
-                place.enabled(config.plugins) != place.enabled(self.config.plugins)
-            });
-            for (index, place) in toggled {
-                let plugin = place
-                    .enabled(config.plugins)
-                    .then(|| place.start(&self.results_changed))
-                    .flatten();
+        let mut restarted = false;
+        for (index, place) in PLACES.into_iter().enumerate() {
+            let settings = place.settings(&config);
+            if settings != place.settings(&self.config) {
+                let plugin = settings.map(|settings| settings.start(&self.results_changed));
                 self.plugins.set(index, plugin);
+                restarted = true;
             }
+        }
+        if restarted {
             (self.results_changed)();
         }
         self.config = config;
@@ -139,6 +175,7 @@ impl Launcher {
 mod tests {
     use std::sync::Arc;
 
+    use launcher_config::EnabledPlugins;
     use launcher_core::Item;
 
     use super::*;
@@ -186,6 +223,16 @@ mod tests {
         assert_eq!(launcher.plugins().query("anything").len(), 1);
     }
 
+    /// The ids of the plugins with results for `query`.
+    fn answering(launcher: &mut Launcher, query: &str) -> Vec<String> {
+        launcher
+            .plugins()
+            .query(query)
+            .into_iter()
+            .map(|group| format!("{:?}", group.plugin))
+            .collect()
+    }
+
     #[test]
     fn turning_a_plugin_off_keeps_the_others() {
         let mut launcher = Launcher::with(
@@ -202,13 +249,33 @@ mod tests {
             ..Config::default()
         };
         assert!(launcher.apply(Ok(jwt_off)));
-        let places: Vec<String> = launcher
-            .plugins()
-            .query("anything")
-            .into_iter()
-            .map(|group| format!("{:?}", group.plugin))
-            .collect();
-        assert_eq!(places, ["PluginId(0)", "PluginId(2)"]);
+        assert_eq!(
+            answering(&mut launcher, "anything"),
+            ["PluginId(0)", "PluginId(2)"]
+        );
+    }
+
+    #[test]
+    fn a_plugin_restarts_when_its_own_settings_change() {
+        let mut launcher = Launcher::with(
+            Plugins::new(vec![
+                Box::new(Echo),
+                Box::new(Echo),
+                Box::new(Echo),
+                Box::new(Echo),
+            ]),
+            Config::default(),
+            None,
+            Arc::new(|| {}),
+        );
+        let mut kagi_prefix = Config::default();
+        kagi_prefix.kagi.prefix = "kagi".into();
+        assert!(launcher.apply(Ok(kagi_prefix)));
+        assert_eq!(
+            answering(&mut launcher, "anything"),
+            ["PluginId(0)", "PluginId(1)", "PluginId(2)"],
+            "Kagi, in place of the last echo, answers only its prefix"
+        );
     }
 
     #[test]

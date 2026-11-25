@@ -1,8 +1,8 @@
 #:schema https://raw.githubusercontent.com/garthdw/launcher/main/crates/launcher-config/config.schema.json
 
 # Launcher settings. Every setting is commented out at its default: remove the "#" in front
-# of one to change it, and later versions' defaults still reach the rest. The launcher reloads
-# this file when it's saved; a mistake keeps the settings from before and says what's wrong.
+# of one to change it, and later versions' defaults still reach the rest. The launcher reads
+# this file again on ⌘R in its panel; a mistake keeps the settings from before and says what's wrong.
 #
 # A hotkey is modifiers and a key joined by "+", such as "ctrl+alt+left".
 #   Modifiers: ctrl, alt (or opt), cmd and shift. Each hotkey needs ctrl, alt or cmd.
@@ -26,6 +26,17 @@
 #jwt = true
 # Finds and opens apps.
 #apps = true
+# Searches the web with Kagi, only for queries that start with its prefix.
+#kagi = true
+
+# Kagi web search. A query that starts with the prefix and a space, such as "k rust", offers to
+# search kagi.com in the browser. With an API token it also shows Kagi's results once typing
+# pauses, at Kagi's price per search. Store the token with `Launcher secret set kagi`, which reads
+# it from stdin, and remove it with `Launcher secret remove kagi`; it's kept in the keychain.
+[kagi]
+#prefix = "k"
+# How long typing must pause, in milliseconds (100 to 5000), before a search goes to the API.
+#pause_ms = 400
 
 # Lay out the frontmost window. "none" turns a hotkey off.
 [window]

@@ -328,7 +328,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSTextFieldDelegate, N
         field.drawsBackground = false
         field.focusRingType = .none
         field.font = .systemFont(ofSize: 20)
-        field.placeholderString = "Search apps, calculate, convert…"
+        field.placeholderString = "Search, calculate, convert…"
         // One line that scrolls sideways: a pasted token would otherwise wrap onto a clipped second line.
         field.usesSingleLineMode = true
         field.cell?.isScrollable = true
@@ -513,6 +513,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSTextFieldDelegate, N
     func hide() {
         closeDetail()
         panel.orderOut(nil)
+        launcher.hidden()
     }
 
     func windowDidBecomeKey(_: Notification) {
@@ -606,7 +607,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSTextFieldDelegate, N
         var keys = ""
         switch item.action {
         case .copy: keys = "↵ copies"
-        case .open: keys = "↵ opens"
+        case .open, .openUrl: keys = "↵ opens"
         case .nothing: title.textColor = .secondaryLabelColor
         }
         let subtitle = hintLabel(
@@ -682,13 +683,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSTextFieldDelegate, N
     }
 
     func choose(_ index: Int) {
-        if index < items.count {
-            if case .nothing = items[index].action { return }
-            run(items[index])
-        }
+        let item = items.indices.contains(index) ? items[index] : nil
+        if let item, case .nothing = item.action { return }
+        // Hidden before the action runs, so plugins drop work for the query before an open, which
+        // finishes later, starts.
         field.stringValue = ""
         refresh()
         hide()
+        if let item { run(item) }
     }
 
     func run(_ item: Item) {
@@ -697,6 +699,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSTextFieldDelegate, N
             if copyToPasteboard(text) { launcher.ran(choice: item.choice) }
         case let .open(path):
             open(URL(fileURLWithPath: path)) { self.launcher.ran(choice: item.choice) }
+        case let .openUrl(address):
+            guard let url = URL(string: address) else {
+                log("can't open a malformed web address")
+                return
+            }
+            open(url) { self.launcher.ran(choice: item.choice) }
         case .nothing:
             break
         }
@@ -764,23 +772,30 @@ func hintLabel(_ string: String) -> NSTextField {
     return label
 }
 
-/// Opens `file` in `app`, or else its default app, then runs `opened`. A failure shows an alert,
-/// since the panel has already closed, so nothing else would show it.
+/// Opens `url`, a file or web address, in `app`, or else its default app, then runs `opened`. A
+/// failure shows an alert, since the panel has already closed, so nothing else would show it.
 @MainActor
-func open(_ file: URL, with app: URL? = nil, opened: @escaping @MainActor @Sendable () -> Void = {}) {
+func open(_ url: URL, with app: URL? = nil, opened: @escaping @MainActor @Sendable () -> Void = {}) {
     let finished: @Sendable (NSRunningApplication?, (any Error)?) -> Void = { _, error in
         let failure = error?.localizedDescription
         Task { @MainActor in
             guard let failure else { return opened() }
-            log("can't open \(file.path): \(failure)")
-            showAlert("Can't open \(FileManager.default.displayName(atPath: file.path))", failure)
+            if url.isFileURL {
+                log("can't open \(url.path): \(failure)")
+                showAlert("Can't open \(FileManager.default.displayName(atPath: url.path))", failure)
+            } else {
+                // The host only: the rest can be a search, and the log is kept on disk.
+                let host = url.host() ?? "the web address"
+                log("can't open \(host): \(failure)")
+                showAlert("Can't open \(host)", failure)
+            }
         }
     }
     let configuration = NSWorkspace.OpenConfiguration()
     if let app {
-        NSWorkspace.shared.open([file], withApplicationAt: app, configuration: configuration, completionHandler: finished)
+        NSWorkspace.shared.open([url], withApplicationAt: app, configuration: configuration, completionHandler: finished)
     } else {
-        NSWorkspace.shared.open(file, configuration: configuration, completionHandler: finished)
+        NSWorkspace.shared.open(url, configuration: configuration, completionHandler: finished)
     }
 }
 
@@ -810,6 +825,7 @@ extension Icon {
         case let .file(path): fileIcon(path, side: side)
         case .calculator: symbol("plus.forwardslash.minus")
         case .token: symbol("key.horizontal")
+        case .search: symbol("magnifyingglass")
         }
     }
 
@@ -877,12 +893,12 @@ func log(_ message: String) {
     try? FileHandle.standardError.write(contentsOf: Data((message + "\n").utf8))
 }
 
-// `Launcher config init` and `Launcher login on`, from the app's own binary, so there's no separate
+// `Launcher config init`, `Launcher secret set kagi` and `Launcher login on`, from the app's own binary, so there's no separate
 // tool to build and sign.
 do {
     // A block, so `arguments` stays local rather than a global every file could see.
     let arguments = Array(CommandLine.arguments.dropFirst())
-    if let status = loginCommand(arguments) ?? configCommand(arguments: arguments) {
+    if let status = loginCommand(arguments) ?? runCommand(arguments: arguments) {
         exit(status)
     }
 }
