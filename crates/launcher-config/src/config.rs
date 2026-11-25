@@ -25,6 +25,7 @@ pub struct Config {
     /// launch at login and quit. Off by default, since showing it takes about 2 MB.
     pub menu_bar: bool,
     pub plugins: EnabledPlugins,
+    pub kagi: Kagi,
     /// The window actions with a hotkey, in `DEFAULT_BINDINGS`' order.
     #[serde(deserialize_with = "window_bindings")]
     pub window: Vec<Binding>,
@@ -42,6 +43,7 @@ impl Default for Config {
             },
             menu_bar: false,
             plugins: EnabledPlugins::default(),
+            kagi: Kagi::default(),
             window: DEFAULT_BINDINGS.to_vec(),
         }
     }
@@ -54,6 +56,7 @@ pub struct EnabledPlugins {
     pub calculator: bool,
     pub jwt: bool,
     pub apps: bool,
+    pub kagi: bool,
 }
 
 impl Default for EnabledPlugins {
@@ -62,8 +65,56 @@ impl Default for EnabledPlugins {
             calculator: true,
             jwt: true,
             apps: true,
+            kagi: true,
         }
     }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Deserialize)]
+#[cfg_attr(test, derive(serde::Serialize))]
+#[serde(default, deny_unknown_fields)]
+pub struct Kagi {
+    /// The word that starts a search, followed by a space, so nothing else typed reaches Kagi.
+    #[serde(deserialize_with = "prefix")]
+    pub prefix: String,
+    /// How long typing must pause, in milliseconds, before a search goes to Kagi's API, which
+    /// charges for each.
+    #[serde(deserialize_with = "pause_ms")]
+    pub pause_ms: u64,
+}
+
+impl Default for Kagi {
+    fn default() -> Self {
+        Self {
+            prefix: "k".into(),
+            pause_ms: 400,
+        }
+    }
+}
+
+/// Shorter pauses search half-typed words, each a paid search; longer ones seem broken.
+const PAUSES_MS: std::ops::RangeInclusive<u64> = 100..=5000;
+
+fn pause_ms<'de, D: Deserializer<'de>>(deserializer: D) -> Result<u64, D::Error> {
+    let pause = u64::deserialize(deserializer)?;
+    if !PAUSES_MS.contains(&pause) {
+        return Err(de::Error::custom(format!(
+            "a pause of {pause} ms: use {} to {}",
+            PAUSES_MS.start(),
+            PAUSES_MS.end()
+        )));
+    }
+    Ok(pause)
+}
+
+fn prefix<'de, D: Deserializer<'de>>(deserializer: D) -> Result<String, D::Error> {
+    let prefix = String::deserialize(deserializer)?;
+    if prefix.is_empty() || prefix.contains(char::is_whitespace) {
+        return Err(de::Error::custom(format!(
+            "`{prefix}` isn't one word: a prefix needs at least a character and no spaces"
+        )));
+    }
+    Ok(prefix)
 }
 
 fn hotkey<'de, D: Deserializer<'de>>(deserializer: D) -> Result<Hotkey, D::Error> {
@@ -330,6 +381,9 @@ mod tests {
             menu_bar = true
             [plugins]
             jwt = false
+            [kagi]
+            prefix = "kagi"
+            pause_ms = 1000
             [window]
             left_half = "ctrl+alt+shift+left"
             restore = "none"
@@ -346,6 +400,14 @@ mod tests {
                 calculator: true,
                 jwt: false,
                 apps: true,
+                kagi: true,
+            }
+        );
+        assert_eq!(
+            config.kagi,
+            Kagi {
+                prefix: "kagi".into(),
+                pause_ms: 1000,
             }
         );
         assert_eq!(
@@ -384,8 +446,18 @@ mod tests {
         );
         assert_eq!(
             error("[plugins]\ncalculater = false\n"),
-            "line 2: unknown field `calculater`, expected one of `calculator`, `jwt`, `apps`"
+            "line 2: unknown field `calculater`, expected one of `calculator`, `jwt`, `apps`, `kagi`"
         );
+        assert_eq!(
+            error("[kagi]\nprefix = \"k g\"\n"),
+            "line 2: `k g` isn't one word: a prefix needs at least a character and no spaces"
+        );
+        assert!(error("[kagi]\nprefix = \"\"\n").starts_with("line 2: `` isn't one word"));
+        assert_eq!(
+            error("[kagi]\npause_ms = 0\n"),
+            "line 2: a pause of 0 ms: use 100 to 5000"
+        );
+        assert!(parse("[kagi]\npause_ms = 5000\n").is_ok());
         let message = error("hotkey = 3");
         assert!(message.starts_with("line 1: invalid type"), "{message}");
         let message = error("hotkey = \"alt+space");
@@ -479,6 +551,7 @@ mod tests {
             "hotkey": config.hotkey.to_string(),
             "menu_bar": config.menu_bar,
             "plugins": serde_json::to_value(config.plugins)?,
+            "kagi": serde_json::to_value(&config.kagi)?,
             "window": window,
         });
         let schema = schema()?;

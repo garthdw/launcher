@@ -47,6 +47,7 @@ pub enum Icon {
     File(PathBuf),
     Calculator,
     Token,
+    Search,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -59,6 +60,8 @@ pub struct Section {
 pub enum Action {
     Copy(String),
     Open(PathBuf),
+    /// A web address, opened in the browser.
+    OpenUrl(String),
     /// The item only says something, such as that work is under way; the shell draws it muted.
     Nothing,
 }
@@ -215,7 +218,8 @@ fn config_directory_from(moved: Option<OsString>, home: Option<PathBuf>) -> Opti
     }
 }
 
-/// The macOS bundle identifier, as `scripts/bundle` sets it, which names the app's cache folder.
+/// The macOS bundle identifier, as `scripts/bundle` sets it, which names the app's cache folder
+/// and keychain items.
 pub const BUNDLE_IDENTIFIER: &str = "dev.dewet.launcher";
 
 /// Where downloads that can be fetched again live: the platform's cache folder, which backups
@@ -254,11 +258,15 @@ pub trait Plugin {
     /// Heads the plugin's results.
     fn name(&self) -> &'static str;
 
-    /// Runs on the UI thread for every keystroke, so it must stay well under a frame.
+    /// Runs on the UI thread for every keystroke, so it must stay well under a frame. The query
+    /// is trimmed, and empty once cleared.
     fn query(&mut self, query: &str) -> Vec<Item>;
 
     /// The shell ran `action` from one of this plugin's items.
     fn ran(&mut self, _action: &Action) {}
+
+    /// The panel hid, so work for the query it showed would go unseen.
+    fn hidden(&mut self) {}
 }
 
 /// Which plugin produced an item. Only `Plugins::query` makes one, so it always names a plugin.
@@ -295,13 +303,10 @@ impl Plugins {
     }
 
     /// Each plugin's items, the group with the most relevant item first; ties keep the plugins'
-    /// order. Runs on the UI thread for every keystroke, so every plugin must stay well under a
-    /// frame.
+    /// order; none for an empty query, though plugins still hear it. Runs on the UI thread for
+    /// every keystroke, so every plugin must stay well under a frame.
     pub fn query(&mut self, query: &str) -> Vec<Group> {
         let query = query.trim();
-        if query.is_empty() {
-            return Vec::new();
-        }
         let mut groups: Vec<Group> = self
             .0
             .iter_mut()
@@ -320,8 +325,19 @@ impl Plugins {
                 })
             })
             .collect();
+        // Asked all the same, so plugins can drop work for the query before.
+        if query.is_empty() {
+            return Vec::new();
+        }
         groups.sort_by_key(|group| Reverse(group.items.iter().map(|item| item.relevance).max()));
         groups
+    }
+
+    /// The shell hid the panel, or is about to run an item's action; every plugin hears of it.
+    pub fn hidden(&mut self) {
+        for plugin in self.0.iter_mut().flatten() {
+            plugin.hidden();
+        }
     }
 
     /// The shell ran `action` from an item `plugin` produced; only that plugin hears of it.
@@ -458,6 +474,43 @@ mod tests {
             ]
         );
         assert!(plugins.query("   ").is_empty());
+    }
+
+    /// Records what it's asked, answering every query, even an empty one.
+    #[derive(Default)]
+    struct Listener(Arc<Mutex<Vec<String>>>);
+
+    impl Plugin for Listener {
+        fn name(&self) -> &'static str {
+            "listener"
+        }
+
+        fn query(&mut self, query: &str) -> Vec<Item> {
+            if let Ok(mut heard) = self.0.lock() {
+                heard.push(format!("query {query:?}"));
+            }
+            vec![Item::notice(query, "", Icon::Calculator, 50)]
+        }
+
+        fn hidden(&mut self) {
+            if let Ok(mut heard) = self.0.lock() {
+                heard.push("hidden".into());
+            }
+        }
+    }
+
+    #[test]
+    fn an_empty_query_reaches_plugins_but_shows_nothing() {
+        let listener = Listener::default();
+        let heard = listener.0.clone();
+        let mut plugins = Plugins::new(vec![Box::new(listener)]);
+        assert!(plugins.query("  ").is_empty());
+        plugins.hidden();
+        assert!(
+            heard
+                .lock()
+                .is_ok_and(|heard| *heard == ["query \"\"", "hidden"])
+        );
     }
 
     #[test]

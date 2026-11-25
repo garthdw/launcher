@@ -82,6 +82,8 @@ dependencies = [
  "http",
  "log",
  "rustls",
+ "serde",
+ "serde_json",
  "url",
  "webpki-roots 0.26.11",
 ]
@@ -785,6 +787,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "launcher-kagi"
+version = "0.1.0"
+dependencies = [
+ "attohttpc",
+ "launcher-core",
+ "launcher-secret",
+ "serde",
+ "serde_json",
+ "url",
+]
+
+[[package]]
 name = "launcher-plugins"
 version = "0.1.0"
 dependencies = [
@@ -793,6 +807,18 @@ dependencies = [
  "launcher-config",
  "launcher-core",
  "launcher-jwt",
+ "launcher-kagi",
+ "launcher-secret",
+]
+
+[[package]]
+name = "launcher-secret"
+version = "0.1.0"
+dependencies = [
+ "launcher-core",
+ "libc",
+ "objc2-core-foundation",
+ "objc2-security",
 ]
 
 [[package]]
@@ -1022,6 +1048,15 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "583300ad934cba24ff5292aee751ecc070f7ca6b39a574cc21b7b5e588e06a0b"
 dependencies = [
  "libc",
+ "objc2-core-foundation",
+]
+
+[[package]]
+name = "objc2-security"
+version = "0.3.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "709fe137109bd1e8b5a99390f77a7d8b2961dafc1a1c5db8f2e60329ad6d895a"
+dependencies = [
  "objc2-core-foundation",
 ]
 

@@ -1,0 +1,17 @@
+[package]
+name = "launcher-secret"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[lib]
+path = "src/secret.rs"
+
+[dependencies]
+libc.workspace = true
+
+[target.'cfg(target_os = "macos")'.dependencies]
+launcher-core.workspace = true
+objc2-core-foundation = { workspace = true, features = ["CFData", "CFDictionary", "CFNumber"] }
+objc2-security.workspace = true

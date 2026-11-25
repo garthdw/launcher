@@ -3,11 +3,14 @@
 //! counting allocator sees only this test.
 
 use std::alloc::{GlobalAlloc, Layout, System};
+use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
+use std::time::Duration;
 
 use launcher_calc::Calc;
 use launcher_core::Plugins;
 use launcher_jwt::Jwt;
+use launcher_kagi::Kagi;
 
 /// Raise only deliberately, saying why. Measured at 2.0 MB.
 const BUDGET: usize = 2560 * 1024;
@@ -61,7 +64,16 @@ fn type_script(plugins: &mut Plugins) {
 #[test]
 fn plugins_stay_in_budget_and_dont_grow() -> Result<(), Box<dyn std::error::Error>> {
     let before = LIVE.load(Ordering::Relaxed);
-    let mut plugins = Plugins::new(vec![Box::new(Calc::new()?), Box::new(Jwt)]);
+    // Kagi idle, as no query starts with its prefix.
+    let mut plugins = Plugins::new(vec![
+        Box::new(Calc::new()?),
+        Box::new(Jwt),
+        Box::new(Kagi::new(
+            "k".into(),
+            Duration::from_millis(400),
+            Arc::new(|| {}),
+        )),
+    ]);
     // The first script fills what's built once, such as numbat's currency names.
     type_script(&mut plugins);
     let started = LIVE.load(Ordering::Relaxed) - before;

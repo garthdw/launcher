@@ -1,11 +1,24 @@
 //! The plugins every shell runs and the settings that choose them, so a shell only draws
 //! results, registers hotkeys and runs actions.
 
+use std::time::Duration;
+
 use launcher_apps::Apps;
 use launcher_calc::Calc;
 use launcher_config::Config;
 use launcher_core::{Plugin, Plugins, ResultsChanged, cache_directory, log};
 use launcher_jwt::Jwt;
+use launcher_kagi::Kagi;
+
+/// The secrets plugins read, which the `secret` command sets.
+const SECRETS: [&str; 1] = [launcher_kagi::SECRET];
+
+/// Runs the commands every shell shares, such as `config init` and `secret set kagi`, before the
+/// shell starts its UI: `None` when `arguments` aren't one, else the exit status.
+pub fn run_command(arguments: &[String]) -> Option<i32> {
+    launcher_config::run_command(arguments)
+        .or_else(|| launcher_secret::run_command(arguments, &SECRETS))
+}
 
 /// The plugins, in the order their results show when equally relevant; each has a place in
 /// `Plugins`, empty while it's off.
@@ -14,9 +27,10 @@ enum Place {
     Calculator,
     Jwt,
     Apps,
+    Kagi,
 }
 
-const PLACES: [Place; 3] = [Place::Calculator, Place::Jwt, Place::Apps];
+const PLACES: [Place; 4] = [Place::Calculator, Place::Jwt, Place::Apps, Place::Kagi];
 
 /// Everything a plugin reads from the settings, and all `start` has to go on, so a plugin
 /// restarts whenever any of it changes.
@@ -25,6 +39,7 @@ enum PluginSettings {
     Calculator,
     Jwt,
     Apps,
+    Kagi(launcher_config::Kagi),
 }
 
 impl Place {
@@ -35,6 +50,9 @@ impl Place {
             Self::Calculator => enabled.calculator.then_some(PluginSettings::Calculator),
             Self::Jwt => enabled.jwt.then_some(PluginSettings::Jwt),
             Self::Apps => enabled.apps.then_some(PluginSettings::Apps),
+            Self::Kagi => enabled
+                .kagi
+                .then(|| PluginSettings::Kagi(config.kagi.clone())),
         }
     }
 }
@@ -53,6 +71,11 @@ impl PluginSettings {
             }
             Self::Jwt => Box::new(Jwt),
             Self::Apps => Box::new(Apps::start(changed.clone())),
+            Self::Kagi(settings) => Box::new(Kagi::new(
+                settings.prefix,
+                Duration::from_millis(settings.pause_ms),
+                changed.clone(),
+            )),
         }
     }
 }
@@ -229,6 +252,29 @@ mod tests {
         assert_eq!(
             answering(&mut launcher, "anything"),
             ["PluginId(0)", "PluginId(2)"]
+        );
+    }
+
+    #[test]
+    fn a_plugin_restarts_when_its_own_settings_change() {
+        let mut launcher = Launcher::with(
+            Plugins::new(vec![
+                Box::new(Echo),
+                Box::new(Echo),
+                Box::new(Echo),
+                Box::new(Echo),
+            ]),
+            Config::default(),
+            None,
+            Arc::new(|| {}),
+        );
+        let mut kagi_prefix = Config::default();
+        kagi_prefix.kagi.prefix = "kagi".into();
+        assert!(launcher.apply(Ok(kagi_prefix)));
+        assert_eq!(
+            answering(&mut launcher, "anything"),
+            ["PluginId(0)", "PluginId(1)", "PluginId(2)"],
+            "Kagi, in place of the last echo, answers only its prefix"
         );
     }
 
