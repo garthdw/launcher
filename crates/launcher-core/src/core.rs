@@ -24,6 +24,21 @@ pub struct Item {
     pub relevance: u8,
 }
 
+impl Item {
+    /// A muted row that only says something, such as that work is under way or why there's no
+    /// answer.
+    pub fn notice(title: &str, subtitle: &str, icon: Icon, relevance: u8) -> Self {
+        Self {
+            title: title.into(),
+            subtitle: subtitle.into(),
+            icon,
+            action: Action::Nothing,
+            detail: Vec::new(),
+            relevance,
+        }
+    }
+}
+
 /// What shows beside an item's title. Kinds rather than images keep the core free of platform
 /// code: each shell draws them its own way, as macOS does with SF Symbols.
 #[derive(Clone, Debug, PartialEq)]
@@ -200,12 +215,15 @@ fn config_directory_from(moved: Option<OsString>, home: Option<PathBuf>) -> Opti
     }
 }
 
+/// The macOS bundle identifier, as `scripts/bundle` sets it, which names the app's cache folder.
+pub const BUNDLE_IDENTIFIER: &str = "dev.dewet.launcher";
+
 /// Where downloads that can be fetched again live: the platform's cache folder, which backups
-/// skip. On macOS it is named for the bundle identifier, as `scripts/bundle` sets it.
+/// skip. On macOS it is named for the bundle identifier.
 pub fn cache_directory() -> Option<PathBuf> {
     let home = std::env::home_dir()?;
     Some(if cfg!(target_os = "macos") {
-        home.join("Library/Caches/dev.dewet.launcher")
+        home.join("Library/Caches").join(BUNDLE_IDENTIFIER)
     } else {
         home.join(".cache/launcher")
     })

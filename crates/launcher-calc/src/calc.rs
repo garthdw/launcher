@@ -118,14 +118,7 @@ impl Calc {
 
 /// A muted row saying why a calculation has no answer.
 fn notice(title: &str) -> Item {
-    Item {
-        title: title.into(),
-        subtitle: String::new(),
-        icon: Icon::Calculator,
-        action: Action::Nothing,
-        detail: Vec::new(),
-        relevance: CALCULATION,
-    }
+    Item::notice(title, "", Icon::Calculator, CALCULATION)
 }
 
 /// A prelude context, with currencies at the rates numbat holds when `currencies` is set.
