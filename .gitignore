@@ -3,5 +3,3 @@
 /macos/.build
 /macos/Sources/launcher_ffiFFI
 /macos/Sources/Launcher/Generated
-# Written when numbat's own tests run from its vendored copy.
-/vendor/numbat/numbat/Cargo.lock

@@ -1,18 +1,18 @@
+mod expression;
 mod rates;
+mod units;
 
+use std::cell::OnceCell;
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, LazyLock, Mutex, PoisonError, Weak};
+use std::sync::{Arc, Mutex, MutexGuard, PoisonError, Weak};
 use std::thread;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use jiff::civil::Date;
 use launcher_core::{Action, Icon, Item, Plugin, ResultsChanged, Section, log};
-use numbat::markup::plain_text_format;
-use numbat::module_importer::{BuiltinModuleImporter, ModuleImporter};
-use numbat::pretty_print::PrettyPrint;
-use numbat::resolver::{CodeSource, ModulePath};
-use numbat::value::Value;
-use numbat::{Context, FormatOptions, InterpreterResult, NumbatError, Statement};
+
+use expression::{Answer, Environment};
+use units::{Error, Money, Rates};
 
 pub const NAME: &str = "Calculator";
 /// How often to check whether the cached rates are a day old. Hourly rather than sleeping a
@@ -26,190 +26,83 @@ const CALCULATION: u8 = 90;
 /// A word such as `pi` may as well be the start of an app's name: below an app with a word
 /// starting with it (Pixelmator), above looser matches (Preview).
 const CONSTANT: u8 = 80;
+const SIGNIFICANT_DIGITS: i32 = 6;
+const DATE_FORMAT: &str = "%A, %-d %B %Y";
 
 pub struct Calc {
-    numbat: Numbat,
-    rates: Rates,
-    pending: Arc<Mutex<Pending>>,
-}
-
-/// numbat's context, built in the background.
-enum Numbat {
-    Building,
-    Ready(Box<Context>),
-    /// The prelude didn't build, which only a broken numbat does.
-    Failed,
+    rates: Arc<Mutex<ExchangeRates>>,
 }
 
 /// What the calculator has of exchange rates.
-enum Rates {
+enum ExchangeRates {
     Loading,
     Unavailable,
-    Loaded(Date),
+    Loaded(Box<Rates>, Date),
 }
 
-/// From the thread that keeps exchange rates current, not yet taken. Each `publish` assigns one
-/// field, so a panic while it's locked can't leave it half-written: it's used even poisoned.
-#[derive(Default)]
-struct Pending {
-    /// The newest context, with currencies at the rates of the date if any. Only the newest, so
-    /// contexts don't pile up while no query comes to take them.
-    context: Option<(Box<Context>, Option<Date>)>,
-    /// No rates could be fetched or found in the cache.
-    rates_unavailable: bool,
-    /// The first context didn't build.
-    numbat_failed: bool,
+/// Only the thread keeping rates current writes them, assigning whole values, so a panic while
+/// they're locked can't leave them half-written: they're used even poisoned.
+fn lock(rates: &Mutex<ExchangeRates>) -> MutexGuard<'_, ExchangeRates> {
+    rates.lock().unwrap_or_else(PoisonError::into_inner)
+}
+
+impl Default for Calc {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl Calc {
     /// A calculator without exchange rates: currencies say rates are loading.
-    pub fn new() -> Result<Self, Box<NumbatError>> {
-        Ok(Self {
-            numbat: Numbat::Ready(Box::new(context(false)?)),
-            rates: Rates::Loading,
-            pending: Arc::default(),
-        })
+    pub fn new() -> Self {
+        Self {
+            rates: Arc::new(Mutex::new(ExchangeRates::Loading)),
+        }
     }
 
-    /// Builds the calculator in the background, as numbat's prelude takes a good part of
-    /// launch, then loads exchange rates, from the cache in `directory` or the ECB, and keeps
-    /// them a day old at most. Calls `changed` whenever the answers change.
+    /// Loads exchange rates in the background, from the cache in `directory` or the ECB, and
+    /// keeps them a day old at most. Calls `changed` whenever the answers change.
     pub fn start(directory: PathBuf, changed: ResultsChanged) -> Self {
-        let calc = Self {
-            numbat: Numbat::Building,
-            rates: Rates::Loading,
-            pending: Arc::default(),
-        };
-        let pending = Arc::downgrade(&calc.pending);
-        thread::spawn(move || keep_rates_current(&directory, &pending, &*changed));
+        let calc = Self::new();
+        let rates = Arc::downgrade(&calc.rates);
+        thread::spawn(move || keep_rates_current(&directory, &rates, &*changed));
         calc
     }
-
-    fn take_update(&mut self) {
-        let pending =
-            std::mem::take(&mut *self.pending.lock().unwrap_or_else(PoisonError::into_inner));
-        if pending.rates_unavailable {
-            self.rates = Rates::Unavailable;
-        }
-        if pending.numbat_failed {
-            self.numbat = Numbat::Failed;
-        }
-        if let Some((context, date)) = pending.context {
-            self.numbat = Numbat::Ready(context);
-            if let Some(date) = date {
-                self.rates = Rates::Loaded(date);
-            }
-        }
-    }
-
-    /// Says why a query that failed for want of rates has no result.
-    fn rates_missing(&self, query: &str) -> Option<Item> {
-        let title = match self.rates {
-            Rates::Loading => "Loading exchange rates…",
-            Rates::Unavailable => "Exchange rates unavailable",
-            Rates::Loaded(_) => return None,
-        };
-        mentions_currency(query).then(|| notice(title))
-    }
 }
 
-/// A muted row saying why a calculation has no answer.
-fn notice(title: &str) -> Item {
-    Item::notice(title, "", Icon::Calculator, CALCULATION)
-}
-
-/// A prelude context, with currencies at the rates numbat holds when `currencies` is set.
-/// numbat's on-demand currency loading stays off: before rates load it would find none, and
-/// after, the module loads here, off the UI thread.
-fn context(currencies: bool) -> Result<Context, Box<NumbatError>> {
-    let mut context = Context::new(BuiltinModuleImporter::default());
-    context
-        .interpret("use prelude", CodeSource::Internal)
-        .map(drop)?;
-    if currencies {
-        context
-            .interpret("use units::currencies", CodeSource::Internal)
-            .map(drop)?;
-    }
-    Ok(context)
-}
-
-/// Leaves `update` in `pending` for the calculator to take.
-fn publish(pending: &Mutex<Pending>, update: impl FnOnce(&mut Pending)) {
-    update(&mut pending.lock().unwrap_or_else(PoisonError::into_inner));
-}
-
-/// Publishes `update` and says the answers changed; false once the calculator is gone.
-fn deliver(
-    pending: &Weak<Mutex<Pending>>,
-    changed: &dyn Fn(),
-    update: impl FnOnce(&mut Pending),
-) -> bool {
-    let Some(pending) = pending.upgrade() else {
+/// Assigns `update` and says the answers changed; false once the calculator is gone.
+fn deliver(rates: &Weak<Mutex<ExchangeRates>>, changed: &dyn Fn(), update: ExchangeRates) -> bool {
+    let Some(rates) = rates.upgrade() else {
         return false;
     };
-    publish(&pending, update);
+    *lock(&rates) = update;
     changed();
     true
 }
 
-/// Builds the first context, then runs until the calculator, which holds `pending`, is gone.
-fn keep_rates_current(directory: &Path, pending: &Weak<Mutex<Pending>>, changed: &dyn Fn()) {
-    // Rates under a day old load with the prelude, so launch builds one context rather than two.
-    let mut loaded = rates::fresh(directory).map(|(xml, date)| {
-        Context::set_exchange_rates(&xml);
-        date
-    });
-    match context(loaded.is_some()) {
-        Ok(context) => {
-            if !deliver(pending, changed, |pending| {
-                pending.context = Some((Box::new(context), loaded));
-            }) {
-                return;
-            }
-        }
-        Err(error) => {
-            log!("calculator unavailable: {error}");
-            deliver(pending, changed, |pending| pending.numbat_failed = true);
-            return;
-        }
-    }
+/// Runs until the calculator, which holds `rates`, is gone.
+fn keep_rates_current(directory: &Path, rates: &Weak<Mutex<ExchangeRates>>, changed: &dyn Fn()) {
+    let mut loaded = None;
     let mut told_unavailable = false;
     loop {
-        // Before fetching, and again before building a context, as fetching takes a while: the
-        // calculator may have gone, as when settings turn it off.
-        if pending.strong_count() == 0 {
+        // The calculator may have gone while fetching, as when settings turn it off.
+        if rates.strong_count() == 0 {
             return;
         }
-        let current = rates::current(directory);
-        if pending.strong_count() == 0 {
-            return;
-        }
-        let delivered = match current {
-            Some((xml, date)) if loaded != Some(date) => {
-                let started = Instant::now();
-                Context::set_exchange_rates(&xml);
-                match context(true) {
-                    Ok(context) => {
-                        log!(
-                            "exchange rates of {date} loaded in {} ms",
-                            started.elapsed().as_millis()
-                        );
-                        loaded = Some(date);
-                        deliver(pending, changed, |pending| {
-                            pending.context = Some((Box::new(context), loaded));
-                        })
-                    }
-                    Err(error) => {
-                        log!("could not load exchange rates: {error}");
-                        true
-                    }
-                }
+        let delivered = match rates::current(directory) {
+            Some((current, date)) if loaded != Some(date) => {
+                log!("exchange rates of {date} loaded");
+                loaded = Some(date);
+                deliver(
+                    rates,
+                    changed,
+                    ExchangeRates::Loaded(Box::new(current), date),
+                )
             }
             // Only before any loaded: older rates beat none.
             None if loaded.is_none() && !told_unavailable => {
                 told_unavailable = true;
-                deliver(pending, changed, |pending| pending.rates_unavailable = true)
+                deliver(rates, changed, ExchangeRates::Unavailable)
             }
             _ => true,
         };
@@ -224,64 +117,9 @@ fn keep_rates_current(directory: &Path, pending: &Weak<Mutex<Pending>>, changed:
     }
 }
 
-/// The names numbat's currency module gives currencies: units, their aliases and symbols.
-/// Read once, when a query first needs them.
-static CURRENCY_NAMES: LazyLock<Vec<String>> = LazyLock::new(currency_names);
-
-fn currency_names() -> Vec<String> {
-    let path = ModulePath(vec!["units".into(), "currencies".into()]);
-    let Some((module, _)) = BuiltinModuleImporter::default().import(&path) else {
-        log!("numbat has no currency module");
-        return Vec::new();
-    };
-    module
-        .lines()
-        .map(str::trim)
-        .flat_map(|line| {
-            let names = if let Some(aliases) = line.strip_prefix("@aliases(") {
-                aliases.trim_end_matches(')')
-            } else if let Some(unit) = line.strip_prefix("unit ") {
-                unit.split(':').next().unwrap_or_default()
-            } else {
-                ""
-            };
-            names
-                .split(',')
-                .filter_map(|name| name.split(':').next())
-                .map(str::trim)
-                .filter(|name| !name.is_empty())
-                .map(str::to_owned)
-                .collect::<Vec<_>>()
-        })
-        .collect()
-}
-
-/// Whether `query` names a currency other than the euro, whose rates must load first.
-fn mentions_currency(query: &str) -> bool {
-    let is_word = |c: char| c.is_alphanumeric() || c == '_';
-    CURRENCY_NAMES.iter().any(|name| {
-        if name.chars().all(is_word) {
-            // "100USD" is a number and a currency to numbat.
-            query
-                .split(|c| !is_word(c))
-                .any(|word| word.trim_start_matches(|c: char| c.is_ascii_digit()) == name)
-        } else {
-            query.contains(name.as_str())
-        }
-    })
-}
-
-/// Whether `value` is in money, whose base unit is the euro.
-fn is_money(value: &Value) -> bool {
-    let Value::Quantity(quantity) = value else {
-        return false;
-    };
-    quantity
-        .unit()
-        .to_base_unit_representation()
-        .0
-        .iter()
-        .any(|factor| factor.unit_id.name == "euro")
+/// A muted row saying why a calculation has no answer.
+fn notice(title: &str) -> Item {
+    Item::notice(title, "", Icon::Calculator, CALCULATION)
 }
 
 impl Plugin for Calc {
@@ -290,81 +128,89 @@ impl Plugin for Calc {
     }
 
     fn query(&mut self, query: &str) -> Vec<Item> {
-        self.take_update();
-        let has_number = query.chars().any(|c| c.is_ascii_digit());
+        let has_number = query.chars().any(|character| character.is_ascii_digit());
         // A lone letter such as `e` is more likely the start of an app's name than a constant.
         if !has_number && query.chars().nth(1).is_none() {
             return Vec::new();
         }
-        // numbat refuses imports, but only after `use all` has parsed every module. `ans` and `_`
-        // name the last result, which every keystroke replaces, so they'd answer with a
-        // half-typed query's.
-        if query
-            .split(|c: char| !c.is_alphanumeric() && c != '_')
-            .any(|word| matches!(word, "use" | "ans" | "_"))
-        {
-            return Vec::new();
-        }
-        let context = match &mut self.numbat {
-            Numbat::Ready(context) => context,
-            Numbat::Building => return Vec::new(),
-            Numbat::Failed if has_number => return vec![notice("Calculator unavailable")],
-            Numbat::Failed => return Vec::new(),
+        // Held for the query; the thread keeping rates current writes them once a day.
+        let exchange_rates = lock(&self.rates);
+        let rates = match &*exchange_rates {
+            ExchangeRates::Loaded(rates, _) => Some(&**rates),
+            ExchangeRates::Loading | ExchangeRates::Unavailable => None,
         };
-        let rewritten = respell(&x_as_times(query), &SPELLINGS);
-        let newton_metres;
-        let answer = match evaluate(context, &rewritten) {
-            Some(answer) => Some(answer),
-            // `nm` is nanometres, unless that leaves the query meaningless, as in
-            // `100 nm to ftlb`.
-            None => {
-                newton_metres = respell(&rewritten, &[("nm", "N m")]);
-                (newton_metres != rewritten)
-                    .then(|| evaluate(context, &newton_metres))
-                    .flatten()
-            }
+        let evaluate = |reading: &expression::Reading, newton_metres| {
+            reading.evaluate(&Environment {
+                rates,
+                newton_metres,
+                now: OnceCell::new(),
+            })
         };
-        let Some((statements, value)) = answer else {
-            if !has_number {
-                return Vec::new();
+        let answer = expression::read(query).and_then(|reading| {
+            let answer = match evaluate(&reading, false) {
+                // `nm` is nanometres, unless that leaves the query meaningless, as in
+                // `100 nm to ftlb`.
+                Err(Error::Invalid) if query.contains("nm") => evaluate(&reading, true),
+                answer => answer,
+            };
+            Ok((reading, answer?))
+        });
+        let (reading, answer) = match answer {
+            Ok(answer) => answer,
+            Err(Error::RatesMissing) if has_number => {
+                return vec![notice(match *exchange_rates {
+                    ExchangeRates::Unavailable => "Exchange rates unavailable",
+                    _ => "Loading exchange rates…",
+                })];
             }
-            return self.rates_missing(query).into_iter().collect();
+            Err(_) => return Vec::new(),
         };
-        // Bare words such as an app name are often valid numbat ("m", "day"), but echoing them
-        // back as "1 m" is noise in a launcher. Only a plain number, as `pi` is, says something.
-        let relevance = match &value {
-            // A row that looks empty.
-            Value::String(text)
-                if text
-                    .chars()
-                    .all(|character| character.is_whitespace() || character.is_control()) =>
-            {
-                return Vec::new();
-            }
+        // Bare words such as an app name are often units ("m", "day"), but echoing them back as
+        // "1 m" is noise in a launcher. Only a plain number, as `pi` is, says something.
+        let relevance = match &answer {
             _ if has_number => CALCULATION,
-            Value::Quantity(quantity) if quantity.unit().is_scalar() => CONSTANT,
+            Answer::Quantity(quantity) if quantity.is_plain() => CONSTANT,
             _ => return Vec::new(),
         };
-        // Digit separators read well but break pasting into most other apps.
-        let unseparated = FormatOptions {
-            digit_separator: String::new(),
-            ..FormatOptions::default()
+        let mut subtitle = String::new();
+        let (title, copied, precise) = match answer {
+            Answer::Text(text) => (text.clone(), text.clone(), text),
+            Answer::Date(date) => {
+                let iso = date.to_string();
+                (date.strftime(DATE_FORMAT).to_string(), iso.clone(), iso)
+            }
+            Answer::Time(time) => (
+                time.strftime(&format!("{DATE_FORMAT}, %H:%M")).to_string(),
+                time.strftime("%Y-%m-%dT%H:%M:%S%:z").to_string(),
+                time.strftime("%Y-%m-%d %H:%M:%S %Z (%:z)").to_string(),
+            ),
+            Answer::Quantity(quantity) => {
+                if let ExchangeRates::Loaded(_, date) = &*exchange_rates
+                    && quantity.is_money()
+                {
+                    subtitle = format!("ECB rates of {}", date.strftime("%-d %b"));
+                }
+                if let Some(money) = quantity.as_money() {
+                    amounts(quantity.magnitude, &money)
+                } else {
+                    let unit = if quantity.is_plain() {
+                        String::new()
+                    } else {
+                        format!(" {}", quantity.unit_name())
+                    };
+                    let shown = rounded(quantity.magnitude);
+                    (
+                        format!("{shown}{unit}"),
+                        // Digit separators read well but break pasting into most other apps.
+                        format!("{}{unit}", shown.replace('_', "")),
+                        format!("{}{unit}", precise(quantity.magnitude)),
+                    )
+                }
+            }
         };
-        let copied = plain_text(&value, &unseparated);
-        let precise = plain_text(
-            &value,
-            &FormatOptions {
-                significant_digits: 17,
-                ..unseparated
-            },
-        );
         let mut detail = vec![Section {
             title: "Input".into(),
-            text: statements
-                .iter()
-                .map(|statement| plain_text_format(&statement.pretty_print(), false))
-                .collect::<Vec<_>>()
-                .join("\n"),
+            text: reading.to_string(),
         }];
         if precise != copied {
             detail.push(Section {
@@ -372,14 +218,8 @@ impl Plugin for Calc {
                 text: precise,
             });
         }
-        let subtitle = match self.rates {
-            Rates::Loaded(date) if is_money(&value) => {
-                format!("ECB rates of {}", date.strftime("%-d %b"))
-            }
-            _ => String::new(),
-        };
         vec![Item {
-            title: plain_text(&value, &FormatOptions::default()),
+            title,
             subtitle,
             icon: Icon::Calculator,
             action: Action::Copy(copied),
@@ -389,106 +229,100 @@ impl Plugin for Calc {
     }
 }
 
-/// The value of `code`, and the statements numbat read it as; `None` if it has none.
-fn evaluate<'code>(
-    context: &mut Context,
-    code: &'code str,
-) -> Option<(Vec<Statement<'code>>, Value)> {
-    match context.interpret_and_forget(code, CodeSource::Text) {
-        Ok((statements, InterpreterResult::Value(value))) => Some((statements, value)),
-        _ => None,
-    }
-}
-
-/// How numbat's REPL shows a value, unlike `Display`, which writes dates as `datetime("…")`.
-/// Strings, such as `2^70 -> bin` gives, drop the REPL's quotes: they're the answer, not code.
-fn plain_text(value: &Value, options: &FormatOptions) -> String {
-    if let Value::String(text) = value {
-        return text.to_string();
-    }
-    plain_text_format(&value.pretty_print_with(options), false)
-        .trim()
-        .to_owned()
-}
-
-/// Units as people type them, which numbat spells otherwise.
-const SPELLINGS: [(&str, &str); 6] = [
-    ("Nm", "N m"),
-    ("kw", "kW"),
-    ("ftlb", "ft lbf"),
-    ("ft-lb", "ft lbf"),
-    ("lbft", "lbf ft"),
-    ("lb-ft", "lbf ft"),
-];
-
-/// `query` with each whole word in `spellings` replaced. Case counts, as `mW` and `MW` differ by
-/// 10⁹. A number may run into the word, as in `100Nm`.
-fn respell(query: &str, spellings: &[(&str, &str)]) -> String {
-    let in_word = |character: char| character.is_alphanumeric() || character == '_';
-    let mut respelled = String::with_capacity(query.len());
-    let mut rest = query.chars();
-    while !rest.as_str().is_empty() {
-        let starts_word = !respelled
-            .chars()
-            .next_back()
-            .is_some_and(|previous| previous.is_alphabetic() || previous == '_');
-        let found = starts_word
-            .then(|| {
-                spellings.iter().find_map(|(typed, spelled)| {
-                    let after = rest.as_str().strip_prefix(typed)?;
-                    (!after.starts_with(in_word)).then_some((spelled, after))
-                })
-            })
-            .flatten();
-        if let Some((spelled, after)) = found {
-            respelled.push_str(spelled);
-            rest = after.chars();
-        } else if let Some(character) = rest.next() {
-            respelled.push(character);
+/// An amount as shown, copied and to full precision: to the currency's smallest unit, as
+/// `€9.60`, `¥1600` or `0.95 CHF`.
+fn amounts(value: f64, money: &Money) -> (String, String, String) {
+    let scale = 10f64.powi(money.decimals as i32);
+    let rounded = (value * scale).round() / scale;
+    // So an amount that rounds to nothing isn't `-€0.00`.
+    let sign = if rounded < 0.0 { "-" } else { "" };
+    let written = |number: &str| {
+        if money.symbol_first {
+            format!("{sign}{}{number}", money.symbol)
+        } else {
+            format!("{sign}{number} {}", money.symbol)
         }
-    }
-    respelled
+    };
+    let fixed = format!("{:.*}", money.decimals, rounded.abs());
+    let (integer, fraction) = fixed.split_once('.').unwrap_or((&fixed, ""));
+    let point = if fraction.is_empty() { "" } else { "." };
+    let grouped = if integer.len() >= 5 {
+        group_thousands(integer)
+    } else {
+        integer.to_owned()
+    };
+    (
+        written(&format!("{grouped}{point}{fraction}")),
+        written(&fixed),
+        written(&precise(value.abs())),
+    )
 }
 
-/// People type `x` for multiplication ("2 x 3", "4x5"), but numbat reads only `*` and `×` and
-/// takes `x` for a variable. Only an `x` between a number (or `)`) and a number (or `(`) is
-/// rewritten, so names and units keep theirs, and `0x` stays a hex prefix.
-fn x_as_times(query: &str) -> String {
-    let characters: Vec<char> = query.chars().collect();
-    let visible = |c: &&char| !c.is_whitespace();
-    characters
-        .iter()
-        .enumerate()
-        .map(|(index, &character)| {
-            if !matches!(character, 'x' | 'X') {
-                return character;
-            }
-            let (Some(preceding), Some(following)) =
-                (characters.get(..index), characters.get(index + 1..))
-            else {
-                return character;
-            };
-            let hex_prefix = match preceding {
-                ['0'] => true,
-                [.., previous, '0'] => !previous.is_ascii_alphanumeric() && *previous != '.',
-                _ => false,
-            };
-            let multiplies = preceding
-                .iter()
-                .rev()
-                .find(visible)
-                .is_some_and(|c| c.is_ascii_digit() || *c == ')')
-                && following
-                    .iter()
-                    .find(visible)
-                    .is_some_and(|c| c.is_ascii_digit() || matches!(c, '(' | '.'));
-            if multiplies && !hex_prefix {
-                '×'
-            } else {
-                character
-            }
-        })
-        .collect()
+/// Integers below this show whole, as `2^40` does: f64 holds them exactly.
+const WHOLE_BELOW: f64 = 1e15;
+
+/// `value` to `SIGNIFICANT_DIGITS`, or whole if it's an integer, with `_` between groups of
+/// thousands in numbers of five digits or more: `2_000_000`, `0.333333`, `9.46073e12`.
+fn rounded(value: f64) -> String {
+    if value == 0.0 {
+        return "0".into();
+    }
+    let scientific = format!("{:.*e}", (SIGNIFICANT_DIGITS - 1) as usize, value);
+    let Some((mantissa, exponent)) = scientific.split_once('e') else {
+        return scientific;
+    };
+    let Ok(exponent) = exponent.parse::<i32>() else {
+        return scientific;
+    };
+    let whole = value.fract() == 0.0 && value.abs() < WHOLE_BELOW;
+    if !whole && !(-5..SIGNIFICANT_DIGITS).contains(&exponent) {
+        return format!("{}e{exponent}", trim_fraction(mantissa));
+    }
+    let decimals = (SIGNIFICANT_DIGITS - 1 - exponent).max(0) as usize;
+    let fixed = format!("{value:.decimals$}");
+    let fixed = trim_fraction(&fixed);
+    let (sign, unsigned) = match fixed.strip_prefix('-') {
+        Some(unsigned) => ("-", unsigned),
+        None => ("", fixed),
+    };
+    let (integer, fraction) = unsigned.split_once('.').unwrap_or((unsigned, ""));
+    let integer = if integer.len() >= 5 {
+        group_thousands(integer)
+    } else {
+        integer.to_owned()
+    };
+    let point = if fraction.is_empty() { "" } else { "." };
+    format!("{sign}{integer}{point}{fraction}")
+}
+
+fn trim_fraction(number: &str) -> &str {
+    if number.contains('.') {
+        number.trim_end_matches('0').trim_end_matches('.')
+    } else {
+        number
+    }
+}
+
+fn group_thousands(digits: &str) -> String {
+    let mut grouped = String::with_capacity(digits.len() * 2);
+    for (index, digit) in digits.chars().enumerate() {
+        if index > 0 && (digits.len() - index).is_multiple_of(3) {
+            grouped.push('_');
+        }
+        grouped.push(digit);
+    }
+    grouped
+}
+
+/// `value` as precisely as an f64 holds it: the shortest text that reads back as it, in
+/// scientific notation when very large or small.
+fn precise(value: f64) -> String {
+    let exponent = value.abs().log10().floor();
+    if value != 0.0 && exponent.is_finite() && !(-5.0..15.0).contains(&exponent) {
+        format!("{value:e}")
+    } else {
+        value.to_string()
+    }
 }
 
 #[cfg(test)]
@@ -497,147 +331,31 @@ mod tests {
     use crate::rates::RATES_FILE;
     use crate::rates::tests::ECB_XML;
 
-    fn items(query: &str) -> Vec<Item> {
-        Calc::new().expect("prelude loads").query(query)
+    fn with_rates() -> Calc {
+        let calc = Calc::new();
+        if let Some((rates, date)) = rates::parse(ECB_XML) {
+            *lock(&calc.rates) = ExchangeRates::Loaded(Box::new(rates), date);
+        }
+        calc
     }
 
     fn titles(query: &str) -> Vec<String> {
-        items(query).into_iter().map(|item| item.title).collect()
-    }
-
-    fn detail(query: &str) -> Vec<(String, String)> {
-        items(query)
+        with_rates()
+            .query(query)
             .into_iter()
-            .flat_map(|item| item.detail)
-            .map(|section| (section.title, section.text))
+            .map(|item| item.title)
             .collect()
     }
 
-    #[test]
-    fn detail_shows_the_reading_and_full_precision() {
-        assert_eq!(
-            detail("100 N to lbf"),
-            [
-                ("Input".into(), "100 newton ➞ pound_force".into()),
-                ("Full precision".into(), "22.48089236553391 lbf".into()),
-            ]
-        );
-        assert_eq!(
-            detail("2x1000000"),
-            [("Input".into(), "2 × 1_000_000".into())],
-            "precision matching what ↵ copies adds nothing"
-        );
+    fn title(query: &str) -> String {
+        titles(query).join(" / ")
     }
 
-    #[test]
-    fn arithmetic() {
-        assert_eq!(titles("2 + 3 * 4"), ["14"]);
-    }
-
-    #[test]
-    fn copies_large_numbers_without_separators() {
-        assert_eq!(
-            items("2 x 1000000 m")
-                .into_iter()
-                .map(|item| (item.title, item.action))
-                .collect::<Vec<_>>(),
-            [("2_000_000 m".into(), Action::Copy("2000000 m".into()))]
-        );
-    }
-
-    #[test]
-    fn strings_show_and_copy_without_quotes() {
-        let binary = format!("0b1{}", "0".repeat(70));
-        assert_eq!(
-            items("2^70 -> bin")
-                .into_iter()
-                .map(|item| (item.title, item.action))
-                .collect::<Vec<_>>(),
-            [(binary.clone(), Action::Copy(binary))]
-        );
-    }
-
-    #[test]
-    fn empty_strings_answer_nothing() {
-        assert_eq!(titles("str_slice(1, 1, \"abc\")"), Vec::<String>::new());
-        assert_eq!(titles("str_slice(1, 2, \"a b\")"), Vec::<String>::new());
-        assert_eq!(
-            titles("\"\\0\""),
-            Vec::<String>::new(),
-            "control characters"
-        );
-        assert_eq!(
-            titles("str_slice(0, 2, \"a b\")"),
-            ["a "],
-            "whitespace is kept"
-        );
-    }
-
-    #[test]
-    fn dates_read_as_dates() {
-        assert_eq!(
-            titles("datetime(\"2026-01-02 03:04:05 UTC\")"),
-            ["2026-01-02 03:04:05 UTC"]
-        );
-    }
-
-    #[test]
-    fn x_multiplies_between_numbers() {
-        assert_eq!(titles("2 x 2"), ["4"]);
-        assert_eq!(titles("3x4"), ["12"]);
-        assert_eq!(titles("10 X 1.5"), ["15"]);
-        assert_eq!(titles("(1 + 2) x (3 + 4)"), ["21"]);
-        assert_eq!(titles("2 x 3 km"), ["6 km"]);
-    }
-
-    #[test]
-    fn x_keeps_other_meanings() {
-        assert_eq!(titles("0x10"), ["16"]);
-        assert_eq!(titles("0x10 x 2"), ["32"]);
-        assert_eq!(titles("let x = 3"), Vec::<String>::new());
-        assert_eq!(titles("2 lux"), ["2 lx"]);
-    }
-
-    #[test]
-    fn units() {
-        assert_eq!(titles("5 km to m"), ["5000 m"]);
-        assert_eq!(titles("10 kg -> lb")[0].split(' ').nth(1), Some("lb"));
-        assert!(titles("100 N to lbf")[0].ends_with("lbf"));
-    }
-
-    #[test]
-    fn horsepower_is_mechanical() {
-        assert_eq!(titles("1 hp to kW"), ["0.7457 kW"]);
-        assert_eq!(titles("1 metric_hp to kW"), ["0.735499 kW"]);
-    }
-
-    #[test]
-    fn power_and_torque_as_people_type_them() {
-        assert_eq!(titles("1 hp to kw"), ["0.7457 kW"]);
-        assert_eq!(titles("5kw to W"), ["5000 W"]);
-        for torque in [
-            "100 Nm to ftlb",
-            "100 nm to ftlb",
-            "100 N m to ft-lb",
-            "100Nm to ft lbf",
-        ] {
-            assert_eq!(titles(torque), ["73.7562 ft·lbf"], "{torque}");
+    fn answers(queries: &[(&str, &str)]) {
+        for (query, expected) in queries {
+            assert_eq!(title(query), *expected, "{query}");
         }
-        assert_eq!(titles("100 lbft to Nm"), ["135.582 N·m"]);
-        assert_eq!(titles("100 lb-ft to N m"), ["135.582 N·m"]);
-        assert_eq!(titles("1 Nm / 1 s to W"), ["1 W"]);
     }
-
-    #[test]
-    fn units_keep_their_case_and_nm_stays_nanometres() {
-        assert_eq!(titles("1 nm to m"), ["1.0e-9 m"]);
-        assert_eq!(titles("1 mW to W"), ["0.001 W"]);
-        assert_eq!(titles("1 MW to W"), ["1_000_000 W"]);
-        assert_eq!(titles("1 KW to W"), Vec::<String>::new());
-    }
-
-    /// numbat holds exchange rates process-wide, so tests that set them take turns.
-    static RATES: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
     fn shown(calc: &mut Calc, query: &str) -> Vec<(String, String)> {
         calc.query(query)
@@ -647,199 +365,368 @@ mod tests {
     }
 
     #[test]
-    fn a_panic_holding_the_updates_loses_none() -> Result<(), Box<NumbatError>> {
-        let mut calc = Calc::new()?;
-        publish(&calc.pending, |pending| pending.rates_unavailable = true);
-        let held = std::panic::catch_unwind(|| {
-            let _held = calc.pending.lock();
-            panic!("panicking with the updates locked");
-        });
-        assert!(held.is_err() && calc.pending.is_poisoned());
-        assert_eq!(
-            shown(&mut calc, "100 USD to EUR"),
-            [("Exchange rates unavailable".into(), String::new())],
-            "an update from before"
-        );
-        publish(&calc.pending, |pending| pending.numbat_failed = true);
-        assert_eq!(
-            shown(&mut calc, "2 + 2"),
-            [("Calculator unavailable".into(), String::new())],
-            "an update from after"
-        );
-        Ok(())
+    fn arithmetic() {
+        answers(&[
+            ("2 + 3 * 4", "14"),
+            ("(1 + 2) x (3 + 4)", "21"),
+            ("2 x 2", "4"),
+            ("3x4", "12"),
+            ("10 X 1.5", "15"),
+            ("2x1000000", "2_000_000"),
+            ("-2^2", "-4"),
+            ("2^-1", "0.5"),
+            ("2^3^2", "512"),
+            ("1/3", "0.333333"),
+            ("10!", "3_628_800"),
+            ("50%", "0.5"),
+            ("15% of 80", "12"),
+            ("2^1000", "1.07151e301"),
+            ("1e100", "1e100"),
+            ("0.1 + 0.2", "0.3"),
+            ("1/0", ""),
+            ("6 ÷ 4", "1.5"),
+            ("2 ** 10", "1024"),
+        ]);
     }
 
     #[test]
-    fn currency_before_rates_load_says_so() -> Result<(), Box<NumbatError>> {
-        let mut calc = Calc::new()?;
+    fn bases() {
+        answers(&[
+            ("0x10", "16"),
+            ("0x10 x 2", "32"),
+            ("0xff + 0b101", "260"),
+            ("0o17", "15"),
+            ("255 to hex", "0xff"),
+            ("2^70 to binary", &format!("0b1{}", "0".repeat(70))),
+            ("2^70 -> bin", &format!("0b1{}", "0".repeat(70))),
+            ("1.5 to hex", ""),
+        ]);
+    }
+
+    #[test]
+    fn functions_and_constants() {
+        answers(&[
+            ("sqrt(2)*pi", "4.44288"),
+            ("sqrt(16 m^2)", "4 m"),
+            ("ln(2)", "0.693147"),
+            ("log10(1000)", "3"),
+            ("sin(30 deg)", "0.5"),
+            ("cos(pi)", "-1"),
+            ("2 pi", "6.28319"),
+            ("2e", "5.43656"),
+            ("e*e", "7.38906"),
+            ("1 c to km/s", "299_792 km/s"),
+        ]);
+    }
+
+    #[test]
+    fn units() {
+        answers(&[
+            ("5 km to m", "5000 m"),
+            ("2 x 3 km", "6 km"),
+            ("2 x 1000000 m", "2_000_000 m"),
+            ("10 kg to lb", "22.0462 lb"),
+            ("10 kg -> lb", "22.0462 lb"),
+            ("100 km/h to mph", "62.1371 mph"),
+            ("100 km / 2 h", "50 km/h"),
+            ("3 m * 2 m", "6 m²"),
+            ("1 km / 1 m", "1000"),
+            ("1 lightyear to km", "9.46073e12 km"),
+            ("5 feet 11 inches to cm", "180.34 cm"),
+            ("3 hours 20 min to min", "200 min"),
+            ("5 in to cm", "12.7 cm"),
+            ("5 m in cm", "500 cm"),
+            ("1 acre to m^2", "4046.86 m²"),
+            ("1 m²", "1 m²"),
+            ("3 m² to ft²", "32.2917 ft²"),
+            ("6 m² / 2 m", "3 m"),
+            ("(2 m)^0", "1"),
+            ("(1 farad)^40", "1 farad⁴⁰"),
+            ("5 in cm", "12.7 cm"),
+            ("1 m in in", "39.3701 in"),
+            ("1 gal to L", "3.78541 L"),
+            ("1 atm to psi", "14.6959 psi"),
+            ("1 kWh to J", "3_600_000 J"),
+            ("2 lux", "2 lx"),
+            ("30 deg to rad", "0.523599 rad"),
+        ]);
+    }
+
+    #[test]
+    fn units_keep_their_case_and_nm_stays_nanometres() {
+        answers(&[
+            ("1 nm to m", "1e-9 m"),
+            ("1 mW to W", "0.001 W"),
+            ("1 MW to W", "1_000_000 W"),
+            ("1 KW to W", ""),
+        ]);
+    }
+
+    #[test]
+    fn force_power_and_torque() {
+        answers(&[
+            ("100 N to lbf", "22.4809 lbf"),
+            ("1 lbf to N", "4.44822 N"),
+            ("1 hp to kW", "0.7457 kW"),
+            ("1 metric_hp to kW", "0.735499 kW"),
+            ("1 hp to kw", "0.7457 kW"),
+            ("5kw to W", "5000 W"),
+            ("100 lbft to Nm", "135.582 N·m"),
+            ("100 lb-ft to N m", "135.582 N·m"),
+            ("1 Nm / 1 s to W", "1 W"),
+        ]);
+        for torque in [
+            "100 Nm to ftlb",
+            "100 nm to ftlb",
+            "100 N m to ft-lb",
+            "100Nm to ft lbf",
+        ] {
+            assert_eq!(title(torque), "73.7562 ft·lbf", "{torque}");
+        }
+    }
+
+    #[test]
+    fn detail_shows_the_reading_and_full_precision() {
+        let detail = |query| {
+            with_rates()
+                .query(query)
+                .into_iter()
+                .flat_map(|item| item.detail)
+                .map(|section| (section.title, section.text))
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(
+            detail("100 N to lbf"),
+            [
+                ("Input".into(), "100 N ➞ lbf".into()),
+                ("Full precision".into(), "22.48089430997105 lbf".into()),
+            ]
+        );
+        assert_eq!(
+            detail("2x1000000"),
+            [("Input".into(), "2 × 1000000".into())],
+            "precision matching what ↵ copies adds nothing"
+        );
+    }
+
+    #[test]
+    fn temperature_and_data() {
+        answers(&[
+            ("20 °C to °F", "68 °F"),
+            ("20 C to F", "68 °F"),
+            ("-40 degF to degC", "-40 °C"),
+            ("0 K to celsius", "-273.15 °C"),
+            ("20 °C + 5 K", "25 °C"),
+            ("1 GiB to MB", "1073.74 MB"),
+            ("1 MB to KiB", "976.562 KiB"),
+            ("8 bit to B", "1 B"),
+            ("2 KB to B", "2000 B"),
+            ("1 kbps * 1 min to KB", "7.5 kB"),
+            ("100 Mbit/s * 1 h to GB", "45 GB"),
+        ]);
+    }
+
+    #[test]
+    fn dates() {
+        let today = jiff::ZonedDateTime::now().date();
+        let years = |years: i64| {
+            today
+                .checked_add(jiff::Span::new().years(years))
+                .map(|date| date.strftime(DATE_FORMAT).to_string())
+                .unwrap_or_default()
+        };
+        let day = |days: i64| {
+            today
+                .checked_add(jiff::Span::new().days(days))
+                .map(|date| date.strftime(DATE_FORMAT).to_string())
+                .unwrap_or_default()
+        };
+        answers(&[
+            ("today + 3 days", &day(3)),
+            ("today - 1 week", &day(-7)),
+            ("2 days + today", &day(2)),
+            ("tomorrow + 1 day", &day(2)),
+            ("today + 1 decade", &years(10)),
+            ("today - 2 centuries", &years(-200)),
+            ("today + 36 hours", ""),
+            ("today * 2", ""),
+            ("today + 3 m", ""),
+            ("today + 1 day to m", ""),
+        ]);
+        assert_eq!(
+            with_rates()
+                .query("today + 1 month")
+                .into_iter()
+                .map(|item| item.action)
+                .collect::<Vec<_>>(),
+            [Action::Copy(
+                today
+                    .checked_add(jiff::Span::new().months(1))
+                    .map(|date| date.to_string())
+                    .unwrap_or_default()
+            )],
+            "a calendar month, copied as ISO 8601"
+        );
+        for query in ["now + 3 hours", "now() + 2 days", "now - 1 year"] {
+            assert_eq!(titles(query).len(), 1, "{query}");
+        }
+        for word in ["today", "now", "now()", "tomorrow"] {
+            assert_eq!(title(word), "", "{word} is a word, not a calculation");
+        }
+    }
+
+    #[test]
+    fn currencies() {
+        answers(&[
+            ("100 USD to EUR", "€80.00"),
+            ("12 usd to eur", "€9.60"),
+            ("£20 to EUR", "€25.00"),
+            ("$5 to EUR", "€4.00"),
+            ("100USD to EUR", "€80.00"),
+            ("100 EUR + 5 €", "€105.00"),
+            ("-5 €", "-€5.00"),
+            ("1000000 USD to EUR", "€800_000.00"),
+            ("10 € to ¥", "¥1600"),
+            ("0.01 EUR to JPY", "¥2"),
+            ("1 GBP to KRW", "1875 KRW"),
+            ("0.0333 EUR to ISK", "5 ISK"),
+            ("5 €/kg", "5 €/kg"),
+            ("1 EUR / 1 USD", "1.25"),
+            ("100 CHF to EUR", ""),
+        ]);
+        assert_eq!(
+            shown(&mut with_rates(), "100 USD to EUR"),
+            [("€80.00".into(), "ECB rates of 21 Nov".into())]
+        );
+        let items = with_rates().query("1000000 USD / 3 to EUR");
+        assert_eq!(
+            items
+                .iter()
+                .map(|item| (&item.title, &item.action))
+                .collect::<Vec<_>>(),
+            [(
+                &"€266_666.67".to_owned(),
+                &Action::Copy("€266666.67".into())
+            )],
+            "copied without separators"
+        );
+        assert_eq!(
+            items
+                .into_iter()
+                .flat_map(|item| item.detail)
+                .find(|section| section.title == "Full precision")
+                .map(|section| section.text),
+            Some("€266666.6666666667".into())
+        );
+        assert_eq!(
+            shown(&mut with_rates(), "2 m"),
+            [("2 m".into(), String::new())],
+            "only money is dated"
+        );
+    }
+
+    #[test]
+    fn currency_before_rates_load_says_so() {
+        let mut calc = Calc::new();
         assert_eq!(
             calc.query("100 USD to EUR"),
-            [Item {
-                title: "Loading exchange rates…".into(),
-                subtitle: String::new(),
-                icon: Icon::Calculator,
-                action: Action::Nothing,
-                detail: Vec::new(),
-                relevance: CALCULATION,
-            }]
+            [notice("Loading exchange rates…")]
         );
         assert_eq!(
-            calc.query("£20 to EUR").len(),
-            1,
-            "symbols are currencies too"
+            calc.query("£20 to EUR"),
+            [notice("Loading exchange rates…")]
         );
         assert_eq!(
-            calc.query("100USD to EUR").len(),
-            1,
-            "a code may follow the number"
+            calc.query("100USD to EUR"),
+            [notice("Loading exchange rates…")]
         );
         assert_eq!(
-            titles("100 EUR + 5 €"),
-            ["105 €"],
-            "the euro needs no rates"
+            shown(&mut calc, "100 EUR + 5 €"),
+            [("€105.00".into(), String::new())]
         );
-        assert!(
-            titles("100 parsecs + 2 usd2").is_empty(),
-            "nor is every error one"
-        );
-        publish(&calc.pending, |pending| pending.rates_unavailable = true);
+        assert_eq!(calc.query("100 parsecs + 2 usd2"), []);
+        *lock(&calc.rates) = ExchangeRates::Unavailable;
         assert_eq!(
-            shown(&mut calc, "100 USD to EUR"),
-            [("Exchange rates unavailable".into(), String::new())]
+            calc.query("100 USD to EUR"),
+            [notice("Exchange rates unavailable")]
         );
-        Ok(())
     }
 
     #[test]
     fn fresh_cached_rates_load_in_the_background() -> Result<(), Box<dyn std::error::Error>> {
-        let _turn = RATES.lock();
         let cache = tempfile::tempdir()?;
         std::fs::write(cache.path().join(RATES_FILE), ECB_XML)?;
-        let (built, wait) = std::sync::mpsc::channel();
-        let built = Mutex::new(built);
+        let (loaded, wait) = std::sync::mpsc::channel();
         let mut calc = Calc::start(
             cache.path().to_path_buf(),
             Arc::new(move || {
-                if let Ok(built) = built.lock() {
-                    built.send(()).ok();
-                }
+                loaded.send(()).ok();
             }),
         );
         wait.recv_timeout(Duration::from_secs(10))?;
         assert_eq!(
             shown(&mut calc, "100 USD to EUR"),
-            [("80 €".into(), "ECB rates of 21 Nov".into())]
-        );
-        assert_eq!(
-            shown(&mut calc, "2 m"),
-            [("2 m".into(), String::new())],
-            "only money is dated"
+            [("€80.00".into(), "ECB rates of 21 Nov".into())]
         );
         Ok(())
     }
 
     #[test]
-    fn a_calculator_that_failed_to_build_says_so() {
-        let mut calc = Calc {
-            numbat: Numbat::Building,
-            rates: Rates::Loading,
-            pending: Arc::default(),
-        };
-        publish(&calc.pending, |pending| pending.numbat_failed = true);
+    fn a_panic_holding_the_rates_loses_none() {
+        let mut calc = with_rates();
+        let held = std::panic::catch_unwind(|| {
+            let _held = calc.rates.lock();
+            panic!("panicking with the rates locked");
+        });
+        assert!(held.is_err() && calc.rates.is_poisoned());
         assert_eq!(
-            shown(&mut calc, "2 + 2"),
-            [("Calculator unavailable".into(), String::new())]
+            shown(&mut calc, "100 USD to EUR"),
+            [("€80.00".into(), "ECB rates of 21 Nov".into())]
         );
-        assert_eq!(shown(&mut calc, "pi"), [], "words may be app names");
     }
 
     #[test]
-    fn unavailable_rates_keep_a_context_not_yet_taken() -> Result<(), Box<NumbatError>> {
-        let mut calc = Calc {
-            numbat: Numbat::Building,
-            rates: Rates::Loading,
-            pending: Arc::default(),
-        };
-        assert_eq!(shown(&mut calc, "2 m"), [], "no context yet");
-        let first = context(false)?;
-        publish(&calc.pending, |pending| {
-            pending.context = Some((Box::new(first), None));
-        });
-        publish(&calc.pending, |pending| pending.rates_unavailable = true);
-        assert_eq!(shown(&mut calc, "2 m"), [("2 m".into(), String::new())]);
-        assert_eq!(
-            shown(&mut calc, "100 USD to EUR"),
-            [("Exchange rates unavailable".into(), String::new())]
-        );
-        Ok(())
+    fn copies_without_separators() {
+        let items = with_rates().query("2 x 1000000 m");
+        assert_eq!(items[0].action, Action::Copy("2000000 m".into()));
     }
 
     #[test]
-    fn replaced_rates_reach_a_new_context() -> Result<(), Box<dyn std::error::Error>> {
-        let _turn = RATES.lock();
-        let date = jiff::civil::date(2026, 11, 21);
-        Context::set_exchange_rates(ECB_XML);
-        let mut calc = Calc::new()?;
-        let current = context(true)?;
-        publish(&calc.pending, |pending| {
-            pending.context = Some((Box::new(current), Some(date)));
-        });
-        assert_eq!(
-            shown(&mut calc, "100 USD to EUR"),
-            [("80 €".into(), "ECB rates of 21 Nov".into())]
-        );
-        Context::set_exchange_rates(&ECB_XML.replace("1.25", "2"));
-        assert_eq!(
-            shown(&mut calc, "100 USD to EUR"),
-            [("80 €".into(), "ECB rates of 21 Nov".into())],
-            "a context keeps the rates it loaded"
-        );
-        let outdated = context(false)?;
-        publish(&calc.pending, |pending| {
-            pending.context = Some((Box::new(outdated), Some(date)));
-        });
-        let newest = context(true)?;
-        publish(&calc.pending, |pending| {
-            pending.context = Some((Box::new(newest), Some(date)));
-        });
-        assert_eq!(
-            shown(&mut calc, "100 USD to EUR"),
-            [("50 €".into(), "ECB rates of 21 Nov".into())],
-            "the newest update replaces one not yet taken"
-        );
-        Ok(())
-    }
-
-    #[test]
-    fn currency_names_follow_numbats_module() {
-        let mut codes: Vec<String> = currency_names()
-            .into_iter()
-            .filter(|name| name.len() == 3 && name.chars().all(|c| c.is_ascii_uppercase()))
-            .collect();
-        codes.sort();
-        assert_eq!(
-            codes,
-            [
-                "AUD", "BGN", "BRL", "CAD", "CHF", "CNY", "CZK", "DKK", "GBP", "HKD", "HUF", "IDR",
-                "ILS", "INR", "ISK", "JPY", "KRW", "MYR", "NIS", "NOK", "NZD", "PHP", "PLN", "RON",
-                "SEK", "SGD", "THB", "TRY", "USD", "ZAR",
-            ],
-            "numbat's currencies changed: check `mentions_currency` still finds them"
-        );
-        assert!(currency_names().contains(&"$".to_owned()));
-        assert!(currency_names().contains(&"dollar".to_owned()));
-    }
-
-    #[test]
-    fn ignores_imports() {
-        assert!(titles("use units::currencies; 1").is_empty());
-        assert!(titles("2; use all").is_empty());
+    fn half_typed_queries_answer_nothing() {
+        for query in [
+            "(((",
+            "2^^3",
+            "0x",
+            "$",
+            "°",
+            "sqrt(",
+            "sqrt()",
+            "now(",
+            "1 to",
+            "1 m to",
+            "5 m to 3 m",
+            "171!",
+            "(-1)!",
+            "1.5!",
+            "2 m ^ 0.5",
+            "10^400",
+            "0b2",
+            "2 +",
+            "3 m + 2 s",
+            "m^64 * m^64",
+            "192.168.1.1",
+            "10.0.0.1",
+            "1.2.3",
+        ] {
+            assert_eq!(title(query), "", "{query}");
+        }
     }
 
     #[test]
     fn words_answer_only_with_a_plain_number() {
         let answer = |query| {
-            items(query)
+            with_rates()
+                .query(query)
                 .into_iter()
                 .map(|item| (item.title, item.relevance))
                 .collect::<Vec<_>>()
@@ -848,42 +735,24 @@ mod tests {
         assert_eq!(answer("e"), [], "a lone letter is the start of a word");
         assert_eq!(answer("e*e"), [("7.38906".into(), CONSTANT)]);
         assert_eq!(answer("e * 2"), [("5.43656".into(), CALCULATION)]);
-        assert_eq!(answer("2e"), [("5.43656".into(), CALCULATION)]);
         assert_eq!(answer("pi * e"), [("8.53973".into(), CONSTANT)]);
-        assert_eq!(answer("2 pi"), [("6.28319".into(), CALCULATION)]);
         for word in [
-            "m", "day", "c", "kg to lb", "dollar", "true", "now()", "firefox",
+            "m",
+            "day",
+            "c",
+            "kg to lb",
+            "dollar",
+            "true",
+            "firefox",
+            "safari",
+            "terminal",
+            "visual studio code",
+            "1pass",
+            "x + 1",
+            "let x = 3",
+            "use units::currencies; 1",
         ] {
             assert_eq!(answer(word), [], "{word}");
         }
-    }
-
-    #[test]
-    fn nothing_outlives_its_query() -> Result<(), Box<NumbatError>> {
-        let mut calc = Calc::new()?;
-        for definition in [
-            "let x = 3",
-            "fn double(y) = 2 y",
-            "unit widget = 3 m",
-            "dimension Foo",
-            "struct Point2 { x: Scalar }",
-        ] {
-            calc.query(definition);
-        }
-        for uses in ["x + 1", "double(2)", "2 widget", "1 x", "x"] {
-            assert_eq!(shown(&mut calc, uses), [], "{uses}");
-        }
-        calc.query("2 + 3");
-        for earlier in ["ans", "_", "ans + 1", "_ * 2"] {
-            assert_eq!(shown(&mut calc, earlier), [], "{earlier}");
-        }
-        Ok(())
-    }
-
-    #[test]
-    fn ignores_words_and_errors() {
-        assert!(titles("firefox").is_empty());
-        assert!(titles("2 +").is_empty());
-        assert!(titles("3 m + 2 s").is_empty());
     }
 }

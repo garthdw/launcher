@@ -12,8 +12,8 @@ use launcher_core::Plugins;
 use launcher_jwt::Jwt;
 use launcher_kagi::Kagi;
 
-/// Raise only deliberately, saying why. Measured at 2.0 MB.
-const BUDGET: usize = 2560 * 1024;
+/// Raise only deliberately, saying why. Measured at 110 KB.
+const BUDGET: usize = 256 * 1024;
 
 struct Counting;
 
@@ -66,7 +66,7 @@ fn plugins_stay_in_budget_and_dont_grow() -> Result<(), Box<dyn std::error::Erro
     let before = LIVE.load(Ordering::Relaxed);
     // Kagi idle, as no query starts with its prefix.
     let mut plugins = Plugins::new(vec![
-        Box::new(Calc::new()?),
+        Box::new(Calc::new()),
         Box::new(Jwt),
         Box::new(Kagi::new(
             "k".into(),
@@ -74,7 +74,7 @@ fn plugins_stay_in_budget_and_dont_grow() -> Result<(), Box<dyn std::error::Erro
             Arc::new(|| {}),
         )),
     ]);
-    // The first script fills what's built once, such as numbat's currency names.
+    // The first script fills anything built on first use.
     type_script(&mut plugins);
     let started = LIVE.load(Ordering::Relaxed) - before;
     assert!(
