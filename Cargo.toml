@@ -25,6 +25,7 @@ libc = "0.2.191"
 notify = "8.2.2"
 objc2-core-foundation = { version = "0.3.2", default-features = false, features = ["std", "CFError", "CFString", "CFURL"] }
 objc2-security = { version = "0.3.2", default-features = false, features = ["SecBase", "SecItem"] }
+pulldown-cmark = { version = "0.13.6", default-features = false }
 serde = { version = "1.0.229", features = ["derive"] }
 # `preserve_order`, so a decoded JWT shows its claims in the token's order.
 serde_json = { version = "1.0.154", features = ["preserve_order"] }

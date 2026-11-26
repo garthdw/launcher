@@ -7,6 +7,7 @@ use std::sync::{Arc, Condvar, Mutex, PoisonError};
 use std::thread;
 use std::time::Duration;
 
+use launcher_core::markdown::escape;
 use launcher_core::{Action, Icon, Item, Plugin, ResultsChanged, Section, log};
 use serde::Deserialize;
 use url::Url;
@@ -415,18 +416,13 @@ fn result_row(result: ApiResult) -> Option<Row> {
         return None;
     }
     let mut detail = Vec::new();
-    if let Some(snippet) = result.snippet.as_deref().map(plain_text)
+    if let Some(snippet) = result.snippet.as_deref().map(snippet_markdown)
         && !snippet.is_empty()
     {
-        detail.push(Section {
-            title: "Snippet".into(),
-            text: snippet,
-        });
+        detail.push(Section::markdown("Snippet", snippet));
     }
-    detail.push(Section {
-        title: "Address".into(),
-        text: url.to_string(),
-    });
+    // A parsed URL has no spaces or angle brackets to end the autolink early.
+    detail.push(Section::markdown("Address", format!("<{url}>")));
     let title = result
         .title
         .filter(|title| !title.trim().is_empty())
@@ -441,41 +437,101 @@ fn result_row(result: ApiResult) -> Option<Row> {
     ))
 }
 
-/// Snippets come as HTML, with tags such as `<b>` around the words that matched.
-fn plain_text(html: &str) -> String {
-    let mut text = String::with_capacity(html.len());
+/// Snippets come as HTML, with `<b>` around the words that matched: those stay bold, other tags
+/// go, and the text is escaped.
+fn snippet_markdown(html: &str) -> String {
+    let mut snippet = Snippet::default();
     let mut rest = html;
     while let Some((before, from)) = rest
         .find(['<', '&'])
         .and_then(|index| rest.split_at_checked(index))
     {
-        text.push_str(before);
-        let markup = from
+        snippet.push(before);
+        let tag = from
             .strip_prefix('<')
             // A tag starts `<b`, `</b` or `<!--`; `a < b` isn't one.
             .filter(|tag| {
                 tag.starts_with(|first: char| first.is_ascii_alphabetic() || "/!".contains(first))
             })
-            .and_then(|tag| Some((None, tag.split_once('>')?.1)))
-            .or_else(|| {
-                let (name, after) = from.strip_prefix('&')?.split_once(';')?;
-                Some((Some(entity(name)?), after))
-            });
-        rest = match markup {
-            Some((character, after)) => {
-                text.extend(character);
-                after
+            .and_then(|tag| tag.split_once('>'));
+        let character = || {
+            let (name, after) = from.strip_prefix('&')?.split_once(';')?;
+            Some((entity(name)?, after))
+        };
+        rest = if let Some((tag, after)) = tag {
+            let name = tag.split_whitespace().next().unwrap_or_default();
+            if ["b", "strong"]
+                .iter()
+                .any(|bold| name.eq_ignore_ascii_case(bold))
+            {
+                snippet.start_bold();
+            } else if ["/b", "/strong"]
+                .iter()
+                .any(|bold| name.eq_ignore_ascii_case(bold))
+            {
+                snippet.bold_closed = snippet.bold_from.is_some();
             }
+            after
+        } else if let Some((character, after)) = character() {
+            snippet.push(character.encode_utf8(&mut [0; 4]));
+            after
+        } else {
             // Not markup, such as a lone `<` or `&`.
-            None => {
-                let (character, after) = from.split_at_checked(1).unwrap_or((from, ""));
-                text.push_str(character);
-                after
-            }
+            let (character, after) = from.split_at_checked(1).unwrap_or((from, ""));
+            snippet.push(character);
+            after
         };
     }
-    text.push_str(rest);
-    text
+    snippet.push(rest);
+    snippet.end_bold();
+    // Leading spaces could make it a code block.
+    snippet.markdown.trim().into()
+}
+
+#[derive(Default)]
+struct Snippet {
+    markdown: String,
+    /// Where the bold run being read starts in `markdown`.
+    bold_from: Option<usize>,
+    /// The run's tag closed, but it ends only once text follows, so that runs side by side
+    /// join: `**a****b**` isn't bold.
+    bold_closed: bool,
+}
+
+impl Snippet {
+    fn push(&mut self, text: &str) {
+        if self.bold_closed && !text.is_empty() {
+            self.end_bold();
+        }
+        self.markdown.push_str(&escape(text));
+    }
+
+    fn start_bold(&mut self) {
+        self.bold_closed = false;
+        self.bold_from = self.bold_from.or(Some(self.markdown.len()));
+    }
+
+    /// Puts `**` around the bold run, inside any spaces at either end, as CommonMark needs;
+    /// nothing if it's blank.
+    fn end_bold(&mut self) {
+        self.bold_closed = false;
+        let Some(from) = self.bold_from.take() else {
+            return;
+        };
+        let run = self.markdown.split_off(from);
+        let bold = run.trim();
+        if bold.is_empty() {
+            self.markdown.push_str(&run);
+            return;
+        }
+        self.markdown
+            .push_str(run.strip_suffix(run.trim_start()).unwrap_or_default());
+        self.markdown.push_str("**");
+        self.markdown.push_str(bold);
+        self.markdown.push_str("**");
+        self.markdown
+            .push_str(run.strip_prefix(run.trim_end()).unwrap_or_default());
+    }
 }
 
 /// The character an HTML entity such as `amp` or `#39` stands for.
@@ -502,6 +558,8 @@ fn entity(name: &str) -> Option<char> {
 #[cfg(test)]
 mod tests {
     use std::sync::mpsc;
+
+    use launcher_core::Block;
 
     use super::*;
 
@@ -723,15 +781,8 @@ mod tests {
             .collect()
     }
 
-    fn section(title: &str, text: &str) -> Section {
-        Section {
-            title: title.into(),
-            text: text.into(),
-        }
-    }
-
     #[test]
-    fn results_open_their_page_and_show_the_snippet_as_text() {
+    fn results_open_their_page_and_show_the_snippet_and_address() {
         let body = r#"{"meta": {}, "data": {"search": [
             {"url": "https://www.rust-lang.org/learn", "title": "Rust", "snippet": "A <b>language</b> &amp; more"},
             {"url": "file:///Applications/Calculator.app", "title": "Not a page"},
@@ -745,14 +796,17 @@ mod tests {
                     "Rust".into(),
                     Action::OpenUrl("https://www.rust-lang.org/learn".into()),
                     vec![
-                        section("Snippet", "A language & more"),
-                        section("Address", "https://www.rust-lang.org/learn"),
+                        Section::markdown("Snippet", r"A **language** \& more"),
+                        Section::markdown("Address", "<https://www.rust-lang.org/learn>"),
                     ]
                 ),
                 (
                     "https://example.com/untitled".into(),
                     Action::OpenUrl("https://example.com/untitled".into()),
-                    vec![section("Address", "https://example.com/untitled")]
+                    vec![Section::markdown(
+                        "Address",
+                        "<https://example.com/untitled>"
+                    )]
                 ),
             ]
         );
@@ -790,12 +844,36 @@ mod tests {
     }
 
     #[test]
-    fn snippets_lose_their_tags_and_entities() {
+    fn snippets_keep_their_bold_and_lose_other_tags_and_entities() {
+        // The text of each span, and whether it's bold.
+        let read = |html| -> Vec<(String, bool)> {
+            Section::markdown("Snippet", snippet_markdown(html))
+                .blocks()
+                .into_iter()
+                .flat_map(|block| match block {
+                    Block::Paragraph(spans) => spans,
+                    block => panic!("{block:?}"),
+                })
+                .map(|span| (span.text, span.style.bold))
+                .collect()
+        };
+        let plain = |text: &str| (text.to_string(), false);
+        let bold = |text: &str| (text.to_string(), true);
         assert_eq!(
-            plain_text("<b>Rust</b> &lt;3 &amp; &quot;fast&quot; &#39;n&#x27; &nbsp;safe"),
-            "Rust <3 & \"fast\" 'n'  safe"
+            read("<b>Rust</b> &lt;3 &amp; &quot;fast&quot; &#39;n&#x27; &nbsp;safe"),
+            [bold("Rust"), plain(" <3 & \"fast\" 'n'  safe")]
         );
-        assert_eq!(plain_text("a < b && c; <i>d"), "a < b && c; d");
-        assert_eq!(plain_text("unclosed <b"), "unclosed <b");
+        assert_eq!(read("a < b && c; <i>d"), [plain("a < b && c; d")]);
+        assert_eq!(read("unclosed <b"), [plain("unclosed <b")]);
+        assert_eq!(
+            read("*not* <B>left open"),
+            [plain("*not* "), bold("left open")]
+        );
+        assert_eq!(
+            read("a<b> spaced </b>b <b></b>c"),
+            [plain("a "), bold("spaced"), plain(" b c")]
+        );
+        assert_eq!(read("<strong>two</strong><b>runs</b>"), [bold("tworuns")]);
+        assert_eq!(read("    # indented"), [plain("# indented")]);
     }
 }

@@ -6,6 +6,8 @@ use std::path::PathBuf;
 use std::str::FromStr;
 use std::sync::Arc;
 
+pub mod markdown;
+
 #[derive(Clone, Debug, PartialEq)]
 pub struct Item {
     /// Shown on one line, as is the subtitle: `Plugins::query` turns each run of control
@@ -57,6 +59,128 @@ pub enum Icon {
 pub struct Section {
     pub title: String,
     pub text: String,
+    pub format: Format,
+}
+
+/// How a section's text is read.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum Format {
+    /// Shown as is, monospaced, as for JSON.
+    Mono,
+    /// CommonMark with tables. Text from outside goes through `markdown::escape`.
+    Markdown,
+}
+
+/// What a shell draws for part of a section. Plugins write sections; `Section::blocks` reads
+/// them into blocks, so every shell draws the same thing.
+#[derive(Clone, Debug, PartialEq)]
+pub enum Block {
+    /// Proportional text that wraps.
+    Paragraph(Vec<Span>),
+    /// Monospaced, its lines kept.
+    Code(String),
+    /// Every item of a list and the lists inside it, in order.
+    List(Vec<ListItem>),
+    /// Rows of cells, under a header row of cells.
+    Table {
+        header: Vec<Vec<Span>>,
+        rows: Vec<Vec<Vec<Span>>>,
+    },
+    /// A picture in a file, read only while the detail shows. A plugin downloads one in its
+    /// background work, into `cache_directory`.
+    Image {
+        path: PathBuf,
+        /// Copied in its place, and shown if it can't be read.
+        description: String,
+    },
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct ListItem {
+    /// 0 for the outermost list.
+    pub depth: u8,
+    /// Such as `•` or `3.`; empty for text after a list inside the item.
+    pub marker: String,
+    pub spans: Vec<Span>,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct Span {
+    pub text: String,
+    pub style: Style,
+    /// A web or email address the text opens.
+    pub link: Option<String>,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct Style {
+    pub bold: bool,
+    pub italic: bool,
+    /// Monospaced, as for a name in code.
+    pub code: bool,
+}
+
+impl Section {
+    pub fn mono(title: impl Into<String>, text: impl Into<String>) -> Self {
+        Self {
+            title: title.into(),
+            text: text.into(),
+            format: Format::Mono,
+        }
+    }
+
+    pub fn markdown(title: impl Into<String>, text: impl Into<String>) -> Self {
+        Self {
+            format: Format::Markdown,
+            ..Self::mono(title, text)
+        }
+    }
+
+    /// Read now, as most details are never opened.
+    pub fn blocks(&self) -> Vec<Block> {
+        match self.format {
+            Format::Mono => vec![Block::Code(self.text.clone())],
+            Format::Markdown => markdown::blocks(&self.text),
+        }
+    }
+
+    /// What copying the whole section gives: its text without the Markdown.
+    pub fn plain_text(&self) -> String {
+        let blocks: Vec<String> = self.blocks().iter().map(Block::plain_text).collect();
+        blocks.join("\n")
+    }
+}
+
+impl Block {
+    /// Lists as their markers show them, and tables tab-separated, as a spreadsheet pastes them.
+    fn plain_text(&self) -> String {
+        fn text(spans: &[Span]) -> String {
+            spans.iter().map(|span| span.text.as_str()).collect()
+        }
+        let lines: Vec<String> = match self {
+            Self::Paragraph(spans) => return text(spans),
+            Self::Code(code) => return code.clone(),
+            Self::Image { description, .. } => return description.clone(),
+            Self::List(items) => items
+                .iter()
+                .map(|item| {
+                    let indent = "  ".repeat(item.depth.into());
+                    match item.marker.as_str() {
+                        "" => format!("{indent}{}", text(&item.spans)),
+                        marker => format!("{indent}{marker} {}", text(&item.spans)),
+                    }
+                })
+                .collect(),
+            Self::Table { header, rows } => std::iter::once(header)
+                .chain(rows)
+                .map(|row| {
+                    let cells: Vec<String> = row.iter().map(|cell| text(cell)).collect();
+                    cells.join("\t")
+                })
+                .collect(),
+        };
+        lines.join("\n")
+    }
 }
 
 #[derive(Clone, Debug, PartialEq)]

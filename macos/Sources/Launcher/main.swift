@@ -150,19 +150,20 @@ func scrollView(holding document: FlippedView) -> NSScrollView {
     return scroll
 }
 
-/// Read-only and selectable, so the mouse can copy any part; ↑ and ↓ step through the sections
-/// for ⌘C to copy whole.
+/// Read-only and selectable, so the mouse can copy any part; ↑ and ↓ step through the sections,
+/// for ⌘C to copy whole, and the links in each, for ↵ to open.
 final class DetailText: NSTextView {
     var back: () -> Void = {}
     var run: () -> Void = {}
-    /// Each section's span in the text, and what ⌘C copies when it's picked.
-    private var sections: [(range: NSRange, text: String)] = []
+    /// Each section's span in the text, then each of its links', with what ⌘C copies when it's
+    /// picked: a section's text, or a link's address.
+    private var stops: [(range: NSRange, text: String, link: URL?)] = []
     private var picked = 0 {
         didSet {
-            // Otherwise ⌘C would copy an earlier mouse selection instead of the section just picked.
-            setSelectedRange(NSRange(location: sections[picked].range.location, length: 0))
+            // Otherwise ⌘C would copy an earlier mouse selection instead of the stop just picked.
+            setSelectedRange(NSRange(location: stops[picked].range.location, length: 0))
             placeHighlight()
-            scrollRangeToVisible(sections[picked].range)
+            scrollRangeToVisible(stops[picked].range)
         }
     }
 
@@ -193,19 +194,207 @@ final class DetailText: NSTextView {
             .font: NSFont.systemFont(ofSize: 11, weight: .semibold),
             .foregroundColor: NSColor.secondaryLabelColor,
         ]
-        let body: [NSAttributedString.Key: Any] = [
-            .font: NSFont.monospacedSystemFont(ofSize: 13, weight: .regular),
-            .foregroundColor: NSColor.labelColor,
-        ]
         let string = NSMutableAttributedString()
-        self.sections = sections.enumerated().map { index, section in
-            if index > 0 { string.append(NSAttributedString(string: "\n\n", attributes: body)) }
+        for (index, section) in sections.enumerated() {
+            if index > 0 { string.append(NSAttributedString(string: "\n\n", attributes: DetailText.code)) }
             let start = string.length
             string.append(NSAttributedString(string: section.title.uppercased() + "\n", attributes: heading))
-            string.append(NSAttributedString(string: section.text, attributes: body))
-            return (NSRange(location: start, length: string.length - start), section.text)
+            for (index, block) in section.blocks.enumerated() {
+                if index > 0 {
+                    string.append(NSAttributedString(string: "\n", attributes: DetailText.code))
+                    // An empty line in a small font, so blocks sit apart by less than a line.
+                    string.append(NSAttributedString(string: "\n", attributes: [.font: NSFont.systemFont(ofSize: 4)]))
+                }
+                string.append(DetailText.draw(block))
+            }
+            let range = NSRange(location: start, length: string.length - start)
+            stops.append((range, section.copyText, nil))
+            string.enumerateAttribute(.link, in: range) { link, linkRange, _ in
+                if let link = link as? URL { stops.append((linkRange, link.absoluteString, link)) }
+            }
         }
         textStorage?.setAttributedString(string)
+    }
+
+    static let code: [NSAttributedString.Key: Any] = [
+        .font: NSFont.monospacedSystemFont(ofSize: 13, weight: .regular),
+        .foregroundColor: NSColor.labelColor,
+    ]
+
+    static func draw(_ block: Block) -> NSAttributedString {
+        switch block {
+        case let .paragraph(spans): draw(spans)
+        case let .code(text): NSAttributedString(string: text, attributes: code)
+        case let .list(items): drawList(items)
+        case let .table(header, rows): drawTable(header: header, rows: rows)
+        case let .image(path, description): drawImage(path: path, description: description)
+        }
+    }
+
+    /// At its pixels' size on this screen, shrunk to fit the text's width and 240 points high, and
+    /// decoded only at the size it shows. One that can't be read shows its description.
+    static func drawImage(path: String, description: String) -> NSAttributedString {
+        let unreadable = {
+            log("can't read the image \(path)")
+            return NSAttributedString(string: description, attributes: [
+                .font: NSFont.systemFont(ofSize: 13),
+                .foregroundColor: NSColor.secondaryLabelColor,
+            ])
+        }
+        let maxSize = NSSize(width: textWidth, height: 240)
+        let scale = NSScreen.main?.backingScaleFactor ?? 2
+        guard let source = CGImageSourceCreateWithURL(URL(fileURLWithPath: path) as CFURL, nil),
+              let properties = CGImageSourceCopyPropertiesAtIndex(source, 0, nil) as? [CFString: Any],
+              let pixelWidth = properties[kCGImagePropertyPixelWidth] as? Int, pixelWidth > 0,
+              let pixelHeight = properties[kCGImagePropertyPixelHeight] as? Int, pixelHeight > 0
+        else { return unreadable() }
+        var width = CGFloat(pixelWidth), height = CGFloat(pixelHeight)
+        // Orientations 5 to 8 turn it a quarter.
+        if properties[kCGImagePropertyOrientation] as? Int ?? 1 >= 5 { swap(&width, &height) }
+        let fit = min(1, maxSize.width * scale / width, maxSize.height * scale / height)
+        let longest = max(width, height)
+        let shownLongest = (longest * fit).rounded(.up)
+        guard let image = CGImageSourceCreateThumbnailAtIndex(source, 0, [
+            kCGImageSourceCreateThumbnailFromImageAlways: true,
+            kCGImageSourceCreateThumbnailWithTransform: true,
+            kCGImageSourceThumbnailMaxPixelSize: shownLongest,
+            // The decoder skips pixels, so a large JPEG or HEIC isn't decoded in full first.
+            kCGImageSourceSubsampleFactor: [8, 4, 2].first { longest / CGFloat($0) >= shownLongest } ?? 1,
+        ] as CFDictionary)
+        else { return unreadable() }
+        let attachment = NSTextAttachment()
+        attachment.image = NSImage(cgImage: image, size: NSSize(width: width * fit / scale, height: height * fit / scale))
+        return NSAttributedString(attachment: attachment)
+    }
+
+    /// Each item a paragraph, its marker hanging in the indent of its depth.
+    static func drawList(_ items: [ListItem]) -> NSAttributedString {
+        let step: CGFloat = 22
+        let string = NSMutableAttributedString()
+        for (index, item) in items.enumerated() {
+            if index > 0 { string.append(NSAttributedString(string: "\n")) }
+            let indent = CGFloat(item.depth) * step
+            let style = NSMutableParagraphStyle()
+            style.firstLineHeadIndent = indent
+            style.headIndent = indent + step
+            style.tabStops = [NSTextTab(textAlignment: .left, location: indent + step)]
+            let line = NSMutableAttributedString(string: item.marker + "\t", attributes: [
+                .font: NSFont.systemFont(ofSize: 13),
+                .foregroundColor: NSColor.secondaryLabelColor,
+            ])
+            line.append(draw(item.spans, inParagraph: true))
+            line.addAttribute(.paragraphStyle, value: style, range: NSRange(location: 0, length: line.length))
+            string.append(line)
+        }
+        return string
+    }
+
+    /// Columns as wide as their widest cell, as long as the table fits; the header bold and muted.
+    static func drawTable(header: [[Span]], rows: [[[Span]]]) -> NSAttributedString {
+        let gap: CGFloat = 20
+        let cells = ([header] + rows).enumerated().map { index, row in
+            row.map { spans in
+                let cell = NSMutableAttributedString(attributedString: draw(
+                    index == 0 ? spans.map { var span = $0; span.style.bold = true; return span } : spans,
+                    // A line break would end the row.
+                    inParagraph: true
+                ))
+                if index == 0 {
+                    cell.addAttribute(.foregroundColor, value: NSColor.secondaryLabelColor,
+                                      range: NSRange(location: 0, length: cell.length))
+                }
+                return cell
+            }
+        }
+        var widths: [CGFloat] = []
+        for row in cells {
+            for (column, cell) in row.enumerated() {
+                if column == widths.count { widths.append(0) }
+                widths[column] = max(widths[column], cell.size().width.rounded(.up))
+            }
+        }
+        let available = textWidth - gap * CGFloat(max(widths.count - 1, 0))
+        let fitted = columnWidths(needed: widths, available: available)
+        return fitted == widths
+            ? tabbedRows(cells, widths: widths, gap: gap)
+            : textTable(cells, widths: fitted, gap: gap)
+    }
+
+    /// Each row a paragraph, its cells at tab stops, so columns are as wide as their text.
+    static func tabbedRows(_ cells: [[NSAttributedString]], widths: [CGFloat], gap: CGFloat) -> NSAttributedString {
+        let style = NSMutableParagraphStyle()
+        style.tabStops = widths.dropLast().reduce(into: []) { stops, width in
+            stops.append(NSTextTab(textAlignment: .left, location: (stops.last?.location ?? 0) + width + gap))
+        }
+        let tab = NSAttributedString(string: "\t", attributes: [.font: NSFont.systemFont(ofSize: 13)])
+        let string = NSMutableAttributedString()
+        for (index, row) in cells.enumerated() {
+            if index > 0 { string.append(NSAttributedString(string: "\n")) }
+            for (column, cell) in row.enumerated() {
+                if column > 0 { string.append(tab) }
+                string.append(cell)
+            }
+        }
+        string.addAttribute(.paragraphStyle, value: style, range: NSRange(location: 0, length: string.length))
+        return string
+    }
+
+    /// Each cell a paragraph in a fixed-width column, so long cells wrap within their column. The
+    /// last cell's paragraph ends with whatever follows the table.
+    static func textTable(_ cells: [[NSAttributedString]], widths: [CGFloat], gap: CGFloat) -> NSAttributedString {
+        let table = NSTextTable()
+        table.numberOfColumns = widths.count
+        table.layoutAlgorithm = .fixedLayoutAlgorithm
+        let string = NSMutableAttributedString()
+        for (index, row) in cells.enumerated() {
+            for (column, width) in widths.enumerated() {
+                let block = NSTextTableBlock(
+                    table: table, startingRow: index, rowSpan: 1, startingColumn: column, columnSpan: 1
+                )
+                block.setContentWidth(width, type: .absoluteValueType)
+                if column < widths.count - 1 {
+                    block.setWidth(gap, type: .absoluteValueType, for: .padding, edge: .maxX)
+                }
+                let style = NSMutableParagraphStyle()
+                style.textBlocks = [block]
+                let cell = NSMutableAttributedString(
+                    attributedString: row.indices.contains(column) ? row[column] : NSAttributedString()
+                )
+                cell.append(NSAttributedString(string: "\n", attributes: [.font: NSFont.systemFont(ofSize: 13)]))
+                cell.addAttribute(.paragraphStyle, value: style, range: NSRange(location: 0, length: cell.length))
+                string.append(cell)
+            }
+        }
+        if string.length > 0 { string.deleteCharacters(in: NSRange(location: string.length - 1, length: 1)) }
+        return string
+    }
+
+    /// The width the text lays out in: the panel's, less the text view's inset and the line
+    /// fragment padding at either side.
+    static let textWidth = Metrics.width - 38
+
+    /// In a list item or table cell, line breaks stay within the paragraph that places it.
+    static func draw(_ spans: [Span], inParagraph: Bool = false) -> NSAttributedString {
+        spans.reduce(into: NSMutableAttributedString()) { string, span in
+            var span = span
+            if inParagraph { span.text = span.text.replacingOccurrences(of: "\n", with: "\u{2028}") }
+            string.append(draw(span))
+        }
+    }
+
+    static func draw(_ span: Span) -> NSAttributedString {
+        var font = span.style.code
+            ? NSFont.monospacedSystemFont(ofSize: 12, weight: .regular)
+            : NSFont.systemFont(ofSize: 13)
+        var traits: NSFontDescriptor.SymbolicTraits = []
+        if span.style.bold { traits.insert(.bold) }
+        if span.style.italic { traits.insert(.italic) }
+        if !traits.isEmpty {
+            font = NSFont(descriptor: font.fontDescriptor.withSymbolicTraits(traits), size: 0) ?? font
+        }
+        var attributes: [NSAttributedString.Key: Any] = [.font: font, .foregroundColor: NSColor.labelColor]
+        if let link = span.link, let url = URL(string: link) { attributes[.link] = url }
+        return NSAttributedString(string: span.text, attributes: attributes)
     }
 
     var contentHeight: CGFloat {
@@ -217,9 +406,15 @@ final class DetailText: NSTextView {
     override func doCommand(by selector: Selector) {
         switch selector {
         case #selector(cancelOperation(_:)), #selector(moveLeft(_:)): back()
-        case #selector(insertNewline(_:)): run()
-        case #selector(moveDown(_:)) where !sections.isEmpty: picked = step(picked, by: 1, count: sections.count)
-        case #selector(moveUp(_:)) where !sections.isEmpty: picked = step(picked, by: -1, count: sections.count)
+        case #selector(insertNewline(_:)):
+            if stops.indices.contains(picked), let link = stops[picked].link {
+                // As a click on it does.
+                clicked(onLink: link, at: stops[picked].range.location)
+            } else {
+                run()
+            }
+        case #selector(moveDown(_:)) where !stops.isEmpty: picked = step(picked, by: 1, count: stops.count)
+        case #selector(moveUp(_:)) where !stops.isEmpty: picked = step(picked, by: -1, count: stops.count)
         default: super.doCommand(by: selector)
         }
     }
@@ -229,23 +424,30 @@ final class DetailText: NSTextView {
     override func copy(_: Any?) {
         let selected = selectedRange()
         if selected.length > 0 {
-            copyToPasteboard((string as NSString).substring(with: selected))
-        } else if sections.indices.contains(picked) {
-            copyToPasteboard(sections[picked].text)
+            // Without images' attachment characters, and with list items' and cells' line
+            // separators as line breaks.
+            copyToPasteboard((string as NSString).substring(with: selected)
+                .replacingOccurrences(of: "\u{FFFC}", with: "")
+                .replacingOccurrences(of: "\u{2028}", with: "\n"))
+        } else if stops.indices.contains(picked) {
+            copyToPasteboard(stops[picked].text)
         }
     }
 
-    /// Moves `highlight`, a sibling behind this view, onto the picked section.
+    /// Moves `highlight`, a sibling behind this view, onto the picked section, across the
+    /// panel, or link, just around its text.
     func placeHighlight() {
         guard let layoutManager, let textContainer, let container = highlight.superview,
-              sections.indices.contains(picked)
+              stops.indices.contains(picked)
         else { return }
-        let glyphs = layoutManager.glyphRange(forCharacterRange: sections[picked].range, actualCharacterRange: nil)
+        let glyphs = layoutManager.glyphRange(forCharacterRange: stops[picked].range, actualCharacterRange: nil)
         let box = layoutManager.boundingRect(forGlyphRange: glyphs, in: textContainer)
-        highlight.frame = convert(NSRect(
-            x: Metrics.inset, y: box.minY + textContainerOrigin.y - Metrics.inset,
-            width: bounds.width - Metrics.inset * 2, height: box.height + Metrics.inset * 2
-        ), to: container)
+            .offsetBy(dx: textContainerOrigin.x, dy: textContainerOrigin.y)
+        let frame = stops[picked].link == nil
+            ? NSRect(x: Metrics.inset, y: box.minY - Metrics.inset,
+                     width: bounds.width - Metrics.inset * 2, height: box.height + Metrics.inset * 2)
+            : box.insetBy(dx: -3, dy: -1)
+        highlight.frame = convert(frame, to: container)
     }
 }
 

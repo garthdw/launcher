@@ -4,7 +4,7 @@
 use std::fmt;
 use std::sync::{Arc, Mutex, MutexGuard};
 
-use launcher_core::{PluginId, log};
+use launcher_core::{PluginId, Style, log};
 use launcher_window::{Display, Placement, Rect, WindowAction};
 
 uniffi::setup_scaffolding!();
@@ -50,17 +50,98 @@ pub struct Item {
     pub choice: Arc<Choice>,
 }
 
+/// A section read into what the shell draws, and what copying it whole gives.
 #[derive(uniffi::Record)]
 pub struct Section {
     pub title: String,
-    pub text: String,
+    pub blocks: Vec<Block>,
+    pub copy_text: String,
 }
 
 impl From<launcher_core::Section> for Section {
     fn from(section: launcher_core::Section) -> Self {
         Self {
+            blocks: section.blocks().into_iter().map(Block::from).collect(),
+            copy_text: section.plain_text(),
             title: section.title,
-            text: section.text,
+        }
+    }
+}
+
+#[derive(uniffi::Enum)]
+pub enum Block {
+    Paragraph {
+        spans: Vec<Span>,
+    },
+    Code {
+        text: String,
+    },
+    List {
+        items: Vec<ListItem>,
+    },
+    Table {
+        header: Vec<Vec<Span>>,
+        rows: Vec<Vec<Vec<Span>>>,
+    },
+    Image {
+        path: String,
+        description: String,
+    },
+}
+
+impl From<launcher_core::Block> for Block {
+    fn from(block: launcher_core::Block) -> Self {
+        fn spans(spans: Vec<launcher_core::Span>) -> Vec<Span> {
+            spans.into_iter().map(Span::from).collect()
+        }
+        fn cells(row: Vec<Vec<launcher_core::Span>>) -> Vec<Vec<Span>> {
+            row.into_iter().map(spans).collect()
+        }
+        match block {
+            launcher_core::Block::Paragraph(text) => Self::Paragraph { spans: spans(text) },
+            launcher_core::Block::Code(text) => Self::Code { text },
+            launcher_core::Block::List(items) => Self::List {
+                items: items
+                    .into_iter()
+                    .map(|item| ListItem {
+                        depth: item.depth,
+                        marker: item.marker,
+                        spans: spans(item.spans),
+                    })
+                    .collect(),
+            },
+            launcher_core::Block::Table { header, rows } => Self::Table {
+                header: cells(header),
+                rows: rows.into_iter().map(cells).collect(),
+            },
+            launcher_core::Block::Image { path, description } => Self::Image {
+                path: path.to_string_lossy().into_owned(),
+                description,
+            },
+        }
+    }
+}
+
+#[derive(uniffi::Record)]
+pub struct ListItem {
+    pub depth: u8,
+    pub marker: String,
+    pub spans: Vec<Span>,
+}
+
+#[derive(uniffi::Record)]
+pub struct Span {
+    pub text: String,
+    pub style: Style,
+    pub link: Option<String>,
+}
+
+impl From<launcher_core::Span> for Span {
+    fn from(span: launcher_core::Span) -> Self {
+        Self {
+            text: span.text,
+            style: span.style,
+            link: span.link,
         }
     }
 }
@@ -137,6 +218,13 @@ impl Item {
 }
 
 // Restated for UniFFI to derive its converters; the compiler checks they match the originals.
+#[uniffi::remote(Record)]
+pub struct Style {
+    pub bold: bool,
+    pub italic: bool,
+    pub code: bool,
+}
+
 #[uniffi::remote(Record)]
 pub struct Rect {
     pub x: f64,
@@ -580,7 +668,7 @@ mod tests {
             launcher
                 .detail(items[0].choice.clone())
                 .iter()
-                .map(|section| (section.title.as_str(), section.text.as_str()))
+                .map(|section| (section.title.as_str(), section.copy_text.as_str()))
                 .collect::<Vec<_>>(),
             [("Input", "2 + 3")]
         );
