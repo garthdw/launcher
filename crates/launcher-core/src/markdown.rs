@@ -47,9 +47,8 @@ struct Reader {
     items: Vec<ListItem>,
     /// The marker of the item being read, until its text is read.
     marker: String,
-    /// Inside a table, and its header and rows so far.
+    /// Inside a table, and its rows so far, the header first.
     table: bool,
-    header: Vec<Vec<Span>>,
     rows: Vec<Vec<Vec<Span>>>,
     row: Vec<Vec<Span>>,
     /// The file of the image being read, whose text is its description.
@@ -91,7 +90,7 @@ impl Reader {
                 None => self.link = None,
             },
             // A list item's second paragraph.
-            Event::Start(Tag::Paragraph) if !self.spans.is_empty() => self.push("\n", false),
+            Event::Start(Tag::Paragraph) => self.new_line(),
             Event::End(TagEnd::Paragraph | TagEnd::HtmlBlock) => self.end_paragraph(),
             Event::Start(Tag::CodeBlock(_)) => {
                 self.end_paragraph();
@@ -101,9 +100,7 @@ impl Reader {
                 let Some(code) = self.code.take() else { return };
                 let code = code.trim_end_matches('\n');
                 if self.in_list_or_table() {
-                    if !self.spans.is_empty() {
-                        self.push("\n", false);
-                    }
+                    self.new_line();
                     self.push(code, true);
                 } else {
                     self.blocks.push(Block::Code(code.into()));
@@ -140,16 +137,16 @@ impl Reader {
                 let cell = self.take_spans();
                 self.row.push(cell);
             }
-            Event::End(TagEnd::TableHead) => self.header = std::mem::take(&mut self.row),
-            Event::End(TagEnd::TableRow) => {
+            Event::End(TagEnd::TableHead | TagEnd::TableRow) => {
                 let row = std::mem::take(&mut self.row);
                 self.rows.push(row);
             }
             Event::End(TagEnd::Table) => {
                 self.table = false;
+                let mut rows = std::mem::take(&mut self.rows).into_iter();
                 self.blocks.push(Block::Table {
-                    header: std::mem::take(&mut self.header),
-                    rows: std::mem::take(&mut self.rows),
+                    header: rows.next().unwrap_or_default(),
+                    rows: rows.collect(),
                 });
             }
             Event::Text(text) | Event::Html(text) | Event::InlineHtml(text) => {
@@ -179,6 +176,13 @@ impl Reader {
                 style,
                 link: self.link.clone(),
             }),
+        }
+    }
+
+    /// Starts a line, after text already read for the same list item or table cell.
+    fn new_line(&mut self) {
+        if !self.spans.is_empty() {
+            self.push("\n", false);
         }
     }
 
@@ -404,15 +408,15 @@ mod tests {
     #[test]
     fn copying_a_section_drops_the_markdown() {
         let section = crate::Section::markdown("", "A **b** [c](https://c.example)\n\n```\nd\n```");
-        assert_eq!(section.plain_text(), "A b c\nd");
+        assert_eq!(crate::plain_text(&section.blocks()), "A b c\nd");
         let list = crate::Section::markdown("", "1. one\n   - two\n\n   after");
-        assert_eq!(list.plain_text(), "1. one\n  • two\nafter");
+        assert_eq!(crate::plain_text(&list.blocks()), "1. one\n  • two\nafter");
         let table = crate::Section::markdown("", "| a | b |\n|---|---|\n| 1 | 2 |");
-        assert_eq!(table.plain_text(), "a\tb\n1\t2");
+        assert_eq!(crate::plain_text(&table.blocks()), "a\tb\n1\t2");
         let image = crate::Section::markdown("", "![A chart](/tmp/a.png)");
-        assert_eq!(image.plain_text(), "A chart");
+        assert_eq!(crate::plain_text(&image.blocks()), "A chart");
         let mono = crate::Section::mono("", "**kept**\n\n");
-        assert_eq!(mono.plain_text(), "**kept**\n\n");
+        assert_eq!(crate::plain_text(&mono.blocks()), "**kept**\n\n");
     }
 
     #[test]
