@@ -2,7 +2,6 @@ mod expression;
 mod rates;
 mod units;
 
-use std::cell::OnceCell;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError, Weak};
 use std::thread;
@@ -139,22 +138,8 @@ impl Plugin for Calc {
             ExchangeRates::Loaded(rates, _) => Some(&**rates),
             ExchangeRates::Loading | ExchangeRates::Unavailable => None,
         };
-        let evaluate = |reading: &expression::Reading, newton_metres| {
-            reading.evaluate(&Environment {
-                rates,
-                newton_metres,
-                now: OnceCell::new(),
-            })
-        };
-        let answer = expression::read(query).and_then(|reading| {
-            let answer = match evaluate(&reading, false) {
-                // `nm` is nanometres, unless that leaves the query meaningless, as in
-                // `100 nm to ftlb`.
-                Err(Error::Invalid) if query.contains("nm") => evaluate(&reading, true),
-                answer => answer,
-            };
-            Ok((reading, answer?))
-        });
+        let environment = Environment::new(rates);
+        let answer = expression::read(query).and_then(|reading| reading.resolve(&environment));
         let (reading, answer) = match answer {
             Ok(answer) => answer,
             Err(Error::RatesMissing) if has_number => {
@@ -347,6 +332,16 @@ mod tests {
             .collect()
     }
 
+    /// How the calculator read `query`, from the detail.
+    fn input(query: &str) -> Option<String> {
+        with_rates()
+            .query(query)
+            .into_iter()
+            .flat_map(|item| item.detail)
+            .find(|section| section.title == "Input")
+            .map(|section| section.text)
+    }
+
     fn title(query: &str) -> String {
         titles(query).join(" / ")
     }
@@ -453,16 +448,6 @@ mod tests {
     }
 
     #[test]
-    fn units_keep_their_case_and_nm_stays_nanometres() {
-        answers(&[
-            ("1 nm to m", "1e-9 m"),
-            ("1 mW to W", "0.001 W"),
-            ("1 MW to W", "1_000_000 W"),
-            ("1 KW to W", ""),
-        ]);
-    }
-
-    #[test]
     fn force_power_and_torque() {
         answers(&[
             ("100 N to lbf", "22.4809 lbf"),
@@ -483,6 +468,64 @@ mod tests {
         ] {
             assert_eq!(title(torque), "73.7562 ft·lbf", "{torque}");
         }
+    }
+
+    #[test]
+    fn a_conversion_picks_the_meaning_that_fits() {
+        answers(&[
+            ("10 hp to ps", "10.1387 PS"),
+            ("10 ps to hp", "9.8632 hp"),
+            ("1 ps to s", "1e-12 s"),
+            ("10 nm to m", "1e-8 m"),
+            ("10 nm to ft lbf", "7.37562 ft·lbf"),
+            ("10 ft lbf to nm", "13.5582 N·m"),
+            ("1 nm to m", "1e-9 m"),
+            ("10 nm * 2", "20 nm"),
+            ("1 nm to s", ""),
+        ]);
+        assert_eq!(input("10 nm to ft lbf"), Some("10 N·m ➞ ft lbf".into()));
+        assert_eq!(input("10 hp to ps"), Some("10 hp ➞ PS".into()));
+        assert_eq!(input("10 nm to m"), Some("10 nm ➞ m".into()));
+    }
+
+    #[test]
+    fn a_unit_in_the_wrong_case_is_read_in_the_right_one() {
+        answers(&[
+            ("1000kb to mb", "1 MB"),
+            ("2 GB to mb", "2000 MB"),
+            ("1 mB to B", "1_000_000 B"),
+            ("5 ms to S", ""),
+            ("1 Km", "1 km"),
+            ("1 KILOMETRE to m", "1000 m"),
+            ("100 NM to ft lbf", "73.7562 ft·lbf"),
+            ("100 NM to m", "1e-7 m"),
+            ("1 Gb to MB", "125 MB"),
+            ("8 Mb to MB", "1 MB"),
+            ("100 Mb/s * 1 h to GB", "45 GB"),
+            ("1 gb to MB", "1000 MB"),
+            ("2 c to K", ""),
+            ("1 KW to W", "1000 W"),
+            ("1 Ps to s", "1e15 s"),
+        ]);
+        assert_eq!(input("5 Km to m"), Some("5 km ➞ m".into()));
+        for word in ["Day", "SAFARI", "Terminal"] {
+            assert_eq!(title(word), "", "{word}");
+        }
+    }
+
+    #[test]
+    fn a_unit_in_the_right_case_keeps_it() {
+        answers(&[
+            ("1 mW to W", "0.001 W"),
+            ("1 MW to W", "1_000_000 W"),
+            ("1 mW to MW", "1e-9 MW"),
+            // Typed in a case that means something, a unit isn't swapped to make a query work.
+            ("5 MS to s", ""),
+            ("10 Nm to m", ""),
+            ("1 S to ms", ""),
+            ("1 T to kg", ""),
+        ]);
+        assert_eq!(input("10 NM ^ 2"), Some("10 (N·m) ^ 2".into()));
     }
 
     #[test]
