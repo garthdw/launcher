@@ -143,12 +143,12 @@ impl Section {
             Format::Markdown => markdown::blocks(&self.text),
         }
     }
+}
 
-    /// What copying the whole section gives: its text without the Markdown.
-    pub fn plain_text(&self) -> String {
-        let blocks: Vec<String> = self.blocks().iter().map(Block::plain_text).collect();
-        blocks.join("\n")
-    }
+/// What copying a whole section with these blocks gives: its text without the Markdown.
+pub fn plain_text(blocks: &[Block]) -> String {
+    let blocks: Vec<String> = blocks.iter().map(Block::plain_text).collect();
+    blocks.join("\n")
 }
 
 impl Block {

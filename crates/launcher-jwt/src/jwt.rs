@@ -141,10 +141,12 @@ impl Token {
             Section::mono("Payload", self.payload_json()),
         ];
         if !times.is_empty() {
-            let header = "| Claim | Time | Relative |\n|---|---|---|";
             detail.push(Section::markdown(
                 "Times",
-                format!("{header}\n{}", times.join("\n")),
+                format!(
+                    "| Claim | Time | Relative |\n|---|---|---|\n{}",
+                    times.join("\n")
+                ),
             ));
         }
         detail
@@ -184,6 +186,7 @@ fn span(duration: SignedDuration) -> String {
 
 #[cfg(test)]
 mod tests {
+    use launcher_core::plain_text;
     use serde_json::json;
 
     use super::*;
@@ -223,7 +226,7 @@ mod tests {
         assert_eq!(
             detail
                 .iter()
-                .map(|section| (section.title.as_str(), section.plain_text()))
+                .map(|section| (section.title.as_str(), plain_text(&section.blocks())))
                 .collect::<Vec<_>>(),
             [
                 (
@@ -307,7 +310,8 @@ mod tests {
             panic!("didn't decode");
         };
         assert_eq!(item.title, "HS256 · unreadable expiry");
-        let times = |detail: Vec<Section>| detail.last().map(Section::plain_text);
+        let times =
+            |detail: Vec<Section>| detail.last().map(|section| plain_text(&section.blocks()));
         assert_eq!(
             times(detail),
             Some("Claim\tTime\tRelative\nexp\t1800000000000\tunreadable".into())
