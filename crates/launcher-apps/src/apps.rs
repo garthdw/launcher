@@ -785,6 +785,38 @@ mod tests {
     }
 
     #[test]
+    fn scores_are_pinned() {
+        let cases = [
+            ("Safari", "saf", Some(65)),
+            ("Safari", "safari", Some(125)),
+            ("Safari", "sri", Some(56)),
+            ("Safari", "fas", None),
+            ("Safari", "x", None),
+            ("Safe Exam Browser", "saf", Some(60)),
+            ("Safe Exam Browser", "seb", Some(64)),
+            ("Visual Studio Code", "vsc", Some(59)),
+            ("Visual Studio Code", "studio code", Some(204)),
+            ("Visual Studio Code", "vscode", Some(119)),
+            ("System Settings", "ss", Some(41)),
+            ("Screen Sharing", "ss", Some(41)),
+            ("Chess", "ss", Some(34)),
+            ("TextEdit", "e", Some(24)),
+            ("TextEdit", "ted", Some(67)),
+            ("Notes", "e", Some(14)),
+            ("Preview", "pi", Some(36)),
+            ("Pixelmator Pro", "pp", Some(37)),
+            ("1Password", "1pass", Some(104)),
+            ("zoom.us", "us", Some(45)),
+            ("Annotate Hosts", "notes", Some(72)),
+            ("Ünïcødé Äpp", "üä", Some(42)),
+            ("İstanbul", "ist", Some(64)),
+        ];
+        for (name, query, expected) in cases {
+            assert_eq!(matches(name, query), expected, "{query:?} in {name:?}");
+        }
+    }
+
+    #[test]
     fn frequently_opened_app_rises() {
         let installed = apps(INSTALLED);
         let mut usage = HashMap::new();
