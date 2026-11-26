@@ -301,11 +301,12 @@ pub fn window_moved_within(frame: Rect, visible: Rect) -> Rect {
 pub struct Launcher(Mutex<launcher_plugins::Launcher>);
 
 impl Launcher {
-    /// `None` after a plugin panicked while holding the lock.
+    /// `None` after a panic while holding the lock: one outside the plugins, whose own panics
+    /// `Plugins` catches.
     fn lock(&self) -> Option<MutexGuard<'_, launcher_plugins::Launcher>> {
         let locked = self.0.lock().ok();
         if locked.is_none() {
-            log!("a plugin panicked; the launcher is unavailable");
+            log!("the launcher panicked and is unavailable");
         }
         locked
     }
@@ -355,7 +356,7 @@ impl Launcher {
                 bindings: Vec::new(),
                 // With no hotkeys, the panel and its ⌘Q are out of reach; the item still quits.
                 menu_bar: true,
-                problem: Some("a plugin crashed; relaunch to get the settings back".into()),
+                problem: Some("the launcher crashed; relaunch to get the settings back".into()),
             },
         }
     }

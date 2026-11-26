@@ -331,7 +331,7 @@ impl Plugins {
     /// Puts `plugin`, or nothing, in place `place`, dropping the plugin there.
     pub fn set(&mut self, place: usize, plugin: Option<Box<dyn Plugin + Send>>) {
         match self.0.get_mut(place) {
-            Some(slot) => *slot = plugin,
+            Some(slot) => drop_plugin(std::mem::replace(slot, plugin)),
             None => log!("no place {place} for a plugin"),
         }
     }
@@ -341,20 +341,17 @@ impl Plugins {
     /// every keystroke, so every plugin must stay well under a frame.
     pub fn query(&mut self, query: &str) -> Vec<Group> {
         let query = query.trim();
-        let mut groups: Vec<Group> = self
-            .0
-            .iter_mut()
-            .enumerate()
-            .filter_map(|(index, plugin)| {
-                let plugin = plugin.as_mut()?;
-                let mut items = plugin.query(query);
+        let mut groups: Vec<Group> = (0..self.0.len())
+            .filter_map(|place| {
+                let (name, mut items) =
+                    self.ask(place, |plugin| (plugin.name(), plugin.query(query)))?;
                 for item in &mut items {
                     make_one_line(&mut item.title);
                     make_one_line(&mut item.subtitle);
                 }
-                (!items.is_empty()).then(|| Group {
-                    plugin: PluginId(index),
-                    name: plugin.name(),
+                (!items.is_empty()).then_some(Group {
+                    plugin: PluginId(place),
+                    name,
                     items,
                 })
             })
@@ -369,19 +366,54 @@ impl Plugins {
 
     /// The shell hid the panel, or is about to run an item's action; every plugin hears of it.
     pub fn hidden(&mut self) {
-        for plugin in self.0.iter_mut().flatten() {
-            plugin.hidden();
+        for place in 0..self.0.len() {
+            self.ask(place, |plugin| plugin.hidden());
         }
     }
 
     /// The shell ran `action` from an item `plugin` produced; only that plugin hears of it.
     pub fn ran(&mut self, plugin: PluginId, action: &Action) {
-        match self.0.get_mut(plugin.0).and_then(Option::as_mut) {
-            Some(plugin) => plugin.ran(action),
+        if self.0.get(plugin.0).is_some_and(Option::is_some) {
+            self.ask(plugin.0, |found| found.ran(action));
+        } else {
             // Not the action: a copy's text can be a token's claims, and the log is kept on disk.
-            None => log!("no plugin {} to tell it ran an action", plugin.0),
+            log!("no plugin {} to tell it ran an action", plugin.0);
         }
     }
+
+    /// `call` with the plugin in `place`; `None` if there's none or it panicked. One that panics
+    /// is dropped rather than asked again, as its state may be broken.
+    fn ask<T>(
+        &mut self,
+        place: usize,
+        call: impl FnOnce(&mut (dyn Plugin + Send)) -> T,
+    ) -> Option<T> {
+        let slot = self.0.get_mut(place)?;
+        let plugin = slot.as_mut()?;
+        let answer = catch_plugin_panic(plugin.name(), || call(plugin.as_mut()));
+        if answer.is_none() {
+            drop_plugin(slot.take());
+        }
+        answer
+    }
+}
+
+/// A plugin's `Drop` is its code too, so a panic there is caught as well.
+fn drop_plugin(plugin: Option<Box<dyn Plugin + Send>>) {
+    if let Some(plugin) = plugin {
+        catch_plugin_panic(plugin.name(), || drop(plugin));
+    }
+}
+
+/// `call`, which starts or asks the plugin `name`; `None` if it panicked, logging that the
+/// plugin is off. So a plugin's bug costs only its own results: the shell would otherwise go
+/// down with it.
+pub fn catch_plugin_panic<T>(name: &str, call: impl FnOnce() -> T) -> Option<T> {
+    let answer = std::panic::catch_unwind(std::panic::AssertUnwindSafe(call)).ok();
+    if answer.is_none() {
+        log!("the {name} plugin panicked, so it's off");
+    }
+    answer
 }
 
 /// The shell draws titles and subtitles on one line, but plugins can pass on text with line
@@ -451,6 +483,75 @@ mod tests {
                 ran.push(action.clone());
             }
         }
+    }
+
+    /// Panics whatever it's asked.
+    struct Panicking;
+
+    impl Plugin for Panicking {
+        fn name(&self) -> &'static str {
+            "panicking"
+        }
+
+        fn query(&mut self, _query: &str) -> Vec<Item> {
+            panic!("a bug in query");
+        }
+
+        fn ran(&mut self, _action: &Action) {
+            panic!("a bug in ran");
+        }
+
+        fn hidden(&mut self) {
+            panic!("a bug in hidden");
+        }
+    }
+
+    /// Runs itself again with stderr on a pipe, to count what it logs.
+    #[test]
+    fn a_plugin_that_panics_is_turned_off() -> Result<(), Box<dyn std::error::Error>> {
+        let Some(again) = run_test_again(
+            "tests::a_plugin_that_panics_is_turned_off",
+            std::process::Stdio::piped(),
+        )?
+        else {
+            let calm = Recorder::new("calm", &[50]);
+            let mut plugins = Plugins::new(vec![Box::new(Panicking), Box::new(calm)]);
+            for query in ["a", "ab"] {
+                let titles = vec![format!("calm {query} 0")];
+                assert_eq!(shown(&mut plugins, query), [("calm", titles)]);
+            }
+            plugins.hidden();
+            return Ok(());
+        };
+        let logged = String::from_utf8(again.stderr)?;
+        assert_eq!(
+            logged.matches("the panicking plugin").count(),
+            1,
+            "{logged}"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn a_plugin_that_panics_starting_is_off() {
+        let started = catch_plugin_panic("panicking", || -> Box<dyn Plugin + Send> {
+            panic!("a bug in start");
+        });
+        assert!(started.is_none());
+        assert_eq!(catch_plugin_panic("calm", || 2 + 2), Some(4));
+    }
+
+    #[test]
+    fn hiding_or_running_an_action_survives_a_plugin_that_panics() {
+        let (mut plugins, _, second_ran) = recorders();
+        plugins.set(0, Some(Box::new(Panicking)));
+        plugins.hidden();
+        let titles = vec!["second a 0".to_owned()];
+        assert_eq!(shown(&mut plugins, "a"), [("second", titles)]);
+        plugins.set(0, Some(Box::new(Panicking)));
+        plugins.ran(PluginId(0), &Action::Nothing);
+        plugins.ran(PluginId(1), &Action::Nothing);
+        assert!(second_ran.lock().is_ok_and(|ran| *ran == [Action::Nothing]));
     }
 
     fn recorders() -> (Plugins, Ran, Ran) {
