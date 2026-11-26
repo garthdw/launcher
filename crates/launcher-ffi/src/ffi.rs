@@ -4,7 +4,7 @@
 use std::fmt;
 use std::sync::{Arc, Mutex, MutexGuard};
 
-use launcher_core::{PluginId, log};
+use launcher_core::{PluginId, Style, log};
 use launcher_window::{Display, Placement, Rect, WindowAction};
 
 uniffi::setup_scaffolding!();
@@ -70,13 +70,34 @@ impl From<launcher_core::Section> for Section {
 
 #[derive(uniffi::Enum)]
 pub enum Block {
+    Paragraph { spans: Vec<Span> },
     Code { text: String },
 }
 
 impl From<launcher_core::Block> for Block {
     fn from(block: launcher_core::Block) -> Self {
         match block {
+            launcher_core::Block::Paragraph(spans) => Self::Paragraph {
+                spans: spans.into_iter().map(Span::from).collect(),
+            },
             launcher_core::Block::Code(text) => Self::Code { text },
+        }
+    }
+}
+
+#[derive(uniffi::Record)]
+pub struct Span {
+    pub text: String,
+    pub style: Style,
+    pub link: Option<String>,
+}
+
+impl From<launcher_core::Span> for Span {
+    fn from(span: launcher_core::Span) -> Self {
+        Self {
+            text: span.text,
+            style: span.style,
+            link: span.link,
         }
     }
 }
@@ -153,6 +174,13 @@ impl Item {
 }
 
 // Restated for UniFFI to derive its converters; the compiler checks they match the originals.
+#[uniffi::remote(Record)]
+pub struct Style {
+    pub bold: bool,
+    pub italic: bool,
+    pub code: bool,
+}
+
 #[uniffi::remote(Record)]
 pub struct Rect {
     pub x: f64,

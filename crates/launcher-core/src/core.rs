@@ -6,6 +6,8 @@ use std::path::PathBuf;
 use std::str::FromStr;
 use std::sync::Arc;
 
+pub mod markdown;
+
 #[derive(Clone, Debug, PartialEq)]
 pub struct Item {
     /// Shown on one line, as is the subtitle: `Plugins::query` turns each run of control
@@ -65,14 +67,34 @@ pub struct Section {
 pub enum Format {
     /// Shown as is, monospaced, as for JSON.
     Mono,
+    /// CommonMark with tables. Text from outside goes through `markdown::escape`.
+    Markdown,
 }
 
 /// What a shell draws for part of a section. Plugins write sections; `Section::blocks` reads
 /// them into blocks, so every shell draws the same thing.
 #[derive(Clone, Debug, PartialEq)]
 pub enum Block {
+    /// Proportional text that wraps.
+    Paragraph(Vec<Span>),
     /// Monospaced, its lines kept.
     Code(String),
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct Span {
+    pub text: String,
+    pub style: Style,
+    /// A web or email address the text opens.
+    pub link: Option<String>,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct Style {
+    pub bold: bool,
+    pub italic: bool,
+    /// Monospaced, as for a name in code.
+    pub code: bool,
 }
 
 impl Section {
@@ -84,16 +106,33 @@ impl Section {
         }
     }
 
-    pub fn blocks(&self) -> Vec<Block> {
-        match self.format {
-            Format::Mono => vec![Block::Code(self.text.clone())],
+    pub fn markdown(title: impl Into<String>, text: impl Into<String>) -> Self {
+        Self {
+            format: Format::Markdown,
+            ..Self::mono(title, text)
         }
     }
 
-    /// What copying the whole section gives.
-    pub fn plain_text(&self) -> String {
+    /// Read now, as most details are never opened.
+    pub fn blocks(&self) -> Vec<Block> {
         match self.format {
-            Format::Mono => self.text.clone(),
+            Format::Mono => vec![Block::Code(self.text.clone())],
+            Format::Markdown => markdown::blocks(&self.text),
+        }
+    }
+
+    /// What copying the whole section gives: its text without the Markdown.
+    pub fn plain_text(&self) -> String {
+        let blocks: Vec<String> = self.blocks().iter().map(Block::plain_text).collect();
+        blocks.join("\n")
+    }
+}
+
+impl Block {
+    fn plain_text(&self) -> String {
+        match self {
+            Self::Paragraph(spans) => spans.iter().map(|span| span.text.as_str()).collect(),
+            Self::Code(text) => text.clone(),
         }
     }
 }

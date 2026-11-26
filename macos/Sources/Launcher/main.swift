@@ -199,7 +199,11 @@ final class DetailText: NSTextView {
             let start = string.length
             string.append(NSAttributedString(string: section.title.uppercased() + "\n", attributes: heading))
             for (index, block) in section.blocks.enumerated() {
-                if index > 0 { string.append(NSAttributedString(string: "\n", attributes: DetailText.code)) }
+                if index > 0 {
+                    string.append(NSAttributedString(string: "\n", attributes: DetailText.code))
+                    // An empty line in a small font, so blocks sit apart by less than a line.
+                    string.append(NSAttributedString(string: "\n", attributes: [.font: NSFont.systemFont(ofSize: 4)]))
+                }
                 string.append(DetailText.draw(block))
             }
             return (NSRange(location: start, length: string.length - start), section.copyText)
@@ -214,8 +218,25 @@ final class DetailText: NSTextView {
 
     static func draw(_ block: Block) -> NSAttributedString {
         switch block {
+        case let .paragraph(spans):
+            spans.reduce(into: NSMutableAttributedString()) { string, span in string.append(draw(span)) }
         case let .code(text): NSAttributedString(string: text, attributes: code)
         }
+    }
+
+    static func draw(_ span: Span) -> NSAttributedString {
+        var font = span.style.code
+            ? NSFont.monospacedSystemFont(ofSize: 12, weight: .regular)
+            : NSFont.systemFont(ofSize: 13)
+        var traits: NSFontDescriptor.SymbolicTraits = []
+        if span.style.bold { traits.insert(.bold) }
+        if span.style.italic { traits.insert(.italic) }
+        if !traits.isEmpty {
+            font = NSFont(descriptor: font.fontDescriptor.withSymbolicTraits(traits), size: 0) ?? font
+        }
+        var attributes: [NSAttributedString.Key: Any] = [.font: font, .foregroundColor: NSColor.labelColor]
+        if let link = span.link, let url = URL(string: link) { attributes[.link] = url }
+        return NSAttributedString(string: span.text, attributes: attributes)
     }
 
     var contentHeight: CGFloat {

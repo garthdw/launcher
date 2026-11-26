@@ -11,3 +11,6 @@ path = "src/core.rs"
 [features]
 # `run_test_again`, for other crates' tests.
 test-support = []
+
+[dependencies]
+pulldown-cmark.workspace = true
