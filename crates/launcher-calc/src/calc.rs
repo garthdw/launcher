@@ -12,7 +12,7 @@ use numbat::module_importer::{BuiltinModuleImporter, ModuleImporter};
 use numbat::pretty_print::PrettyPrint;
 use numbat::resolver::{CodeSource, ModulePath};
 use numbat::value::Value;
-use numbat::{Context, FormatOptions, InterpreterResult, NumbatError};
+use numbat::{Context, FormatOptions, InterpreterResult, NumbatError, Statement};
 
 pub const NAME: &str = "Calculator";
 /// How often to check whether the cached rates are a day old. Hourly rather than sleeping a
@@ -311,10 +311,20 @@ impl Plugin for Calc {
             Numbat::Failed if has_number => return vec![notice("Calculator unavailable")],
             Numbat::Failed => return Vec::new(),
         };
-        let rewritten = x_as_times(query);
-        let Ok((statements, InterpreterResult::Value(value))) =
-            context.interpret_and_forget(&rewritten, CodeSource::Text)
-        else {
+        let rewritten = respell(&x_as_times(query), &SPELLINGS);
+        let newton_metres;
+        let answer = match evaluate(context, &rewritten) {
+            Some(answer) => Some(answer),
+            // `nm` is nanometres, unless that leaves the query meaningless, as in
+            // `100 nm to ftlb`.
+            None => {
+                newton_metres = respell(&rewritten, &[("nm", "N m")]);
+                (newton_metres != rewritten)
+                    .then(|| evaluate(context, &newton_metres))
+                    .flatten()
+            }
+        };
+        let Some((statements, value)) = answer else {
             if !has_number {
                 return Vec::new();
             }
@@ -379,6 +389,17 @@ impl Plugin for Calc {
     }
 }
 
+/// The value of `code`, and the statements numbat read it as; `None` if it has none.
+fn evaluate<'code>(
+    context: &mut Context,
+    code: &'code str,
+) -> Option<(Vec<Statement<'code>>, Value)> {
+    match context.interpret_and_forget(code, CodeSource::Text) {
+        Ok((statements, InterpreterResult::Value(value))) => Some((statements, value)),
+        _ => None,
+    }
+}
+
 /// How numbat's REPL shows a value, unlike `Display`, which writes dates as `datetime("…")`.
 /// Strings, such as `2^70 -> bin` gives, drop the REPL's quotes: they're the answer, not code.
 fn plain_text(value: &Value, options: &FormatOptions) -> String {
@@ -388,6 +409,45 @@ fn plain_text(value: &Value, options: &FormatOptions) -> String {
     plain_text_format(&value.pretty_print_with(options), false)
         .trim()
         .to_owned()
+}
+
+/// Units as people type them, which numbat spells otherwise.
+const SPELLINGS: [(&str, &str); 6] = [
+    ("Nm", "N m"),
+    ("kw", "kW"),
+    ("ftlb", "ft lbf"),
+    ("ft-lb", "ft lbf"),
+    ("lbft", "lbf ft"),
+    ("lb-ft", "lbf ft"),
+];
+
+/// `query` with each whole word in `spellings` replaced. Case counts, as `mW` and `MW` differ by
+/// 10⁹. A number may run into the word, as in `100Nm`.
+fn respell(query: &str, spellings: &[(&str, &str)]) -> String {
+    let in_word = |character: char| character.is_alphanumeric() || character == '_';
+    let mut respelled = String::with_capacity(query.len());
+    let mut rest = query.chars();
+    while !rest.as_str().is_empty() {
+        let starts_word = !respelled
+            .chars()
+            .next_back()
+            .is_some_and(|previous| previous.is_alphabetic() || previous == '_');
+        let found = starts_word
+            .then(|| {
+                spellings.iter().find_map(|(typed, spelled)| {
+                    let after = rest.as_str().strip_prefix(typed)?;
+                    (!after.starts_with(in_word)).then_some((spelled, after))
+                })
+            })
+            .flatten();
+        if let Some((spelled, after)) = found {
+            respelled.push_str(spelled);
+            rest = after.chars();
+        } else if let Some(character) = rest.next() {
+            respelled.push(character);
+        }
+    }
+    respelled
 }
 
 /// People type `x` for multiplication ("2 x 3", "4x5"), but numbat reads only `*` and `×` and
@@ -543,6 +603,37 @@ mod tests {
         assert_eq!(titles("5 km to m"), ["5000 m"]);
         assert_eq!(titles("10 kg -> lb")[0].split(' ').nth(1), Some("lb"));
         assert!(titles("100 N to lbf")[0].ends_with("lbf"));
+    }
+
+    #[test]
+    fn horsepower_is_mechanical() {
+        assert_eq!(titles("1 hp to kW"), ["0.7457 kW"]);
+        assert_eq!(titles("1 metric_hp to kW"), ["0.735499 kW"]);
+    }
+
+    #[test]
+    fn power_and_torque_as_people_type_them() {
+        assert_eq!(titles("1 hp to kw"), ["0.7457 kW"]);
+        assert_eq!(titles("5kw to W"), ["5000 W"]);
+        for torque in [
+            "100 Nm to ftlb",
+            "100 nm to ftlb",
+            "100 N m to ft-lb",
+            "100Nm to ft lbf",
+        ] {
+            assert_eq!(titles(torque), ["73.7562 ft·lbf"], "{torque}");
+        }
+        assert_eq!(titles("100 lbft to Nm"), ["135.582 N·m"]);
+        assert_eq!(titles("100 lb-ft to N m"), ["135.582 N·m"]);
+        assert_eq!(titles("1 Nm / 1 s to W"), ["1 W"]);
+    }
+
+    #[test]
+    fn units_keep_their_case_and_nm_stays_nanometres() {
+        assert_eq!(titles("1 nm to m"), ["1.0e-9 m"]);
+        assert_eq!(titles("1 mW to W"), ["0.001 W"]);
+        assert_eq!(titles("1 MW to W"), ["1_000_000 W"]);
+        assert_eq!(titles("1 KW to W"), Vec::<String>::new());
     }
 
     /// numbat holds exchange rates process-wide, so tests that set them take turns.

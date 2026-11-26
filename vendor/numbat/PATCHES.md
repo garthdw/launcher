@@ -46,3 +46,12 @@ expression before use), and patch 3 drops what it compiled, so `interpret_and_fo
 three stages directly, without on-demand currency loading. It also sets the typechecker's new
 `skip_suggestions`, since computing "did you mean" against every identifier for each unknown word
 was another 34%, for errors the caller doesn't show.
+
+
+## 5. `hp` is mechanical horsepower (`numbat/modules/units/misc.nbt`)
+
+Upstream's `hp` and `horsepower` are metric horsepower, 735.49875 W. People converting an engine's
+power in the US and UK mean mechanical horsepower, 550 ft·lbf/s or 745.69987158227022 W, about
+1.4% more, which numbat lacks. `hp` is now mechanical, and metric horsepower is `metric_horsepower`,
+short `metric_hp`. It can't be `PS`, as German specifications write it: siemens takes SI prefixes,
+so `PS` is already petasiemens.
