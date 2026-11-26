@@ -24,7 +24,7 @@ pub fn run_command(arguments: &[String]) -> Option<i32> {
 
 /// The plugins, in the order their results show when equally relevant; each has a place in
 /// `Plugins`, empty while it's off.
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy)]
 enum Place {
     Calculator,
     Jwt,
@@ -49,7 +49,17 @@ impl Place {
     /// panicked starting.
     fn start(self, config: &Config, changed: &ResultsChanged) -> Option<Box<dyn Plugin + Send>> {
         let settings = self.settings(config)?;
-        catch_plugin_panic(&format!("{self:?}"), || settings.start(changed))
+        catch_plugin_panic(self.name(), || settings.start(changed))
+    }
+
+    /// The plugin's `Plugin::name`, for before it has started.
+    fn name(self) -> &'static str {
+        match self {
+            Self::Calculator => launcher_calc::NAME,
+            Self::Jwt => launcher_jwt::NAME,
+            Self::Apps => launcher_apps::NAME,
+            Self::Kagi => launcher_kagi::NAME,
+        }
     }
 
     /// What the plugin in this place reads from `config`; `None` while it's off.

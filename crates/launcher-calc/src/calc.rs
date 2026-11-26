@@ -14,6 +14,7 @@ use numbat::resolver::{CodeSource, ModulePath};
 use numbat::value::Value;
 use numbat::{Context, FormatOptions, InterpreterResult, NumbatError};
 
+pub const NAME: &str = "Calculator";
 /// How often to check whether the cached rates are a day old. Hourly rather than sleeping a
 /// day, since a sleeping Mac doesn't advance a thread's sleep.
 const RATES_CHECK: Duration = Duration::from_secs(60 * 60);
@@ -285,7 +286,7 @@ fn is_money(value: &Value) -> bool {
 
 impl Plugin for Calc {
     fn name(&self) -> &'static str {
-        "Calculator"
+        NAME
     }
 
     fn query(&mut self, query: &str) -> Vec<Item> {

@@ -5,13 +5,15 @@ use jiff::{SignedDuration, Timestamp};
 use launcher_core::{Action, Icon, Item, Plugin, Section};
 use serde_json::{Map, Value};
 
+pub const NAME: &str = "JSON Web Token";
+
 /// Decodes a pasted JSON Web Token. It doesn't verify the signature, which needs the issuer's key;
 /// the point is to read the claims.
 pub struct Jwt;
 
 impl Plugin for Jwt {
     fn name(&self) -> &'static str {
-        "JSON Web Token"
+        NAME
     }
 
     fn query(&mut self, query: &str) -> Vec<Item> {
