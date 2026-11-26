@@ -483,6 +483,8 @@ pub(crate) fn hyphenated() -> impl Iterator<Item = &'static str> {
 
 pub(crate) struct Currency {
     pub(crate) code: &'static str,
+    /// Digits after the point, as ISO 4217 gives them.
+    decimals: usize,
     /// How it shows, if not as its code.
     symbol: Option<&'static str>,
     aliases: &'static [&'static str],
@@ -490,11 +492,13 @@ pub(crate) struct Currency {
 
 const fn currency_entry(
     code: &'static str,
+    decimals: usize,
     symbol: Option<&'static str>,
     aliases: &'static [&'static str],
 ) -> Currency {
     Currency {
         code,
+        decimals,
         symbol,
         aliases,
     }
@@ -503,37 +507,37 @@ const fn currency_entry(
 /// ECB currencies, which it quotes against the euro. Symbols such as ₹ that people may not
 /// recognise read as aliases, so the code shows.
 pub(crate) const CURRENCIES: &[Currency] = &[
-    currency_entry("EUR", Some("€"), &["euro", "euros"]),
-    currency_entry("USD", Some("$"), &["dollar", "dollars"]),
-    currency_entry("GBP", Some("£"), &[]),
-    currency_entry("JPY", Some("¥"), &["yen"]),
-    currency_entry("INR", None, &["₹", "rupee", "rupees"]),
-    currency_entry("KRW", None, &["₩", "won"]),
-    currency_entry("TRY", None, &["₺", "lira"]),
-    currency_entry("ILS", None, &["₪", "NIS"]),
-    currency_entry("AUD", None, &[]),
-    currency_entry("BGN", None, &[]),
-    currency_entry("BRL", None, &[]),
-    currency_entry("CAD", None, &[]),
-    currency_entry("CHF", None, &[]),
-    currency_entry("CNY", None, &[]),
-    currency_entry("CZK", None, &[]),
-    currency_entry("DKK", None, &[]),
-    currency_entry("HKD", None, &[]),
-    currency_entry("HUF", None, &[]),
-    currency_entry("IDR", None, &[]),
-    currency_entry("ISK", None, &[]),
-    currency_entry("MXN", None, &[]),
-    currency_entry("MYR", None, &[]),
-    currency_entry("NOK", None, &[]),
-    currency_entry("NZD", None, &[]),
-    currency_entry("PHP", None, &[]),
-    currency_entry("PLN", None, &[]),
-    currency_entry("RON", None, &[]),
-    currency_entry("SEK", None, &[]),
-    currency_entry("SGD", None, &[]),
-    currency_entry("THB", None, &[]),
-    currency_entry("ZAR", None, &[]),
+    currency_entry("EUR", 2, Some("€"), &["euro", "euros"]),
+    currency_entry("USD", 2, Some("$"), &["dollar", "dollars"]),
+    currency_entry("GBP", 2, Some("£"), &[]),
+    currency_entry("JPY", 0, Some("¥"), &["yen"]),
+    currency_entry("INR", 2, None, &["₹", "rupee", "rupees"]),
+    currency_entry("KRW", 0, None, &["₩", "won"]),
+    currency_entry("TRY", 2, None, &["₺", "lira"]),
+    currency_entry("ILS", 2, None, &["₪", "NIS"]),
+    currency_entry("AUD", 2, None, &[]),
+    currency_entry("BGN", 2, None, &[]),
+    currency_entry("BRL", 2, None, &[]),
+    currency_entry("CAD", 2, None, &[]),
+    currency_entry("CHF", 2, None, &[]),
+    currency_entry("CNY", 2, None, &[]),
+    currency_entry("CZK", 2, None, &[]),
+    currency_entry("DKK", 2, None, &[]),
+    currency_entry("HKD", 2, None, &[]),
+    currency_entry("HUF", 2, None, &[]),
+    currency_entry("IDR", 2, None, &[]),
+    currency_entry("ISK", 0, None, &[]),
+    currency_entry("MXN", 2, None, &[]),
+    currency_entry("MYR", 2, None, &[]),
+    currency_entry("NOK", 2, None, &[]),
+    currency_entry("NZD", 2, None, &[]),
+    currency_entry("PHP", 2, None, &[]),
+    currency_entry("PLN", 2, None, &[]),
+    currency_entry("RON", 2, None, &[]),
+    currency_entry("SEK", 2, None, &[]),
+    currency_entry("SGD", 2, None, &[]),
+    currency_entry("THB", 2, None, &[]),
+    currency_entry("ZAR", 2, None, &[]),
 ];
 
 /// An amount of one currency, and how it's written.
@@ -541,7 +545,7 @@ pub(crate) struct Money {
     pub(crate) symbol: &'static str,
     /// Whether the symbol goes before the number, as in `$5.00`, rather than a code after it.
     pub(crate) symbol_first: bool,
-    /// Digits after the point, as ISO 4217 gives them: none for the yen, won and króna.
+    /// Digits after the point.
     pub(crate) decimals: usize,
 }
 
@@ -742,11 +746,7 @@ impl Quantity {
         Some(Money {
             symbol: factor.symbol,
             symbol_first: currency.symbol.is_some(),
-            decimals: if matches!(currency.code, "JPY" | "KRW" | "ISK") {
-                0
-            } else {
-                2
-            },
+            decimals: currency.decimals,
         })
     }
 
