@@ -4,7 +4,7 @@ use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender};
-use std::sync::{Arc, Mutex, Weak};
+use std::sync::{Arc, Mutex, PoisonError, Weak};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
@@ -59,7 +59,8 @@ impl Usage {
 
 /// Searches application bundles by name, ranked by match quality and frecency.
 pub struct Apps {
-    /// The index thread holds it weakly, and stops once it's dropped.
+    /// The index thread holds it weakly, and stops once it's dropped. Each scan replaces it
+    /// whole, so a panic while it's locked can't leave it half-written: it's used even poisoned.
     index: Arc<Mutex<Vec<App>>>,
     usage: HashMap<PathBuf, Usage>,
     saver: Option<Saver>,
@@ -112,10 +113,7 @@ impl Plugin for Apps {
     }
 
     fn query(&mut self, query: &str) -> Vec<Item> {
-        let Ok(index) = self.index.lock() else {
-            log!("the app index thread panicked; skipping apps");
-            return Vec::new();
-        };
+        let index = self.index.lock().unwrap_or_else(PoisonError::into_inner);
         rank(&index, &self.usage, query, now())
             .into_iter()
             .take(MAX_RESULTS)
@@ -234,39 +232,31 @@ fn keep_index(
     // `None` once `index` is dropped.
     let mut refresh = || -> Option<()> {
         if let Some(watcher) = watcher.upgrade() {
-            match watcher.lock() {
-                Ok(mut watcher) => {
-                    for (root, watched) in roots.iter().zip(&mut watched) {
-                        if *watched || !root.is_dir() {
-                            continue;
-                        }
-                        match watcher.watch(root, RecursiveMode::Recursive) {
-                            Ok(()) => *watched = true,
-                            Err(error) => log!("can't watch {}: {error}", root.display()),
-                        }
-                    }
+            // Held only to add roots, which a panic adding another doesn't stop.
+            let mut watcher = watcher.lock().unwrap_or_else(PoisonError::into_inner);
+            for (root, watched) in roots.iter().zip(&mut watched) {
+                if *watched || !root.is_dir() {
+                    continue;
                 }
-                Err(_) => log!("the app folder watcher is poisoned; not watching new folders"),
+                match watcher.watch(root, RecursiveMode::Recursive) {
+                    Ok(()) => *watched = true,
+                    Err(error) => log!("can't watch {}: {error}", root.display()),
+                }
             }
         }
         // Scan before locking: `query` takes the same lock on every keystroke.
         let apps = scan(roots, &|| index.strong_count() == 0)?;
+        let index = index.upgrade()?;
+        let mut current = index.lock().unwrap_or_else(PoisonError::into_inner);
         // Updates write inside bundles in bursts that change nothing here, and every call
         // rebuilds the shown rows.
-        let replaced = match index.upgrade()?.lock() {
-            Ok(mut index) if *index != apps => {
-                *index = apps;
-                true
-            }
-            Ok(_) => false,
-            Err(_) => {
-                log!("the app index is poisoned; not refreshing it");
-                false
-            }
-        };
-        if replaced {
-            changed();
+        if *current == apps {
+            return Some(());
         }
+        *current = apps;
+        // Unlocked first: the shell asks for results again at once.
+        drop(current);
+        changed();
         Some(())
     };
     let missing = || -> Vec<bool> { roots.iter().map(|root| !root.is_dir()).collect() };
@@ -982,6 +972,26 @@ mod tests {
         fs::create_dir(root.path().join("Zed.app"))?;
         receiver.recv_timeout(Duration::from_secs(10))?;
         assert_eq!(titles(&mut plugin, "zed"), ["Zed"]);
+        Ok(())
+    }
+
+    #[test]
+    fn a_panic_holding_the_index_loses_no_apps() -> io::Result<()> {
+        let root = tempfile::tempdir()?;
+        fs::create_dir(root.path().join("Safari.app"))?;
+        let mut plugin = Apps::watching(vec![root.path().to_path_buf()], None, quiet());
+        assert!(eventually(|| titles(&mut plugin, "saf") == ["Safari"]));
+        let held = std::panic::catch_unwind(|| {
+            let _held = plugin.index.lock();
+            panic!("panicking with the index locked");
+        });
+        assert!(held.is_err() && plugin.index.is_poisoned());
+        assert_eq!(titles(&mut plugin, "saf"), ["Safari"]);
+        fs::create_dir(root.path().join("Zed.app"))?;
+        assert!(
+            eventually(|| titles(&mut plugin, "zed") == ["Zed"]),
+            "rescans still replace the index"
+        );
         Ok(())
     }
 

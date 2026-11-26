@@ -6,7 +6,7 @@ use std::time::Duration;
 use launcher_apps::Apps;
 use launcher_calc::Calc;
 use launcher_config::Config;
-use launcher_core::{Plugin, Plugins, ResultsChanged, cache_directory, log};
+use launcher_core::{Plugin, Plugins, ResultsChanged, cache_directory, catch_plugin_panic, log};
 use launcher_jwt::Jwt;
 use launcher_kagi::Kagi;
 
@@ -22,7 +22,7 @@ pub fn run_command(arguments: &[String]) -> Option<i32> {
 
 /// The plugins, in the order their results show when equally relevant; each has a place in
 /// `Plugins`, empty while it's off.
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Debug)]
 enum Place {
     Calculator,
     Jwt,
@@ -43,6 +43,13 @@ enum PluginSettings {
 }
 
 impl Place {
+    /// The plugin `config` turns on in this place, started; `None` while it's off, or if it
+    /// panicked starting.
+    fn start(self, config: &Config, changed: &ResultsChanged) -> Option<Box<dyn Plugin + Send>> {
+        let settings = self.settings(config)?;
+        catch_plugin_panic(&format!("{self:?}"), || settings.start(changed))
+    }
+
     /// What the plugin in this place reads from `config`; `None` while it's off.
     fn settings(self, config: &Config) -> Option<PluginSettings> {
         let enabled = config.plugins;
@@ -100,10 +107,7 @@ impl Launcher {
         };
         let mut plugins = Plugins::empty(PLACES.len());
         for (index, place) in PLACES.into_iter().enumerate() {
-            let plugin = place
-                .settings(&config)
-                .map(|settings| settings.start(&results_changed));
-            plugins.set(index, plugin);
+            plugins.set(index, place.start(&config, &results_changed));
         }
         Self::with(plugins, config, problem, results_changed)
     }
@@ -155,10 +159,9 @@ impl Launcher {
         }
         let mut restarted = false;
         for (index, place) in PLACES.into_iter().enumerate() {
-            let settings = place.settings(&config);
-            if settings != place.settings(&self.config) {
-                let plugin = settings.map(|settings| settings.start(&self.results_changed));
-                self.plugins.set(index, plugin);
+            if place.settings(&config) != place.settings(&self.config) {
+                self.plugins
+                    .set(index, place.start(&config, &self.results_changed));
                 restarted = true;
             }
         }
