@@ -454,19 +454,18 @@ fn snippet_markdown(html: &str) -> String {
                 tag.starts_with(|first: char| first.is_ascii_alphabetic() || "/!".contains(first))
             })
             .and_then(|tag| tag.split_once('>'));
-        let entity = from
-            .strip_prefix('&')
-            .and_then(|rest| rest.split_once(';'))
-            .and_then(|(name, after)| Some((entity(name)?, after)));
         rest = if let Some((tag, after)) = tag {
             let name = tag.split_whitespace().next().unwrap_or_default();
             match name.to_ascii_lowercase().as_str() {
                 "b" | "strong" => snippet.start_bold(),
-                "/b" | "/strong" => snippet.close_bold(),
+                "/b" | "/strong" => snippet.bold_closed = snippet.bold_from.is_some(),
                 _ => {}
             }
             after
-        } else if let Some((character, after)) = entity {
+        } else if let Some((name, after)) =
+            from.strip_prefix('&').and_then(|rest| rest.split_once(';'))
+            && let Some(character) = entity(name)
+        {
             snippet.push(character.encode_utf8(&mut [0; 4]));
             after
         } else {
@@ -498,10 +497,6 @@ impl Snippet {
             self.end_bold();
         }
         self.markdown.push_str(&escape(text));
-    }
-
-    fn close_bold(&mut self) {
-        self.bold_closed = self.bold_from.is_some();
     }
 
     fn start_bold(&mut self) {

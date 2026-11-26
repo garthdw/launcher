@@ -201,8 +201,17 @@ final class DetailText: NSTextView {
             string.append(NSAttributedString(string: section.title.uppercased() + "\n", attributes: heading))
             for (index, block) in section.blocks.enumerated() {
                 if index > 0 { string.append(NSAttributedString(string: "\n", attributes: [.font: DetailText.body])) }
-                let drawn = DetailText.draw(block)
-                string.append(index < section.blocks.count - 1 ? DetailText.spacedBelow(drawn) : drawn)
+                let drawn = NSMutableAttributedString(attributedString: DetailText.draw(block))
+                // Space below its last paragraph, keeping that paragraph's other settings, so
+                // blocks sit apart by less than a line.
+                if index < section.blocks.count - 1, drawn.length > 0 {
+                    let last = (drawn.string as NSString).paragraphRange(for: NSRange(location: drawn.length - 1, length: 0))
+                    let current = drawn.attribute(.paragraphStyle, at: last.location, effectiveRange: nil) as? NSParagraphStyle
+                    let style = (current?.mutableCopy() as? NSMutableParagraphStyle) ?? NSMutableParagraphStyle()
+                    style.paragraphSpacing = 6
+                    drawn.addAttribute(.paragraphStyle, value: style, range: last)
+                }
+                string.append(drawn)
             }
             let range = NSRange(location: start, length: string.length - start)
             stops.append((range, section.copyText, nil))
@@ -224,19 +233,6 @@ final class DetailText: NSTextView {
         .font: NSFont.monospacedSystemFont(ofSize: 13, weight: .regular),
         .foregroundColor: NSColor.labelColor,
     ]
-
-    /// `block` with space below its last paragraph, keeping that paragraph's other settings, so
-    /// blocks sit apart by less than a line.
-    static func spacedBelow(_ block: NSAttributedString) -> NSAttributedString {
-        let string = NSMutableAttributedString(attributedString: block)
-        guard string.length > 0 else { return string }
-        let last = (string.string as NSString).paragraphRange(for: NSRange(location: string.length - 1, length: 0))
-        let current = string.attribute(.paragraphStyle, at: last.location, effectiveRange: nil) as? NSParagraphStyle
-        let style = (current?.mutableCopy() as? NSMutableParagraphStyle) ?? NSMutableParagraphStyle()
-        style.paragraphSpacing = 6
-        string.addAttribute(.paragraphStyle, value: style, range: last)
-        return string
-    }
 
     static func draw(_ block: Block) -> NSAttributedString {
         switch block {
@@ -305,7 +301,6 @@ final class DetailText: NSTextView {
     /// Each cell is a paragraph; the last one ends with whatever follows the table.
     static func drawTable(header: [[Span]], rows: [[[Span]]]) -> NSAttributedString {
         let gap: CGFloat = 20
-        // Every row has the header's cells: the parser pads short rows.
         let cells = ([header] + rows).enumerated().map { index, row in
             row.map { spans in
                 let cell = NSMutableAttributedString(attributedString: draw(
@@ -321,7 +316,7 @@ final class DetailText: NSTextView {
             }
         }
         let needed = header.indices.map { column in
-            cells.map { $0[column].size().width.rounded(.up) }.max() ?? 0
+            cells.map { $0.indices.contains(column) ? $0[column].size().width.rounded(.up) : 0 }.max() ?? 0
         }
         let widths = columnWidths(needed: needed, available: textWidth - gap * CGFloat(max(needed.count - 1, 0)))
         let table = NSTextTable()
@@ -400,9 +395,20 @@ final class DetailText: NSTextView {
     override func copy(_: Any?) {
         let selected = selectedRange()
         if selected.length > 0 {
+            let text = NSMutableString(string: (string as NSString).substring(with: selected))
+            // A table's cells are paragraphs: one before the last of its row ends in a tab
+            // instead, so rows paste into a spreadsheet as the whole section's copy does.
+            textStorage?.enumerateAttribute(.paragraphStyle, in: selected) { style, range, _ in
+                let end = NSMaxRange(range) - 1 - selected.location
+                guard let cell = (style as? NSParagraphStyle)?.textBlocks.first as? NSTextTableBlock,
+                      cell.startingColumn < cell.table.numberOfColumns - 1,
+                      text.character(at: end) == 0x0A
+                else { return }
+                text.replaceCharacters(in: NSRange(location: end, length: 1), with: "\t")
+            }
             // Without images' attachment characters, and with list items' and cells' line
             // separators as line breaks.
-            copyToPasteboard((string as NSString).substring(with: selected)
+            copyToPasteboard((text as String)
                 .replacingOccurrences(of: "\u{FFFC}", with: "")
                 .replacingOccurrences(of: "\u{2028}", with: "\n"))
         } else if stops.indices.contains(picked) {
