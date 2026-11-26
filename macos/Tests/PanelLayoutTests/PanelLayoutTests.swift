@@ -47,3 +47,15 @@ private func layout(title: CGFloat, subtitle: CGFloat) -> RowLayout {
     #expect(step(0, by: -1, count: 3) == 2)
     #expect(step(0, by: -4, count: 3) == 2, "however far")
 }
+
+@Test func columnsThatFitKeepTheirWidths() {
+    #expect(columnWidths(needed: [50, 200, 100], available: 400) == [50, 200, 100])
+    #expect(columnWidths(needed: [], available: 400) == [])
+}
+
+@Test func tooWideColumnsShareWhatNarrowOnesLeave() {
+    #expect(columnWidths(needed: [50, 900, 300], available: 450) == [50, 200, 200])
+    #expect(columnWidths(needed: [50, 900, 180], available: 450) == [50, 220, 180],
+            "a column that fits once a wider one shrinks keeps its width")
+    #expect(columnWidths(needed: [600, 900], available: 400) == [200, 200])
+}

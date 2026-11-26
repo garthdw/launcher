@@ -236,7 +236,7 @@ final class DetailText: NSTextView {
                 .foregroundColor: NSColor.secondaryLabelColor,
             ])
         }
-        let maxSize = NSSize(width: Metrics.width - 28, height: 240)
+        let maxSize = NSSize(width: textWidth, height: 240)
         let scale = NSScreen.main?.backingScaleFactor ?? 2
         guard let source = CGImageSourceCreateWithURL(URL(fileURLWithPath: path) as CFURL, nil),
               let properties = CGImageSourceCopyPropertiesAtIndex(source, 0, nil) as? [CFString: Any],
@@ -284,8 +284,7 @@ final class DetailText: NSTextView {
         return string
     }
 
-    /// Each row a paragraph, its cells at tab stops past the widest cell of the column before, so
-    /// columns are as wide as their text. The header is bold and muted.
+    /// Columns as wide as their widest cell, as long as the table fits; the header bold and muted.
     static func drawTable(header: [[Span]], rows: [[[Span]]]) -> NSAttributedString {
         let gap: CGFloat = 20
         let cells = ([header] + rows).enumerated().map { index, row in
@@ -306,9 +305,18 @@ final class DetailText: NSTextView {
         for row in cells {
             for (column, cell) in row.enumerated() {
                 if column == widths.count { widths.append(0) }
-                widths[column] = max(widths[column], cell.size().width)
+                widths[column] = max(widths[column], cell.size().width.rounded(.up))
             }
         }
+        let available = textWidth - gap * CGFloat(max(widths.count - 1, 0))
+        let fitted = columnWidths(needed: widths, available: available)
+        return fitted == widths
+            ? tabbedRows(cells, widths: widths, gap: gap)
+            : textTable(cells, widths: fitted, gap: gap)
+    }
+
+    /// Each row a paragraph, its cells at tab stops, so columns are as wide as their text.
+    static func tabbedRows(_ cells: [[NSAttributedString]], widths: [CGFloat], gap: CGFloat) -> NSAttributedString {
         let style = NSMutableParagraphStyle()
         style.tabStops = widths.dropLast().reduce(into: []) { stops, width in
             stops.append(NSTextTab(textAlignment: .left, location: (stops.last?.location ?? 0) + width + gap))
@@ -325,6 +333,40 @@ final class DetailText: NSTextView {
         string.addAttribute(.paragraphStyle, value: style, range: NSRange(location: 0, length: string.length))
         return string
     }
+
+    /// Each cell a paragraph in a fixed-width column, so long cells wrap within their column. The
+    /// last cell's paragraph ends with whatever follows the table.
+    static func textTable(_ cells: [[NSAttributedString]], widths: [CGFloat], gap: CGFloat) -> NSAttributedString {
+        let table = NSTextTable()
+        table.numberOfColumns = widths.count
+        table.layoutAlgorithm = .fixedLayoutAlgorithm
+        let string = NSMutableAttributedString()
+        for (index, row) in cells.enumerated() {
+            for (column, width) in widths.enumerated() {
+                let block = NSTextTableBlock(
+                    table: table, startingRow: index, rowSpan: 1, startingColumn: column, columnSpan: 1
+                )
+                block.setContentWidth(width, type: .absoluteValueType)
+                if column < widths.count - 1 {
+                    block.setWidth(gap, type: .absoluteValueType, for: .padding, edge: .maxX)
+                }
+                let style = NSMutableParagraphStyle()
+                style.textBlocks = [block]
+                let cell = NSMutableAttributedString(
+                    attributedString: row.indices.contains(column) ? row[column] : NSAttributedString()
+                )
+                cell.append(NSAttributedString(string: "\n", attributes: [.font: NSFont.systemFont(ofSize: 13)]))
+                cell.addAttribute(.paragraphStyle, value: style, range: NSRange(location: 0, length: cell.length))
+                string.append(cell)
+            }
+        }
+        if string.length > 0 { string.deleteCharacters(in: NSRange(location: string.length - 1, length: 1)) }
+        return string
+    }
+
+    /// The width the text lays out in: the panel's, less the text view's inset and the line
+    /// fragment padding at either side.
+    static let textWidth = Metrics.width - 38
 
     /// In a list item or table cell, line breaks stay within the paragraph that places it.
     static func draw(_ spans: [Span], inParagraph: Bool = false) -> NSAttributedString {
