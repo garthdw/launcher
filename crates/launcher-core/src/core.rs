@@ -57,6 +57,45 @@ pub enum Icon {
 pub struct Section {
     pub title: String,
     pub text: String,
+    pub format: Format,
+}
+
+/// How a section's text is read.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum Format {
+    /// Shown as is, monospaced, as for JSON.
+    Mono,
+}
+
+/// What a shell draws for part of a section. Plugins write sections; `Section::blocks` reads
+/// them into blocks, so every shell draws the same thing.
+#[derive(Clone, Debug, PartialEq)]
+pub enum Block {
+    /// Monospaced, its lines kept.
+    Code(String),
+}
+
+impl Section {
+    pub fn mono(title: impl Into<String>, text: impl Into<String>) -> Self {
+        Self {
+            title: title.into(),
+            text: text.into(),
+            format: Format::Mono,
+        }
+    }
+
+    pub fn blocks(&self) -> Vec<Block> {
+        match self.format {
+            Format::Mono => vec![Block::Code(self.text.clone())],
+        }
+    }
+
+    /// What copying the whole section gives.
+    pub fn plain_text(&self) -> String {
+        match self.format {
+            Format::Mono => self.text.clone(),
+        }
+    }
 }
 
 #[derive(Clone, Debug, PartialEq)]

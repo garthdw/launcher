@@ -193,19 +193,29 @@ final class DetailText: NSTextView {
             .font: NSFont.systemFont(ofSize: 11, weight: .semibold),
             .foregroundColor: NSColor.secondaryLabelColor,
         ]
-        let body: [NSAttributedString.Key: Any] = [
-            .font: NSFont.monospacedSystemFont(ofSize: 13, weight: .regular),
-            .foregroundColor: NSColor.labelColor,
-        ]
         let string = NSMutableAttributedString()
         self.sections = sections.enumerated().map { index, section in
-            if index > 0 { string.append(NSAttributedString(string: "\n\n", attributes: body)) }
+            if index > 0 { string.append(NSAttributedString(string: "\n\n", attributes: DetailText.code)) }
             let start = string.length
             string.append(NSAttributedString(string: section.title.uppercased() + "\n", attributes: heading))
-            string.append(NSAttributedString(string: section.text, attributes: body))
-            return (NSRange(location: start, length: string.length - start), section.text)
+            for (index, block) in section.blocks.enumerated() {
+                if index > 0 { string.append(NSAttributedString(string: "\n", attributes: DetailText.code)) }
+                string.append(DetailText.draw(block))
+            }
+            return (NSRange(location: start, length: string.length - start), section.copyText)
         }
         textStorage?.setAttributedString(string)
+    }
+
+    static let code: [NSAttributedString.Key: Any] = [
+        .font: NSFont.monospacedSystemFont(ofSize: 13, weight: .regular),
+        .foregroundColor: NSColor.labelColor,
+    ]
+
+    static func draw(_ block: Block) -> NSAttributedString {
+        switch block {
+        case let .code(text): NSAttributedString(string: text, attributes: code)
+        }
     }
 
     var contentHeight: CGFloat {

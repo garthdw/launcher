@@ -128,20 +128,14 @@ impl Token {
             })
             .collect();
         let mut detail = vec![
-            Section {
-                title: "Header · signature not verified".into(),
-                text: format!("{:#}", Value::Object(self.header.clone())),
-            },
-            Section {
-                title: "Payload".into(),
-                text: self.payload_json(),
-            },
+            Section::mono(
+                "Header · signature not verified",
+                format!("{:#}", Value::Object(self.header.clone())),
+            ),
+            Section::mono("Payload", self.payload_json()),
         ];
         if !times.is_empty() {
-            detail.push(Section {
-                title: "Times".into(),
-                text: times.join("\n"),
-            });
+            detail.push(Section::mono("Times", times.join("\n")));
         }
         detail
     }

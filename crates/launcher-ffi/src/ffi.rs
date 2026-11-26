@@ -50,17 +50,33 @@ pub struct Item {
     pub choice: Arc<Choice>,
 }
 
+/// A section read into what the shell draws, and what copying it whole gives.
 #[derive(uniffi::Record)]
 pub struct Section {
     pub title: String,
-    pub text: String,
+    pub blocks: Vec<Block>,
+    pub copy_text: String,
 }
 
 impl From<launcher_core::Section> for Section {
     fn from(section: launcher_core::Section) -> Self {
         Self {
+            blocks: section.blocks().into_iter().map(Block::from).collect(),
+            copy_text: section.plain_text(),
             title: section.title,
-            text: section.text,
+        }
+    }
+}
+
+#[derive(uniffi::Enum)]
+pub enum Block {
+    Code { text: String },
+}
+
+impl From<launcher_core::Block> for Block {
+    fn from(block: launcher_core::Block) -> Self {
+        match block {
+            launcher_core::Block::Code(text) => Self::Code { text },
         }
     }
 }
@@ -580,7 +596,7 @@ mod tests {
             launcher
                 .detail(items[0].choice.clone())
                 .iter()
-                .map(|section| (section.title.as_str(), section.text.as_str()))
+                .map(|section| (section.title.as_str(), section.copy_text.as_str()))
                 .collect::<Vec<_>>(),
             [("Input", "2 + 3")]
         );

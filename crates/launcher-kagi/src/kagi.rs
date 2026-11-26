@@ -418,15 +418,9 @@ fn result_row(result: ApiResult) -> Option<Row> {
     if let Some(snippet) = result.snippet.as_deref().map(plain_text)
         && !snippet.is_empty()
     {
-        detail.push(Section {
-            title: "Snippet".into(),
-            text: snippet,
-        });
+        detail.push(Section::mono("Snippet", snippet));
     }
-    detail.push(Section {
-        title: "Address".into(),
-        text: url.to_string(),
-    });
+    detail.push(Section::mono("Address", url.to_string()));
     let title = result
         .title
         .filter(|title| !title.trim().is_empty())
@@ -724,10 +718,7 @@ mod tests {
     }
 
     fn section(title: &str, text: &str) -> Section {
-        Section {
-            title: title.into(),
-            text: text.into(),
-        }
+        Section::mono(title, text)
     }
 
     #[test]

@@ -194,16 +194,10 @@ impl Plugin for Calc {
         let Ok((reading, answer, _)) = calculate(&exchange_rates, query) else {
             return Vec::new();
         };
-        let mut detail = vec![Section {
-            title: "Input".into(),
-            text: reading.to_string(),
-        }];
+        let mut detail = vec![Section::mono("Input", reading.to_string())];
         let precise = in_full(&answer);
         if precise != shown(&answer).1 {
-            detail.push(Section {
-                title: "Full precision".into(),
-                text: precise,
-            });
+            detail.push(Section::mono("Full precision", precise));
         }
         detail
     }
