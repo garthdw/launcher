@@ -11,6 +11,7 @@ use launcher_core::{Action, Icon, Item, Plugin, ResultsChanged, Section, log};
 use serde::Deserialize;
 use url::Url;
 
+pub const NAME: &str = "Kagi";
 /// The API token's name in the secret store.
 pub const SECRET: &str = "kagi";
 const SEARCH_URL: &str = "https://kagi.com/search";
@@ -234,7 +235,7 @@ fn next_search(shared: &Shared, pause: Duration) -> Option<String> {
 
 impl Plugin for Kagi {
     fn name(&self) -> &'static str {
-        "Kagi"
+        NAME
     }
 
     fn query(&mut self, query: &str) -> Vec<Item> {

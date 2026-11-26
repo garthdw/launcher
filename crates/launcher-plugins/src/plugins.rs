@@ -6,9 +6,7 @@ use std::time::Duration;
 use launcher_apps::Apps;
 use launcher_calc::Calc;
 use launcher_config::Config;
-use launcher_core::{
-    Group, Plugin, Plugins, ResultsChanged, Selection, cache_directory, catch_plugin_panic, log,
-};
+use launcher_core::{Group, Plugin, Plugins, ResultsChanged, Selection, cache_directory, log};
 use launcher_jwt::Jwt;
 use launcher_kagi::Kagi;
 
@@ -24,7 +22,7 @@ pub fn run_command(arguments: &[String]) -> Option<i32> {
 
 /// The plugins, in the order their results show when equally relevant; each has a place in
 /// `Plugins`, empty while it's off.
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy)]
 enum Place {
     Calculator,
     Jwt,
@@ -45,11 +43,23 @@ enum PluginSettings {
 }
 
 impl Place {
-    /// The plugin `config` turns on in this place, started; `None` while it's off, or if it
-    /// panicked starting.
-    fn start(self, config: &Config, changed: &ResultsChanged) -> Option<Box<dyn Plugin + Send>> {
-        let settings = self.settings(config)?;
-        catch_plugin_panic(&format!("{self:?}"), || settings.start(changed))
+    /// Starts the plugin `config` turns on in this place, which is `index` in `plugins`, or
+    /// empties the place while it's off.
+    fn start(self, plugins: &mut Plugins, index: usize, config: &Config, changed: &ResultsChanged) {
+        match self.settings(config) {
+            Some(settings) => plugins.start(index, self.name(), || settings.start(changed)),
+            None => plugins.turn_off(index),
+        }
+    }
+
+    /// The plugin's `Plugin::name`, for before it has started.
+    fn name(self) -> &'static str {
+        match self {
+            Self::Calculator => launcher_calc::NAME,
+            Self::Jwt => launcher_jwt::NAME,
+            Self::Apps => launcher_apps::NAME,
+            Self::Kagi => launcher_kagi::NAME,
+        }
     }
 
     /// What the plugin in this place reads from `config`; `None` while it's off.
@@ -111,7 +121,7 @@ impl Launcher {
         };
         let mut plugins = Plugins::empty(PLACES.len());
         for (index, place) in PLACES.into_iter().enumerate() {
-            plugins.set(index, place.start(&config, &results_changed));
+            place.start(&mut plugins, index, &config, &results_changed);
         }
         Self::with(plugins, config, problem, results_changed)
     }
@@ -166,30 +176,27 @@ impl Launcher {
         self.problem.as_deref()
     }
 
-    /// Reads the config file again; whether the settings or their problem changed.
+    /// Reads the config file again, and restarts plugins that crashed; whether the settings or
+    /// their problem changed.
     pub fn reload(&mut self) -> bool {
         self.apply(launcher_config::load())
     }
 
     /// Takes `loaded` settings, starting or dropping only the plugins they turn on or off, or
-    /// whose settings they change. On a problem, keeps the settings from before; the problem
-    /// always counts as a change, so the shell says it again.
+    /// whose settings they change, and restarting those that crashed. On a problem, keeps the
+    /// settings from before; the problem always counts as a change, so the shell says it again.
     fn apply(&mut self, loaded: Result<Config, String>) -> bool {
-        let config = match loaded {
-            Ok(config) => config,
-            Err(problem) => {
-                self.problem = Some(problem);
-                return true;
-            }
+        let (config, problem) = match loaded {
+            Ok(config) => (config, None),
+            Err(problem) => (self.config.clone(), Some(problem)),
         };
-        if config == self.config && self.problem.is_none() {
-            return false;
-        }
+        let changed = problem.is_some() || self.problem.is_some() || config != self.config;
         let mut restarted = false;
         for (index, place) in PLACES.into_iter().enumerate() {
-            if place.settings(&config) != place.settings(&self.config) {
-                self.plugins
-                    .set(index, place.start(&config, &self.results_changed));
+            if place.settings(&config) != place.settings(&self.config)
+                || self.plugins.crashed(index)
+            {
+                place.start(&mut self.plugins, index, &config, &self.results_changed);
                 restarted = true;
             }
         }
@@ -197,14 +204,15 @@ impl Launcher {
             (self.results_changed)();
         }
         self.config = config;
-        self.problem = None;
-        true
+        self.problem = problem;
+        changed
     }
 }
 
 #[cfg(test)]
 mod tests {
     use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
 
     use launcher_config::EnabledPlugins;
     use launcher_core::Item;
@@ -322,6 +330,50 @@ mod tests {
             answering(&mut launcher, "anything"),
             ["PluginId(0)", "PluginId(1)", "PluginId(2)"],
             "Kagi, in place of the last echo, answers only its prefix"
+        );
+    }
+
+    struct Panicking;
+
+    impl Plugin for Panicking {
+        fn name(&self) -> &'static str {
+            "Panicking"
+        }
+
+        fn query(&mut self, _query: &str) -> Vec<Item> {
+            panic!("a bug in query");
+        }
+    }
+
+    #[test]
+    fn reloading_restarts_a_crashed_plugin() {
+        let refreshes = Arc::new(AtomicUsize::new(0));
+        let counter = refreshes.clone();
+        let mut launcher = Launcher::with(
+            Plugins::new(vec![
+                Box::new(Echo),
+                Box::new(Panicking),
+                Box::new(Echo),
+                Box::new(Echo),
+            ]),
+            Config::default(),
+            None,
+            Arc::new(move || {
+                counter.fetch_add(1, Ordering::Relaxed);
+            }),
+        );
+        launcher.query("anything");
+        assert!(launcher.plugins().crashed(1));
+        assert!(
+            !launcher.apply(Ok(Config::default())),
+            "the settings are the same"
+        );
+        assert!(!launcher.plugins().crashed(1));
+        assert_eq!(refreshes.load(Ordering::Relaxed), 1);
+        assert_eq!(
+            answering(&mut launcher, "not a token"),
+            ["PluginId(0)", "PluginId(2)", "PluginId(3)"],
+            "the token plugin is back, answering only tokens"
         );
     }
 

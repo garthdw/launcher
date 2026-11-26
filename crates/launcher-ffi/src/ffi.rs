@@ -69,6 +69,7 @@ pub enum Icon {
     Calculator,
     Token,
     Search,
+    Warning,
 }
 
 impl From<launcher_core::Icon> for Icon {
@@ -80,6 +81,7 @@ impl From<launcher_core::Icon> for Icon {
             launcher_core::Icon::Calculator => Self::Calculator,
             launcher_core::Icon::Token => Self::Token,
             launcher_core::Icon::Search => Self::Search,
+            launcher_core::Icon::Warning => Self::Warning,
         }
     }
 }
@@ -499,6 +501,36 @@ mod tests {
         assert!(matches!(
             items.as_slice(),
             [Item {
+                action: Action::Nothing,
+                ..
+            }]
+        ));
+    }
+
+    struct Panicking;
+
+    impl Plugin for Panicking {
+        fn name(&self) -> &'static str {
+            "Panicking"
+        }
+
+        fn query(&mut self, _query: &str) -> Vec<launcher_core::Item> {
+            panic!("a bug in query");
+        }
+    }
+
+    #[test]
+    fn a_crashed_plugin_says_so_in_its_place() {
+        let launcher = launcher(Plugins::new(vec![Box::new(Panicking)]));
+        let groups = launcher.query("anything".into()).groups;
+        let [Group { name, items }] = groups.as_slice() else {
+            panic!("expected one group, got {}", groups.len());
+        };
+        assert_eq!(name, "Panicking");
+        assert!(matches!(
+            items.as_slice(),
+            [Item {
+                icon: Icon::Warning,
                 action: Action::Nothing,
                 ..
             }]

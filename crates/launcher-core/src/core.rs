@@ -49,6 +49,7 @@ pub enum Icon {
     Calculator,
     Token,
     Search,
+    Warning,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -315,24 +316,55 @@ pub struct Group {
     pub items: Vec<Item>,
 }
 
+/// The title of the notice a crashed plugin shows in place of its results.
+pub const CRASHED: &str = "Crashed, so it's off";
+
 /// The plugins a shell runs, asked in order. A place can be empty, for a plugin that's off, so
 /// turning one on or off leaves the others' ids, and the items they made, pointing at them.
-pub struct Plugins(Vec<Option<Box<dyn Plugin + Send>>>);
+pub struct Plugins(Vec<Slot>);
+
+enum Slot {
+    Off,
+    On(Box<dyn Plugin + Send>),
+    /// Turned off by a panic, until started again; it says so in place of its results.
+    Crashed(&'static str),
+}
 
 impl Plugins {
     pub fn new(plugins: Vec<Box<dyn Plugin + Send>>) -> Self {
-        Self(plugins.into_iter().map(Some).collect())
+        Self(plugins.into_iter().map(Slot::On).collect())
     }
 
-    /// `count` empty places, for `set` to fill.
+    /// `count` empty places, for `start` to fill.
     pub fn empty(count: usize) -> Self {
-        Self(std::iter::repeat_with(|| None).take(count).collect())
+        Self(std::iter::repeat_with(|| Slot::Off).take(count).collect())
     }
 
-    /// Puts `plugin`, or nothing, in place `place`, dropping the plugin there.
-    pub fn set(&mut self, place: usize, plugin: Option<Box<dyn Plugin + Send>>) {
+    /// Puts the plugin `start` makes, named `name`, in place `place`, dropping the plugin there.
+    /// If `start` panics, the place shows that the plugin crashed.
+    pub fn start(
+        &mut self,
+        place: usize,
+        name: &'static str,
+        start: impl FnOnce() -> Box<dyn Plugin + Send>,
+    ) {
+        let started = catch_plugin_panic(name, start).map_or(Slot::Crashed(name), Slot::On);
+        self.put(place, started);
+    }
+
+    /// Empties place `place`, dropping the plugin there.
+    pub fn turn_off(&mut self, place: usize) {
+        self.put(place, Slot::Off);
+    }
+
+    /// Whether the plugin in place `place` panicked, and hasn't been started again since.
+    pub fn crashed(&self, place: usize) -> bool {
+        matches!(self.0.get(place), Some(Slot::Crashed(_)))
+    }
+
+    fn put(&mut self, place: usize, slot: Slot) {
         match self.0.get_mut(place) {
-            Some(slot) => drop_plugin(std::mem::replace(slot, plugin)),
+            Some(old) => drop_plugin(std::mem::replace(old, slot)),
             None => log!("no place {place} for a plugin"),
         }
     }
@@ -344,8 +376,12 @@ impl Plugins {
         let query = query.trim();
         let mut groups: Vec<Group> = (0..self.0.len())
             .filter_map(|place| {
-                let (name, mut items) =
-                    self.ask(place, |plugin| (plugin.name(), plugin.query(query)))?;
+                let answer = self.ask(place, |plugin| (plugin.name(), plugin.query(query)));
+                let (name, mut items) = match (answer, self.0.get(place)) {
+                    (Some(answer), _) => answer,
+                    (None, Some(&Slot::Crashed(name))) => (name, vec![crashed_notice()]),
+                    (None, _) => return None,
+                };
                 for item in &mut items {
                     make_one_line(&mut item.title);
                     make_one_line(&mut item.subtitle);
@@ -374,7 +410,7 @@ impl Plugins {
 
     /// The shell ran `action` from an item `plugin` produced; only that plugin hears of it.
     pub fn ran(&mut self, plugin: PluginId, action: &Action) {
-        if self.0.get(plugin.0).is_some_and(Option::is_some) {
+        if let Some(Slot::On(_)) = self.0.get(plugin.0) {
             self.ask(plugin.0, |found| found.ran(action));
         } else {
             // Not the action: a copy's text can be a token's claims, and the log is kept on disk.
@@ -389,19 +425,31 @@ impl Plugins {
         place: usize,
         call: impl FnOnce(&mut (dyn Plugin + Send)) -> T,
     ) -> Option<T> {
-        let slot = self.0.get_mut(place)?;
-        let plugin = slot.as_mut()?;
-        let answer = catch_plugin_panic(plugin.name(), || call(plugin.as_mut()));
+        let Some(Slot::On(plugin)) = self.0.get_mut(place) else {
+            return None;
+        };
+        let name = plugin.name();
+        let answer = catch_plugin_panic(name, || call(plugin.as_mut()));
         if answer.is_none() {
-            drop_plugin(slot.take());
+            self.put(place, Slot::Crashed(name));
         }
         answer
     }
 }
 
+/// Last, as it answers no query, and muted, as there's nothing to run.
+fn crashed_notice() -> Item {
+    Item::notice(
+        CRASHED,
+        "Reload Settings to start it again",
+        Icon::Warning,
+        0,
+    )
+}
+
 /// A plugin's `Drop` is its code too, so a panic there is caught as well.
-fn drop_plugin(plugin: Option<Box<dyn Plugin + Send>>) {
-    if let Some(plugin) = plugin {
+fn drop_plugin(slot: Slot) {
+    if let Slot::On(plugin) = slot {
         catch_plugin_panic(plugin.name(), || drop(plugin));
     }
 }
@@ -409,7 +457,7 @@ fn drop_plugin(plugin: Option<Box<dyn Plugin + Send>>) {
 /// `call`, which starts or asks the plugin `name`; `None` if it panicked, logging that the
 /// plugin is off. So a plugin's bug costs only its own results: the shell would otherwise go
 /// down with it.
-pub fn catch_plugin_panic<T>(name: &str, call: impl FnOnce() -> T) -> Option<T> {
+fn catch_plugin_panic<T>(name: &str, call: impl FnOnce() -> T) -> Option<T> {
     let answer = std::panic::catch_unwind(std::panic::AssertUnwindSafe(call)).ok();
     if answer.is_none() {
         log!("the {name} plugin panicked, so it's off");
@@ -586,10 +634,17 @@ mod tests {
             let calm = Recorder::new("calm", &[50]);
             let mut plugins = Plugins::new(vec![Box::new(Panicking), Box::new(calm)]);
             for query in ["a", "ab"] {
-                let titles = vec![format!("calm {query} 0")];
-                assert_eq!(shown(&mut plugins, query), [("calm", titles)]);
+                assert_eq!(
+                    shown(&mut plugins, query),
+                    [
+                        ("calm", vec![format!("calm {query} 0")]),
+                        ("panicking", vec![CRASHED.into()])
+                    ]
+                );
             }
             plugins.hidden();
+            assert!(plugins.crashed(0));
+            assert!(!plugins.crashed(1));
             return Ok(());
         };
         let logged = String::from_utf8(again.stderr)?;
@@ -602,22 +657,38 @@ mod tests {
     }
 
     #[test]
-    fn a_plugin_that_panics_starting_is_off() {
-        let started = catch_plugin_panic("panicking", || -> Box<dyn Plugin + Send> {
-            panic!("a bug in start");
-        });
-        assert!(started.is_none());
-        assert_eq!(catch_plugin_panic("calm", || 2 + 2), Some(4));
+    fn a_plugin_that_panics_starting_says_it_crashed() {
+        let mut plugins = Plugins::empty(1);
+        plugins.start(0, "panicking", || panic!("a bug in start"));
+        assert!(plugins.crashed(0));
+        let crashed = vec![CRASHED.to_owned()];
+        assert_eq!(shown(&mut plugins, "a"), [("panicking", crashed)]);
+        assert_eq!(shown(&mut plugins, ""), []);
+    }
+
+    #[test]
+    fn a_crashed_plugin_started_again_answers() {
+        let mut plugins = Plugins::new(vec![Box::new(Panicking)]);
+        plugins.hidden();
+        plugins.start(0, "calm", || Box::new(Recorder::new("calm", &[50])));
+        assert!(!plugins.crashed(0));
+        assert_eq!(
+            shown(&mut plugins, "a"),
+            [("calm", vec!["calm a 0".into()])]
+        );
+        plugins.hidden();
+        plugins.turn_off(0);
+        assert!(!plugins.crashed(0));
+        assert_eq!(shown(&mut plugins, "a"), []);
     }
 
     #[test]
     fn hiding_or_running_an_action_survives_a_plugin_that_panics() {
         let (mut plugins, _, second_ran) = recorders();
-        plugins.set(0, Some(Box::new(Panicking)));
+        plugins.start(0, "panicking", || Box::new(Panicking));
         plugins.hidden();
-        let titles = vec!["second a 0".to_owned()];
-        assert_eq!(shown(&mut plugins, "a"), [("second", titles)]);
-        plugins.set(0, Some(Box::new(Panicking)));
+        assert!(plugins.crashed(0));
+        plugins.start(0, "panicking", || Box::new(Panicking));
         plugins.ran(PluginId(0), &Action::Nothing);
         plugins.ran(PluginId(1), &Action::Nothing);
         assert!(second_ran.lock().is_ok_and(|ran| *ran == [Action::Nothing]));
@@ -918,7 +989,7 @@ mod tests {
     fn emptying_a_place_keeps_the_others_ids() {
         let (mut plugins, _, second) = recorders();
         let groups = plugins.query("anything");
-        plugins.set(0, None);
+        plugins.turn_off(0);
         assert_eq!(
             shown(&mut plugins, "again"),
             [("second", vec!["second again 0".to_owned()])]

@@ -11,6 +11,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use launcher_core::{Action, Icon, Item, Plugin, ResultsChanged, config_directory, log};
 use notify::{RecommendedWatcher, RecursiveMode, Watcher};
 
+pub const NAME: &str = "Apps";
 const MAX_RESULTS: usize = 8;
 const MAX_REMEMBERED: usize = 500;
 /// Installs and updates touch the folders many times in a burst; rescan once it settles.
@@ -109,7 +110,7 @@ impl Apps {
 
 impl Plugin for Apps {
     fn name(&self) -> &'static str {
-        "Apps"
+        NAME
     }
 
     fn query(&mut self, query: &str) -> Vec<Item> {
