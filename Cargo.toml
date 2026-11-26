@@ -20,9 +20,9 @@ launcher-secret = { path = "crates/launcher-secret" }
 launcher-window = { path = "crates/launcher-window" }
 attohttpc = { version = "0.32.0", default-features = false, features = ["tls-rustls-webpki-roots"] }
 base64 = "0.23.1"
-jiff = "1.0.2"
+jiff = "1.0.3"
 libc = "0.2.191"
-notify = "8.2.2"
+notify = "9.0.0"
 objc2-core-foundation = { version = "0.3.2", default-features = false, features = ["std", "CFError", "CFString", "CFURL"] }
 objc2-security = { version = "0.3.2", default-features = false, features = ["SecBase", "SecItem"] }
 pulldown-cmark = { version = "0.13.6", default-features = false }
@@ -31,8 +31,8 @@ serde = { version = "1.0.229", features = ["derive"] }
 serde_json = { version = "1.0.154", features = ["preserve_order"] }
 tempfile = "3.27.0"
 # Reading only: `display` would add the writer.
-toml = { version = "1.2.2", default-features = false, features = ["parse", "serde", "std"] }
-uniffi = "0.32.2"
+toml = { version = "1.2.3", default-features = false, features = ["parse", "serde", "std"] }
+uniffi = "0.33.0"
 # The version attohttpc uses.
 url = "2.5.9"
 
