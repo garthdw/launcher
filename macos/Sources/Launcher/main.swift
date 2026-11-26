@@ -150,19 +150,20 @@ func scrollView(holding document: FlippedView) -> NSScrollView {
     return scroll
 }
 
-/// Read-only and selectable, so the mouse can copy any part; ↑ and ↓ step through the sections
-/// for ⌘C to copy whole.
+/// Read-only and selectable, so the mouse can copy any part; ↑ and ↓ step through the sections,
+/// for ⌘C to copy whole, and the links in each, for ↵ to open.
 final class DetailText: NSTextView {
     var back: () -> Void = {}
     var run: () -> Void = {}
-    /// Each section's span in the text, and what ⌘C copies when it's picked.
-    private var sections: [(range: NSRange, text: String)] = []
+    /// Each section's span in the text, then each of its links', with what ⌘C copies when it's
+    /// picked: a section's text, or a link's address.
+    private var stops: [(range: NSRange, text: String, link: URL?)] = []
     private var picked = 0 {
         didSet {
-            // Otherwise ⌘C would copy an earlier mouse selection instead of the section just picked.
-            setSelectedRange(NSRange(location: sections[picked].range.location, length: 0))
+            // Otherwise ⌘C would copy an earlier mouse selection instead of the stop just picked.
+            setSelectedRange(NSRange(location: stops[picked].range.location, length: 0))
             placeHighlight()
-            scrollRangeToVisible(sections[picked].range)
+            scrollRangeToVisible(stops[picked].range)
         }
     }
 
@@ -194,7 +195,7 @@ final class DetailText: NSTextView {
             .foregroundColor: NSColor.secondaryLabelColor,
         ]
         let string = NSMutableAttributedString()
-        self.sections = sections.enumerated().map { index, section in
+        for (index, section) in sections.enumerated() {
             if index > 0 { string.append(NSAttributedString(string: "\n\n", attributes: DetailText.code)) }
             let start = string.length
             string.append(NSAttributedString(string: section.title.uppercased() + "\n", attributes: heading))
@@ -206,7 +207,11 @@ final class DetailText: NSTextView {
                 }
                 string.append(DetailText.draw(block))
             }
-            return (NSRange(location: start, length: string.length - start), section.copyText)
+            let range = NSRange(location: start, length: string.length - start)
+            stops.append((range, section.copyText, nil))
+            string.enumerateAttribute(.link, in: range) { link, linkRange, _ in
+                if let link = link as? URL { stops.append((linkRange, link.absoluteString, link)) }
+            }
         }
         textStorage?.setAttributedString(string)
     }
@@ -401,9 +406,15 @@ final class DetailText: NSTextView {
     override func doCommand(by selector: Selector) {
         switch selector {
         case #selector(cancelOperation(_:)), #selector(moveLeft(_:)): back()
-        case #selector(insertNewline(_:)): run()
-        case #selector(moveDown(_:)) where !sections.isEmpty: picked = step(picked, by: 1, count: sections.count)
-        case #selector(moveUp(_:)) where !sections.isEmpty: picked = step(picked, by: -1, count: sections.count)
+        case #selector(insertNewline(_:)):
+            if stops.indices.contains(picked), let link = stops[picked].link {
+                // As a click on it does.
+                clicked(onLink: link, at: stops[picked].range.location)
+            } else {
+                run()
+            }
+        case #selector(moveDown(_:)) where !stops.isEmpty: picked = step(picked, by: 1, count: stops.count)
+        case #selector(moveUp(_:)) where !stops.isEmpty: picked = step(picked, by: -1, count: stops.count)
         default: super.doCommand(by: selector)
         }
     }
@@ -418,22 +429,25 @@ final class DetailText: NSTextView {
             copyToPasteboard((string as NSString).substring(with: selected)
                 .replacingOccurrences(of: "\u{FFFC}", with: "")
                 .replacingOccurrences(of: "\u{2028}", with: "\n"))
-        } else if sections.indices.contains(picked) {
-            copyToPasteboard(sections[picked].text)
+        } else if stops.indices.contains(picked) {
+            copyToPasteboard(stops[picked].text)
         }
     }
 
-    /// Moves `highlight`, a sibling behind this view, onto the picked section.
+    /// Moves `highlight`, a sibling behind this view, onto the picked section, across the
+    /// panel, or link, just around its text.
     func placeHighlight() {
         guard let layoutManager, let textContainer, let container = highlight.superview,
-              sections.indices.contains(picked)
+              stops.indices.contains(picked)
         else { return }
-        let glyphs = layoutManager.glyphRange(forCharacterRange: sections[picked].range, actualCharacterRange: nil)
+        let glyphs = layoutManager.glyphRange(forCharacterRange: stops[picked].range, actualCharacterRange: nil)
         let box = layoutManager.boundingRect(forGlyphRange: glyphs, in: textContainer)
-        highlight.frame = convert(NSRect(
-            x: Metrics.inset, y: box.minY + textContainerOrigin.y - Metrics.inset,
-            width: bounds.width - Metrics.inset * 2, height: box.height + Metrics.inset * 2
-        ), to: container)
+            .offsetBy(dx: textContainerOrigin.x, dy: textContainerOrigin.y)
+        let frame = stops[picked].link == nil
+            ? NSRect(x: Metrics.inset, y: box.minY - Metrics.inset,
+                     width: bounds.width - Metrics.inset * 2, height: box.height + Metrics.inset * 2)
+            : box.insetBy(dx: -3, dy: -1)
+        highlight.frame = convert(frame, to: container)
     }
 }
 
