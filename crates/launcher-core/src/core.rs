@@ -16,8 +16,9 @@ pub struct Item {
     pub subtitle: String,
     pub icon: Icon,
     pub action: Action,
-    /// Shown on request in a scrolling, monospaced view; empty for items without one.
-    pub detail: Vec<Section>,
+    /// Whether the plugin has sections to show on request, in a scrolling, monospaced view.
+    /// They're built by `Plugin::detail` only then, as most items are never opened.
+    pub has_detail: bool,
     /// How well the item answers the query, from 0 to 100 on a scale every plugin shares, so the
     /// shell can show the best plugin's results first. 100: the query can only mean this item,
     /// such as a pasted token. About 90: a calculation, or an app whose name starts with the
@@ -34,7 +35,7 @@ impl Item {
             subtitle: subtitle.into(),
             icon,
             action: Action::Nothing,
-            detail: Vec::new(),
+            has_detail: false,
             relevance,
         }
     }
@@ -298,6 +299,11 @@ pub trait Plugin {
     /// is trimmed, and empty once cleared.
     fn query(&mut self, query: &str) -> Vec<Item>;
 
+    /// The sections shown on request for `item`, which this plugin returned for `query`.
+    fn detail(&mut self, _query: &str, _item: &Item) -> Vec<Section> {
+        Vec::new()
+    }
+
     /// The shell ran `action` from one of this plugin's items.
     fn ran(&mut self, _action: &Action) {}
 
@@ -406,6 +412,13 @@ impl Plugins {
         for place in 0..self.0.len() {
             self.ask(place, |plugin| plugin.hidden());
         }
+    }
+
+    /// The sections shown on request for `item`, which `plugin` returned for `query`; none if
+    /// the plugin is gone or panics.
+    pub fn detail(&mut self, plugin: PluginId, query: &str, item: &Item) -> Vec<Section> {
+        self.ask(plugin.0, |found| found.detail(query.trim(), item))
+            .unwrap_or_default()
     }
 
     /// The shell ran `action` from an item `plugin` produced; only that plugin hears of it.
@@ -589,7 +602,7 @@ mod tests {
                     subtitle: String::new(),
                     icon: Icon::Calculator,
                     action: Action::Copy(self.name.into()),
-                    detail: Vec::new(),
+                    has_detail: false,
                     relevance,
                 })
                 .collect()
@@ -844,7 +857,7 @@ mod tests {
                 subtitle: self.0.into(),
                 icon: Icon::Calculator,
                 action: Action::Copy(self.0.into()),
-                detail: Vec::new(),
+                has_detail: false,
                 relevance: 50,
             }]
         }

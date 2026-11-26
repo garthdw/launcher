@@ -16,14 +16,14 @@ pub struct Group {
     pub items: Vec<Item>,
 }
 
-impl From<launcher_core::Group> for Group {
-    fn from(group: launcher_core::Group) -> Self {
+impl Group {
+    fn new(group: launcher_core::Group, query: &Arc<str>) -> Self {
         Self {
             name: group.name.into(),
             items: group
                 .items
                 .into_iter()
-                .map(|item| Item::new(group.plugin, item))
+                .map(|item| Item::new(group.plugin, query, item))
                 .collect(),
         }
     }
@@ -43,8 +43,10 @@ pub struct Item {
     pub subtitle: String,
     pub icon: Icon,
     pub action: Action,
-    pub detail: Vec<Section>,
-    /// Handed back to `Launcher::ran` once the action has run.
+    /// Whether `Launcher::detail` has sections for it.
+    pub has_detail: bool,
+    /// Handed back to `Launcher::detail` to show its detail, and to `Launcher::ran` once its
+    /// action has run.
     pub choice: Arc<Choice>,
 }
 
@@ -107,25 +109,28 @@ impl From<&launcher_core::Action> for Action {
     }
 }
 
-/// Which plugin an item came from, and its action as the plugin made it: paths stay `PathBuf`s
-/// rather than the lossy strings the shell sees.
+/// Which plugin an item came from, for which query, and the item as the plugin made it: paths
+/// stay `PathBuf`s rather than the lossy strings the shell sees.
 #[derive(uniffi::Object)]
 pub struct Choice {
     plugin: PluginId,
-    action: launcher_core::Action,
+    /// Shared by every item of one query.
+    query: Arc<str>,
+    item: launcher_core::Item,
 }
 
 impl Item {
-    fn new(plugin: PluginId, item: launcher_core::Item) -> Self {
+    fn new(plugin: PluginId, query: &Arc<str>, item: launcher_core::Item) -> Self {
         Self {
-            title: item.title,
-            subtitle: item.subtitle,
-            icon: item.icon.into(),
+            title: item.title.clone(),
+            subtitle: item.subtitle.clone(),
+            icon: item.icon.clone().into(),
             action: (&item.action).into(),
-            detail: item.detail.into_iter().map(Section::from).collect(),
+            has_detail: item.has_detail,
             choice: Arc::new(Choice {
                 plugin,
-                action: item.action,
+                query: query.clone(),
+                item,
             }),
         }
     }
@@ -389,8 +394,12 @@ impl Launcher {
             return Results::default();
         };
         let (groups, picked) = launcher.query(&query);
+        let query: Arc<str> = query.into();
         Results {
-            groups: groups.into_iter().map(Group::from).collect(),
+            groups: groups
+                .into_iter()
+                .map(|group| Group::new(group, &query))
+                .collect(),
             picked: to_u32(picked),
         }
     }
@@ -421,10 +430,22 @@ impl Launcher {
         }
     }
 
+    /// The sections of an item's detail, built now that the user opened it.
+    pub fn detail(&self, choice: Arc<Choice>) -> Vec<Section> {
+        self.lock().map_or_else(Vec::new, |mut launcher| {
+            launcher
+                .plugins()
+                .detail(choice.plugin, &choice.query, &choice.item)
+                .into_iter()
+                .map(Section::from)
+                .collect()
+        })
+    }
+
     /// The shell ran an item's action successfully.
     pub fn ran(&self, choice: Arc<Choice>) {
         if let Some(mut launcher) = self.lock() {
-            launcher.plugins().ran(choice.plugin, &choice.action);
+            launcher.plugins().ran(choice.plugin, &choice.item.action);
         }
     }
 }
@@ -450,7 +471,7 @@ mod tests {
                 subtitle: String::new(),
                 icon: launcher_core::Icon::Calculator,
                 action: launcher_core::Action::Nothing,
-                detail: Vec::new(),
+                has_detail: false,
                 relevance: 0,
             }]
         }
@@ -551,12 +572,13 @@ mod tests {
         assert!(matches!(items[0].icon, Icon::Calculator));
         assert!(matches!(&items[0].action, Action::Copy { text } if text == "5"));
         assert_eq!(
-            items[0].choice.action,
+            items[0].choice.item.action,
             launcher_core::Action::Copy("5".into())
         );
+        assert!(items[0].has_detail);
         assert_eq!(
-            items[0]
-                .detail
+            launcher
+                .detail(items[0].choice.clone())
                 .iter()
                 .map(|section| (section.title.as_str(), section.text.as_str()))
                 .collect::<Vec<_>>(),

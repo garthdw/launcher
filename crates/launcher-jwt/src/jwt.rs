@@ -17,16 +17,23 @@ impl Plugin for Jwt {
     }
 
     fn query(&mut self, query: &str) -> Vec<Item> {
-        // The clock and zone are read only for a token, so other queries never load the zone.
         claims(query)
-            .map(|(header, payload)| item(header, payload, Timestamp::now(), &TimeZone::system()))
+            .map(|token| token.item(Timestamp::now()))
             .into_iter()
             .collect()
+    }
+
+    /// Decoded again, as most tokens are never opened. Only here is the zone read, for local
+    /// times.
+    fn detail(&mut self, query: &str, _item: &Item) -> Vec<Section> {
+        claims(query)
+            .map(|token| token.detail(Timestamp::now(), &TimeZone::system()))
+            .unwrap_or_default()
     }
 }
 
 /// A token's header and payload. It may come as a copied header line, `Authorization: Bearer …`.
-fn claims(query: &str) -> Option<(Map<String, Value>, Map<String, Value>)> {
+fn claims(query: &str) -> Option<Token> {
     let query = match query.split_at_checked("authorization:".len()) {
         Some((name, value)) if name.eq_ignore_ascii_case("authorization:") => value.trim_start(),
         _ => query,
@@ -53,28 +60,100 @@ fn claims(query: &str) -> Option<(Map<String, Value>, Map<String, Value>)> {
         return None;
     }
     let object = |part: &str| serde_json::from_slice(&URL_SAFE_NO_PAD.decode(part).ok()?).ok();
-    Some((object(header)?, object(payload)?))
+    Some(Token {
+        header: object(header)?,
+        payload: object(payload)?,
+    })
 }
 
-fn item(
+/// A token's decoded claims.
+struct Token {
     header: Map<String, Value>,
     payload: Map<String, Value>,
-    now: Timestamp,
-    zone: &TimeZone,
-) -> Item {
-    let name = match payload.get("sub") {
-        Some(Value::String(subject)) if !subject.is_empty() => subject.clone(),
-        Some(Value::Number(subject)) => subject.to_string(),
-        _ => header
-            .get("alg")
-            .and_then(Value::as_str)
-            .unwrap_or("JWT")
-            .to_owned(),
-    };
-    // `None` when the claim is absent; its raw JSON when it isn't seconds since the epoch, as
-    // when an issuer wrongly writes milliseconds.
-    let time = |claim| {
-        let value = payload.get(claim)?;
+}
+
+impl Token {
+    fn item(&self, now: Timestamp) -> Item {
+        let name = match self.payload.get("sub") {
+            Some(Value::String(subject)) if !subject.is_empty() => subject.clone(),
+            Some(Value::Number(subject)) => subject.to_string(),
+            _ => self
+                .header
+                .get("alg")
+                .and_then(Value::as_str)
+                .unwrap_or("JWT")
+                .to_owned(),
+        };
+        let status = match (self.time("exp"), self.time("nbf")) {
+            (Some(Ok(exp)), _) if exp <= now => {
+                format!("expired {} ago", span(now.duration_since(exp)))
+            }
+            (_, Some(Ok(nbf))) if nbf > now => {
+                format!("not valid for {}", span(nbf.duration_since(now)))
+            }
+            (Some(Ok(exp)), _) => format!("valid for {}", span(exp.duration_since(now))),
+            (Some(Err(_)), _) => "unreadable expiry".into(),
+            (None, _) => "no expiry".into(),
+        };
+        Item {
+            title: format!("{name} · {status}"),
+            subtitle: String::new(),
+            icon: Icon::Token,
+            action: Action::Copy(self.payload_json()),
+            has_detail: true,
+            // Three base64url JSON objects can only be a token.
+            relevance: 100,
+        }
+    }
+
+    /// The header, payload and times, in `zone`.
+    fn detail(&self, now: Timestamp, zone: &TimeZone) -> Vec<Section> {
+        let times: Vec<String> = ["exp", "iat", "nbf"]
+            .into_iter()
+            .filter_map(|claim| {
+                Some(match self.time(claim)? {
+                    Ok(time) => {
+                        let relative = if time <= now {
+                            format!("{} ago", span(now.duration_since(time)))
+                        } else {
+                            format!("in {}", span(time.duration_since(now)))
+                        };
+                        let local = time
+                            .to_zoned_datetime(zone.clone())
+                            .strftime("%Y-%m-%d %H:%M:%S %Z");
+                        format!("{claim}  {local}  ({relative})")
+                    }
+                    Err(raw) => format!("{claim}  {raw}  (unreadable)"),
+                })
+            })
+            .collect();
+        let mut detail = vec![
+            Section {
+                title: "Header · signature not verified".into(),
+                text: format!("{:#}", Value::Object(self.header.clone())),
+            },
+            Section {
+                title: "Payload".into(),
+                text: self.payload_json(),
+            },
+        ];
+        if !times.is_empty() {
+            detail.push(Section {
+                title: "Times".into(),
+                text: times.join("\n"),
+            });
+        }
+        detail
+    }
+
+    fn payload_json(&self) -> String {
+        format!("{:#}", Value::Object(self.payload.clone()))
+    }
+
+    /// `None` when the claim is absent; its raw JSON when it isn't seconds since the epoch, as
+    /// when an issuer wrongly writes milliseconds.
+    fn time(&self, claim: &str) -> Option<Result<Timestamp, String>> {
+        let value = self.payload.get(claim)?;
         Some(
             value
                 .as_f64()
@@ -82,63 +161,6 @@ fn item(
                 .and_then(|since_epoch| Timestamp::from_duration(since_epoch).ok())
                 .ok_or_else(|| value.to_string()),
         )
-    };
-    let status = match (time("exp"), time("nbf")) {
-        (Some(Ok(exp)), _) if exp <= now => {
-            format!("expired {} ago", span(now.duration_since(exp)))
-        }
-        (_, Some(Ok(nbf))) if nbf > now => {
-            format!("not valid for {}", span(nbf.duration_since(now)))
-        }
-        (Some(Ok(exp)), _) => format!("valid for {}", span(exp.duration_since(now))),
-        (Some(Err(_)), _) => "unreadable expiry".into(),
-        (None, _) => "no expiry".into(),
-    };
-    let times: Vec<String> = ["exp", "iat", "nbf"]
-        .into_iter()
-        .filter_map(|claim| {
-            Some(match time(claim)? {
-                Ok(time) => {
-                    let relative = if time <= now {
-                        format!("{} ago", span(now.duration_since(time)))
-                    } else {
-                        format!("in {}", span(time.duration_since(now)))
-                    };
-                    let local = time
-                        .to_zoned_datetime(zone.clone())
-                        .strftime("%Y-%m-%d %H:%M:%S %Z");
-                    format!("{claim}  {local}  ({relative})")
-                }
-                Err(raw) => format!("{claim}  {raw}  (unreadable)"),
-            })
-        })
-        .collect();
-
-    let payload = format!("{:#}", Value::Object(payload));
-    let mut detail = vec![
-        Section {
-            title: "Header · signature not verified".into(),
-            text: format!("{:#}", Value::Object(header)),
-        },
-        Section {
-            title: "Payload".into(),
-            text: payload.clone(),
-        },
-    ];
-    if !times.is_empty() {
-        detail.push(Section {
-            title: "Times".into(),
-            text: times.join("\n"),
-        });
-    }
-    Item {
-        title: format!("{name} · {status}"),
-        subtitle: String::new(),
-        icon: Icon::Token,
-        action: Action::Copy(payload),
-        detail,
-        // Three base64url JSON objects can only be a token.
-        relevance: 100,
     }
 }
 
@@ -169,13 +191,14 @@ mod tests {
         format!("{}.{}.c2lnbmF0dXJl", part(header), part(payload))
     }
 
-    fn decoded(query: &str) -> Option<Item> {
+    /// The token's row and its detail, in UTC.
+    fn decoded(query: &str) -> Option<(Item, Vec<Section>)> {
         let now = Timestamp::from_second(NOW).ok()?;
-        claims(query).map(|(header, payload)| item(header, payload, now, &TimeZone::UTC))
+        claims(query).map(|token| (token.item(now), token.detail(now, &TimeZone::UTC)))
     }
 
     fn title(header: Value, payload: Value) -> Option<String> {
-        decoded(&token(header, payload)).map(|item| item.title)
+        decoded(&token(header, payload)).map(|(item, _)| item.title)
     }
 
     #[test]
@@ -184,7 +207,7 @@ mod tests {
             json!({"alg": "HS256", "typ": "JWT"}),
             json!({"sub": "ada", "iat": NOW - 3_600, "exp": NOW + 720}),
         );
-        let Some(item) = decoded(&token) else {
+        let Some((item, detail)) = decoded(&token) else {
             panic!("{token} didn't decode");
         };
         assert_eq!(item.title, "ada · valid for 12 min");
@@ -192,8 +215,9 @@ mod tests {
         assert_eq!(item.icon, Icon::Token);
         let payload = "{\n  \"sub\": \"ada\",\n  \"iat\": 1799996400,\n  \"exp\": 1800000720\n}";
         assert_eq!(item.action, Action::Copy(payload.into()));
+        assert!(item.has_detail);
         assert_eq!(
-            item.detail
+            detail
                 .iter()
                 .map(|section| (section.title.as_str(), section.text.as_str()))
                 .collect::<Vec<_>>(),
@@ -251,20 +275,34 @@ mod tests {
         let header = URL_SAFE_NO_PAD.encode(r#"{"$alg":"HS256"}"#);
         let payload = URL_SAFE_NO_PAD.encode(r#"{ "sub": "ada"}"#);
         assert_eq!(
-            decoded(&format!("{header}.{payload}.sig")).map(|item| item.title),
+            decoded(&format!("{header}.{payload}.sig")).map(|(item, _)| item.title),
             Some("ada · no expiry".into())
         );
     }
 
     #[test]
+    fn the_detail_comes_when_asked_for() {
+        let token = token(json!({"alg": "HS256"}), json!({"sub": "ada"}));
+        let mut jwt = Jwt;
+        let items = jwt.query(&token);
+        let detail: Vec<String> = items
+            .iter()
+            .flat_map(|item| jwt.detail(&token, item))
+            .map(|section| section.title)
+            .collect();
+        assert_eq!(detail, ["Header · signature not verified", "Payload"]);
+    }
+
+    #[test]
     fn unreadable_expiry_is_not_no_expiry() {
-        let Some(item) = decoded(&token(json!({"alg": "HS256"}), json!({"exp": NOW * 1_000})))
+        let Some((item, detail)) =
+            decoded(&token(json!({"alg": "HS256"}), json!({"exp": NOW * 1_000})))
         else {
             panic!("didn't decode");
         };
         assert_eq!(item.title, "HS256 · unreadable expiry");
         assert_eq!(
-            item.detail.last().map(|section| section.text.as_str()),
+            detail.last().map(|section| section.text.as_str()),
             Some("exp  1800000000000  (unreadable)")
         );
         assert_eq!(
@@ -306,7 +344,7 @@ mod tests {
 
     #[test]
     fn payload_keeps_the_token_order() {
-        let Some(item) = decoded(&token(
+        let Some((item, _)) = decoded(&token(
             json!({"alg": "HS256"}),
             json!({"sub": "ada", "aud": "launcher"}),
         )) else {

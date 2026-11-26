@@ -232,7 +232,7 @@ mod tests {
                 subtitle: String::new(),
                 icon: launcher_core::Icon::Calculator,
                 action: launcher_core::Action::Nothing,
-                detail: Vec::new(),
+                has_detail: false,
                 relevance: 50,
             }]
         }

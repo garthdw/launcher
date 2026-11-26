@@ -88,9 +88,9 @@ final class DetailPane: NSView {
     let text: DetailText
     let bodyHeight: CGFloat
 
-    init(item: Item) {
+    init(item: Item, sections: [Section]) {
         let maxBodyHeight: CGFloat = 420
-        text = DetailText(sections: item.detail)
+        text = DetailText(sections: sections)
         let contentHeight = text.contentHeight
         bodyHeight = min(contentHeight, maxBodyHeight)
         super.init(frame: NSRect(x: 0, y: 0, width: Metrics.width, height: Metrics.headerHeight + bodyHeight))
@@ -599,7 +599,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSTextFieldDelegate, N
         case .nothing: title.textColor = .secondaryLabelColor
         }
         let subtitle = hintLabel(
-            ([item.subtitle, keys] + (item.detail.isEmpty ? [] : ["→ details"]))
+            ([item.subtitle, keys] + (item.hasDetail ? ["→ details"] : []))
                 .filter { !$0.isEmpty }
                 .joined(separator: " · ")
         )
@@ -647,7 +647,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSTextFieldDelegate, N
     func showDetail(of index: Int) {
         // Going back after a refresh returns to the item the detail showed.
         picked = Int(launcher.pick(index: UInt32(index)))
-        let pane = DetailPane(item: items[index])
+        // Built only now, as most items are never opened.
+        let pane = DetailPane(item: items[index], sections: launcher.detail(choice: items[index].choice))
         pane.text.back = { [unowned self] in
             closeDetail()
             refreshIfStale()
@@ -710,7 +711,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSTextFieldDelegate, N
         // Only from the end of the query, so → still moves the caret elsewhere.
         case #selector(NSResponder.moveRight(_:))
             where textView.selectedRange() == NSRange(location: (textView.string as NSString).length, length: 0)
-            && items.indices.contains(picked) && !items[picked].detail.isEmpty:
+            && items.indices.contains(picked) && items[picked].hasDetail:
             showDetail(of: picked)
         case #selector(NSResponder.insertNewline(_:)):
             choose(picked)

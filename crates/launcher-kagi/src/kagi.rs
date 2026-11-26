@@ -64,10 +64,13 @@ struct State {
     stopped: bool,
 }
 
+/// A result's row, and its detail, kept beside it until the row is opened.
+type Row = (Item, Vec<Section>);
+
 enum Searched {
     Pending,
     /// The rows that answer the terms, kept while they're the latest searched.
-    Answered(Vec<Item>),
+    Answered(Vec<Row>),
     /// Why the search failed, shown once: asking again searches again, as the network or token
     /// may have changed since.
     Failed(Item),
@@ -76,7 +79,7 @@ enum Searched {
 /// What a search found.
 #[derive(Debug, PartialEq)]
 enum Outcome {
-    Results(Vec<Item>),
+    Results(Vec<Row>),
     NoToken,
     /// Why there are no results, and more about it.
     Problem(String, String),
@@ -123,7 +126,10 @@ impl Kagi {
         let (shown, settled) = match latest {
             None => (None, false),
             Some(Searched::Pending) => (None, true),
-            Some(Searched::Answered(rows)) => (Some(rows.clone()), true),
+            Some(Searched::Answered(rows)) => (
+                Some(rows.iter().map(|(item, _)| item.clone()).collect()),
+                true,
+            ),
             Some(Searched::Failed(row)) => (Some(vec![row.clone()]), true),
         };
         if failed {
@@ -176,7 +182,7 @@ fn work(shared: &Shared, search: &dyn Fn(&str) -> Outcome, pause: Duration) {
     while let Some(terms) = next_search(shared, pause) {
         let searched = match search(&terms) {
             Outcome::Results(rows) if rows.is_empty() => {
-                Searched::Answered(vec![notice("No results from Kagi", "")])
+                Searched::Answered(vec![(notice("No results from Kagi", ""), Vec::new())])
             }
             Outcome::Results(rows) => Searched::Answered(rows),
             Outcome::NoToken => Searched::Failed(add_token()),
@@ -254,6 +260,21 @@ impl Plugin for Kagi {
         [in_browser(terms)].into_iter().chain(rows).collect()
     }
 
+    /// A result's snippet and address, kept from the search.
+    fn detail(&mut self, _query: &str, item: &Item) -> Vec<Section> {
+        let Ok(state) = self.shared.state.lock() else {
+            return Vec::new();
+        };
+        match &state.searched {
+            Some((_, Searched::Answered(rows))) => rows
+                .iter()
+                .find(|(row, _)| row.action == item.action)
+                .map(|(_, detail)| detail.clone())
+                .unwrap_or_default(),
+            _ => Vec::new(),
+        }
+    }
+
     fn hidden(&mut self) {
         self.want(None);
     }
@@ -290,7 +311,7 @@ fn item(title: String, subtitle: String, action: Action) -> Item {
         subtitle,
         icon: Icon::Search,
         action,
-        detail: Vec::new(),
+        has_detail: false,
         relevance: RELEVANCE,
     }
 }
@@ -388,7 +409,7 @@ fn answer(status: u16, body: impl Read) -> Outcome {
 
 /// A result's row, for one with a web address; others, such as a `file:` URL, would open
 /// something other than a page.
-fn result_row(result: ApiResult) -> Option<Item> {
+fn result_row(result: ApiResult) -> Option<Row> {
     let url = Url::parse(&result.url?).ok()?;
     if !matches!(url.scheme(), "http" | "https") {
         return None;
@@ -411,10 +432,13 @@ fn result_row(result: ApiResult) -> Option<Item> {
         .filter(|title| !title.trim().is_empty())
         .unwrap_or_else(|| url.to_string());
     let host = url.host_str().unwrap_or_default().into();
-    Some(Item {
+    Some((
+        Item {
+            has_detail: true,
+            ..item(title, host, Action::OpenUrl(url.into()))
+        },
         detail,
-        ..item(title, host, Action::OpenUrl(url.into()))
-    })
+    ))
 }
 
 /// Snippets come as HTML, with tags such as `<b>` around the words that matched.
@@ -498,7 +522,10 @@ mod tests {
                 if let Ok(mut searches) = recorded.lock() {
                     searches.push(terms.to_owned());
                 }
-                Outcome::Results(vec![item(terms.into(), String::new(), Action::Nothing)])
+                Outcome::Results(vec![(
+                    item(terms.into(), String::new(), Action::Nothing),
+                    Vec::new(),
+                )])
             }),
             Duration::from_millis(50),
         );
@@ -692,7 +719,7 @@ mod tests {
         };
         items
             .into_iter()
-            .map(|item| (item.title, item.action, item.detail))
+            .map(|(item, detail)| (item.title, item.action, detail))
             .collect()
     }
 
