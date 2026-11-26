@@ -2,7 +2,7 @@
 //! kagi.com in the browser, which signs in with its own session, and with an API token in the
 //! secret store also shows Kagi's results, fetched in the background once typing pauses.
 
-use std::io::Read;
+use std::io::{self, Read};
 use std::sync::{Arc, Condvar, Mutex, PoisonError};
 use std::thread;
 use std::time::Duration;
@@ -24,10 +24,14 @@ const RELEVANCE: u8 = 100;
 /// Searches the API for the terms; swapped out in tests.
 type Search = Arc<dyn Fn(&str) -> Outcome + Send + Sync>;
 
+/// Starts the worker on a thread of its own; swapped out in tests.
+type Spawn = fn(Box<dyn FnOnce() + Send>) -> io::Result<()>;
+
 pub struct Kagi {
     prefix: String,
     shared: Arc<Shared>,
     search: Search,
+    spawn: Spawn,
     /// How long typing must pause before a search goes to the API: each costs money and tells
     /// Kagi what was typed, so a half-typed query mustn't.
     pause: Duration,
@@ -90,6 +94,7 @@ impl Kagi {
                 changed,
             }),
             search,
+            spawn: spawn_worker,
             pause,
         }
     }
@@ -127,11 +132,8 @@ impl Kagi {
         }
         if wanted.is_some() && !state.working {
             let (shared, search, pause) = (self.shared.clone(), self.search.clone(), self.pause);
-            match thread::Builder::new()
-                .name("kagi search".into())
-                .spawn(move || work(&shared, &*search, pause))
-            {
-                Ok(_) => state.working = true,
+            match (self.spawn)(Box::new(move || work(&shared, &*search, pause))) {
+                Ok(()) => state.working = true,
                 Err(error) => {
                     log!("can't start searching Kagi: {error}");
                     return Some(vec![notice("Can't search Kagi", &error.to_string())]);
@@ -149,6 +151,13 @@ impl Drop for Kagi {
             self.shared.wake.notify_one();
         }
     }
+}
+
+fn spawn_worker(work: Box<dyn FnOnce() + Send>) -> io::Result<()> {
+    thread::Builder::new()
+        .name("kagi search".into())
+        .spawn(work)
+        .map(drop)
 }
 
 /// Searches for the wanted terms each time typing pauses, until none are wanted.
