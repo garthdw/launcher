@@ -22,8 +22,8 @@ launcher-secret = { path = "crates/launcher-secret" }
 launcher-window = { path = "crates/launcher-window" }
 # The client numbat's `fetch-exchangerates` uses. That feature is off because it fetches when a
 # query first meets a currency, on the UI thread; the calculator fetches and caches rates itself.
-attohttpc = { version = "0.27.0", default-features = false, features = ["tls-rustls-webpki-roots"] }
-base64 = "0.22.1"
+attohttpc = { version = "0.32.0", default-features = false, features = ["tls-rustls-webpki-roots"] }
+base64 = "0.23.1"
 # The version numbat uses, so the app links one copy.
 jiff = "1.0.2"
 libc = "0.2.191"
