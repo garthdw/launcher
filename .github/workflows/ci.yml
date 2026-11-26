@@ -23,9 +23,7 @@ jobs:
       - run: cargo test
       # Writes the bindings, without which SwiftPM can't load the package.
       - run: scripts/bundle
-      # Only `PanelLayout` and its tests: `swift test` alone builds the app again in debug.
-      - run: swift build --package-path macos --target PanelLayoutTests
-      - run: swift test --package-path macos --skip-build
+      - run: swift test --package-path macos
 
   # The core is shared with the Linux shell to come. rustfmt checks every file whatever the cfg,
   # so `cargo fmt --check` runs only here.
