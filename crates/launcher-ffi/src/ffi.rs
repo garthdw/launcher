@@ -4,7 +4,7 @@
 use std::fmt;
 use std::sync::{Arc, Mutex, MutexGuard};
 
-use launcher_core::{PluginId, Style, log};
+use launcher_core::{ListItem, PluginId, Span, Style, log};
 use launcher_window::{Display, Placement, Rect, WindowAction};
 
 uniffi::setup_scaffolding!();
@@ -60,9 +60,10 @@ pub struct Section {
 
 impl From<launcher_core::Section> for Section {
     fn from(section: launcher_core::Section) -> Self {
+        let blocks = section.blocks();
         Self {
-            blocks: section.blocks().into_iter().map(Block::from).collect(),
-            copy_text: section.plain_text(),
+            copy_text: launcher_core::plain_text(&blocks),
+            blocks: blocks.into_iter().map(Block::from).collect(),
             title: section.title,
         }
     }
@@ -91,57 +92,15 @@ pub enum Block {
 
 impl From<launcher_core::Block> for Block {
     fn from(block: launcher_core::Block) -> Self {
-        fn spans(spans: Vec<launcher_core::Span>) -> Vec<Span> {
-            spans.into_iter().map(Span::from).collect()
-        }
-        fn cells(row: Vec<Vec<launcher_core::Span>>) -> Vec<Vec<Span>> {
-            row.into_iter().map(spans).collect()
-        }
         match block {
-            launcher_core::Block::Paragraph(text) => Self::Paragraph { spans: spans(text) },
+            launcher_core::Block::Paragraph(spans) => Self::Paragraph { spans },
             launcher_core::Block::Code(text) => Self::Code { text },
-            launcher_core::Block::List(items) => Self::List {
-                items: items
-                    .into_iter()
-                    .map(|item| ListItem {
-                        depth: item.depth,
-                        marker: item.marker,
-                        spans: spans(item.spans),
-                    })
-                    .collect(),
-            },
-            launcher_core::Block::Table { header, rows } => Self::Table {
-                header: cells(header),
-                rows: rows.into_iter().map(cells).collect(),
-            },
+            launcher_core::Block::List(items) => Self::List { items },
+            launcher_core::Block::Table { header, rows } => Self::Table { header, rows },
             launcher_core::Block::Image { path, description } => Self::Image {
                 path: path.to_string_lossy().into_owned(),
                 description,
             },
-        }
-    }
-}
-
-#[derive(uniffi::Record)]
-pub struct ListItem {
-    pub depth: u8,
-    pub marker: String,
-    pub spans: Vec<Span>,
-}
-
-#[derive(uniffi::Record)]
-pub struct Span {
-    pub text: String,
-    pub style: Style,
-    pub link: Option<String>,
-}
-
-impl From<launcher_core::Span> for Span {
-    fn from(span: launcher_core::Span) -> Self {
-        Self {
-            text: span.text,
-            style: span.style,
-            link: span.link,
         }
     }
 }
@@ -218,6 +177,20 @@ impl Item {
 }
 
 // Restated for UniFFI to derive its converters; the compiler checks they match the originals.
+#[uniffi::remote(Record)]
+pub struct Span {
+    pub text: String,
+    pub style: Style,
+    pub link: Option<String>,
+}
+
+#[uniffi::remote(Record)]
+pub struct ListItem {
+    pub depth: u8,
+    pub marker: String,
+    pub spans: Vec<Span>,
+}
+
 #[uniffi::remote(Record)]
 pub struct Style {
     pub bold: bool,
