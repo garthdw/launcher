@@ -453,10 +453,11 @@ fn rank<'a>(
     if query.is_empty() {
         return Vec::new();
     }
+    let mut scratch = Scratch::default();
     let mut ranked: Vec<(i32, &App, u8)> = apps
         .iter()
         .filter_map(|app| {
-            let score = score(&app.name, &query)?;
+            let score = score(&app.name, &query, &mut scratch)?;
             let bonus = usage
                 .get(&app.path)
                 // Saturating float-to-int cast; the weight is never negative.
@@ -498,32 +499,44 @@ fn fold_query(query: &str) -> Vec<char> {
 /// How well the folded `query`'s letters match `name` in order, or `None` if they don't.
 /// Matches at word starts, which acronyms hit, and runs of consecutive letters score higher;
 /// gaps and longer names score lower.
-fn score(name: &str, query: &[char]) -> Option<i32> {
+fn score(name: &str, query: &[char], scratch: &mut Scratch) -> Option<i32> {
     let (first, rest) = query.split_first()?;
-    let name: Vec<char> = name.chars().collect();
-    let folded: Vec<char> = name.iter().copied().map(fold_case).collect();
-    let previous_characters = std::iter::once(None).chain(name.iter().copied().map(Some));
-    let bonuses: Vec<i32> = previous_characters
-        .zip(name.iter().copied())
-        .map(|(previous, current)| {
-            let word_start = previous.is_none_or(|previous| {
-                !previous.is_alphanumeric() || (previous.is_lowercase() && current.is_uppercase())
-            });
-            if word_start { WORD_START } else { 0 }
-        })
-        .collect();
+    // Most names don't match; this spares them the scoring below.
+    if !contains_in_order(name, query) {
+        return None;
+    }
+    let Scratch {
+        folded,
+        bonuses,
+        best,
+        next,
+    } = scratch;
+    folded.clear();
+    bonuses.clear();
+    let mut previous: Option<char> = None;
+    for current in name.chars() {
+        let word_start = previous.is_none_or(|previous| {
+            !previous.is_alphanumeric() || (previous.is_lowercase() && current.is_uppercase())
+        });
+        folded.push(fold_case(current));
+        bonuses.push(if word_start { WORD_START } else { 0 });
+        previous = Some(current);
+    }
 
     // `best[index]`: the best score with the current query letter matched at `name[index]`.
-    let mut best: Vec<Option<i32>> = folded
-        .iter()
-        .zip(&bonuses)
-        .map(|(character, bonus)| (character == first).then_some(MATCH + bonus))
-        .collect();
+    best.clear();
+    best.extend(
+        folded
+            .iter()
+            .zip(bonuses.iter())
+            .map(|(character, bonus)| (character == first).then_some(MATCH + bonus)),
+    );
     for letter in rest {
-        let mut next = vec![None; name.len()];
+        next.clear();
+        next.resize(folded.len(), None);
         // The best earlier match with at least one letter skipped before `index`.
         let mut across_gap: Option<i32> = None;
-        for index in 0..name.len() {
+        for index in 0..folded.len() {
             if index >= 2 {
                 across_gap = across_gap
                     .map(|score| score - GAP_EXTEND)
@@ -540,14 +553,32 @@ fn score(name: &str, query: &[char]) -> Option<i32> {
                 .max(across_gap)
                 .map(|score| score + MATCH + bonuses[index]);
         }
-        best = next;
+        std::mem::swap(best, next);
     }
     // Only a tie-breaker between similar matches, so it stays small next to a word start.
-    let length_penalty = i32::try_from(name.len() / 2).unwrap_or(i32::MAX);
-    best.into_iter()
+    let length_penalty = i32::try_from(folded.len() / 2).unwrap_or(i32::MAX);
+    best.iter()
         .flatten()
         .max()
         .map(|score| score.saturating_sub(length_penalty))
+}
+
+/// Buffers `score` reuses from one name to the next.
+#[derive(Default)]
+struct Scratch {
+    folded: Vec<char>,
+    bonuses: Vec<i32>,
+    best: Vec<Option<i32>>,
+    next: Vec<Option<i32>>,
+}
+
+/// Whether the folded `query`'s letters appear in `name` in order, the condition for `score`
+/// to find a match.
+fn contains_in_order(name: &str, query: &[char]) -> bool {
+    let mut letters = name.chars().map(fold_case);
+    query
+        .iter()
+        .all(|letter| letters.any(|character| character == *letter))
 }
 
 fn fold_case(character: char) -> char {
@@ -687,7 +718,7 @@ mod tests {
     }
 
     fn matches(name: &str, query: &str) -> Option<i32> {
-        score(name, &fold_query(query))
+        score(name, &fold_query(query), &mut Scratch::default())
     }
 
     fn titles(plugin: &mut Apps, query: &str) -> Vec<String> {
