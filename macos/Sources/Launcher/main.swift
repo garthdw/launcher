@@ -222,7 +222,44 @@ final class DetailText: NSTextView {
         case let .code(text): NSAttributedString(string: text, attributes: code)
         case let .list(items): drawList(items)
         case let .table(header, rows): drawTable(header: header, rows: rows)
+        case let .image(path, description): drawImage(path: path, description: description)
         }
+    }
+
+    /// At its pixels' size on this screen, shrunk to fit the text's width and 240 points high, and
+    /// decoded only at the size it shows. One that can't be read shows its description.
+    static func drawImage(path: String, description: String) -> NSAttributedString {
+        let unreadable = {
+            log("can't read the image \(path)")
+            return NSAttributedString(string: description, attributes: [
+                .font: NSFont.systemFont(ofSize: 13),
+                .foregroundColor: NSColor.secondaryLabelColor,
+            ])
+        }
+        let maxSize = NSSize(width: Metrics.width - 28, height: 240)
+        let scale = NSScreen.main?.backingScaleFactor ?? 2
+        guard let source = CGImageSourceCreateWithURL(URL(fileURLWithPath: path) as CFURL, nil),
+              let properties = CGImageSourceCopyPropertiesAtIndex(source, 0, nil) as? [CFString: Any],
+              let pixelWidth = properties[kCGImagePropertyPixelWidth] as? Int, pixelWidth > 0,
+              let pixelHeight = properties[kCGImagePropertyPixelHeight] as? Int, pixelHeight > 0
+        else { return unreadable() }
+        var width = CGFloat(pixelWidth), height = CGFloat(pixelHeight)
+        // Orientations 5 to 8 turn it a quarter.
+        if properties[kCGImagePropertyOrientation] as? Int ?? 1 >= 5 { swap(&width, &height) }
+        let fit = min(1, maxSize.width * scale / width, maxSize.height * scale / height)
+        let longest = max(width, height)
+        let shownLongest = (longest * fit).rounded(.up)
+        guard let image = CGImageSourceCreateThumbnailAtIndex(source, 0, [
+            kCGImageSourceCreateThumbnailFromImageAlways: true,
+            kCGImageSourceCreateThumbnailWithTransform: true,
+            kCGImageSourceThumbnailMaxPixelSize: shownLongest,
+            // The decoder skips pixels, so a large JPEG or HEIC isn't decoded in full first.
+            kCGImageSourceSubsampleFactor: [8, 4, 2].first { longest / CGFloat($0) >= shownLongest } ?? 1,
+        ] as CFDictionary)
+        else { return unreadable() }
+        let attachment = NSTextAttachment()
+        attachment.image = NSImage(cgImage: image, size: NSSize(width: width * fit / scale, height: height * fit / scale))
+        return NSAttributedString(attachment: attachment)
     }
 
     /// Each item a paragraph, its marker hanging in the indent of its depth.
@@ -334,7 +371,11 @@ final class DetailText: NSTextView {
     override func copy(_: Any?) {
         let selected = selectedRange()
         if selected.length > 0 {
-            copyToPasteboard((string as NSString).substring(with: selected))
+            // Without images' attachment characters, and with list items' and cells' line
+            // separators as line breaks.
+            copyToPasteboard((string as NSString).substring(with: selected)
+                .replacingOccurrences(of: "\u{FFFC}", with: "")
+                .replacingOccurrences(of: "\u{2028}", with: "\n"))
         } else if sections.indices.contains(picked) {
             copyToPasteboard(sections[picked].text)
         }

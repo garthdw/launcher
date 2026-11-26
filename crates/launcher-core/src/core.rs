@@ -86,6 +86,13 @@ pub enum Block {
         header: Vec<Vec<Span>>,
         rows: Vec<Vec<Vec<Span>>>,
     },
+    /// A picture in a file, read only while the detail shows. A plugin downloads one in its
+    /// background work, into `cache_directory`.
+    Image {
+        path: PathBuf,
+        /// Copied in its place, and shown if it can't be read.
+        description: String,
+    },
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -153,6 +160,7 @@ impl Block {
         let lines: Vec<String> = match self {
             Self::Paragraph(spans) => return text(spans),
             Self::Code(code) => return code.clone(),
+            Self::Image { description, .. } => return description.clone(),
             Self::List(items) => items
                 .iter()
                 .map(|item| {

@@ -2,6 +2,8 @@
 //! a heading reads as a bold paragraph, a quote as its text, raw HTML as text, and a rule not
 //! at all.
 
+use std::path::PathBuf;
+
 use pulldown_cmark::{Event, Options, Parser, Tag, TagEnd};
 
 use crate::{Block, ListItem, Span, Style};
@@ -50,6 +52,8 @@ struct Reader {
     header: Vec<Vec<Span>>,
     rows: Vec<Vec<Vec<Span>>>,
     row: Vec<Vec<Span>>,
+    /// The file of the image being read, whose text is its description.
+    image: Option<PathBuf>,
 }
 
 impl Reader {
@@ -65,6 +69,27 @@ impl Reader {
             Event::End(TagEnd::Emphasis) => self.italic = self.italic.saturating_sub(1),
             Event::Start(Tag::Link { dest_url, .. }) => self.link = web_address(&dest_url),
             Event::End(TagEnd::Link) => self.link = None,
+            Event::Start(Tag::Image { dest_url, .. }) => {
+                match local_path(&dest_url).filter(|_| !self.in_list_or_table()) {
+                    Some(path) => {
+                        self.end_paragraph();
+                        self.image = Some(path);
+                    }
+                    // Its description stands in for it, linked to it if it's on the web.
+                    None => self.link = web_address(&dest_url),
+                }
+            }
+            Event::End(TagEnd::Image) => match self.image.take() {
+                Some(path) => {
+                    let description = self
+                        .take_spans()
+                        .into_iter()
+                        .map(|span| span.text)
+                        .collect();
+                    self.blocks.push(Block::Image { path, description });
+                }
+                None => self.link = None,
+            },
             // A list item's second paragraph.
             Event::Start(Tag::Paragraph) if !self.spans.is_empty() => self.push("\n", false),
             Event::End(TagEnd::Paragraph | TagEnd::HtmlBlock) => self.end_paragraph(),
@@ -163,7 +188,10 @@ impl Reader {
 
     /// The text read so far, as a list item or table cell keeps it.
     fn take_spans(&mut self) -> Vec<Span> {
-        // An HTML block's lines end in a line break.
+        // An HTML block's lines end in a line break, and text around an image has a space.
+        if let Some(first) = self.spans.first_mut() {
+            first.text = first.text.trim_start().into();
+        }
         if let Some(last) = self.spans.last_mut() {
             last.text.truncate(last.text.trim_end().len());
         }
@@ -193,6 +221,11 @@ impl Reader {
             spans,
         });
     }
+}
+
+/// The file an image's address names, if it's an absolute path.
+fn local_path(url: &str) -> Option<PathBuf> {
+    url.starts_with('/').then(|| PathBuf::from(url))
 }
 
 /// `url` if it's a web page or an email address; other schemes, such as `file:` or
@@ -345,6 +378,30 @@ mod tests {
     }
 
     #[test]
+    fn images_from_files_are_blocks_and_others_their_description() {
+        assert_eq!(
+            blocks(
+                "Before ![A *chart*](</tmp/a chart.png>) after\n\n\
+                 ![remote](https://example.com/a.png) ![relative](a.png)\n\n\
+                 - ![in a list](/tmp/b.png)"
+            ),
+            [
+                Block::Paragraph(vec![plain("Before")]),
+                Block::Image {
+                    path: "/tmp/a chart.png".into(),
+                    description: "A chart".into(),
+                },
+                Block::Paragraph(vec![plain("after")]),
+                Block::Paragraph(vec![
+                    linked("remote", "https://example.com/a.png"),
+                    plain(" relative"),
+                ]),
+                Block::List(vec![item(0, "•", vec![plain("in a list")])]),
+            ]
+        );
+    }
+
+    #[test]
     fn copying_a_section_drops_the_markdown() {
         let section = crate::Section::markdown("", "A **b** [c](https://c.example)\n\n```\nd\n```");
         assert_eq!(section.plain_text(), "A b c\nd");
@@ -352,6 +409,8 @@ mod tests {
         assert_eq!(list.plain_text(), "1. one\n  • two\nafter");
         let table = crate::Section::markdown("", "| a | b |\n|---|---|\n| 1 | 2 |");
         assert_eq!(table.plain_text(), "a\tb\n1\t2");
+        let image = crate::Section::markdown("", "![A chart](/tmp/a.png)");
+        assert_eq!(image.plain_text(), "A chart");
         let mono = crate::Section::mono("", "**kept**\n\n");
         assert_eq!(mono.plain_text(), "**kept**\n\n");
     }

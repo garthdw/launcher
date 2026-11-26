@@ -83,6 +83,10 @@ pub enum Block {
         header: Vec<Vec<Span>>,
         rows: Vec<Vec<Vec<Span>>>,
     },
+    Image {
+        path: String,
+        description: String,
+    },
 }
 
 impl From<launcher_core::Block> for Block {
@@ -109,6 +113,10 @@ impl From<launcher_core::Block> for Block {
             launcher_core::Block::Table { header, rows } => Self::Table {
                 header: cells(header),
                 rows: rows.into_iter().map(cells).collect(),
+            },
+            launcher_core::Block::Image { path, description } => Self::Image {
+                path: path.to_string_lossy().into_owned(),
+                description,
             },
         }
     }
