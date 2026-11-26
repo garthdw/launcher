@@ -1,5 +1,6 @@
 import AppKit
 import Carbon.HIToolbox
+import PanelLayout
 import ServiceManagement
 
 let started = CFAbsoluteTimeGetCurrent()
@@ -62,8 +63,9 @@ final class Row: NSView {
         fatalError("rows are built in code")
     }
 
+    // Hidden rows, as under an open detail, keep their tracking areas and still hear the pointer.
     override func mouseMoved(with _: NSEvent) {
-        hovered()
+        if !isHiddenOrHasHiddenAncestor { hovered() }
     }
 
     // Clicks on the title, subtitle or icon belong to the row.
@@ -269,15 +271,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSTextFieldDelegate, N
     var items: [Item] = []
     /// Each item's row; group headers sit between them in `list`.
     var rows: [Row] = []
+    /// The core decides which item is picked; this only mirrors it, to draw.
     var picked = 0 {
-        didSet {
-            highlightPicked()
-            selectionMoved = true
-        }
+        didSet { highlightPicked() }
     }
-    /// The selection moved since `refresh` picked the top result, so a refresh for the same
-    /// query keeps it on its item.
-    var selectionMoved = false
     var summoned: CFAbsoluteTime?
     /// A plugin's results changed while the panel was hidden or showed a detail.
     var resultsStale = false
@@ -532,27 +529,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSTextFieldDelegate, N
             resultsStale = true
             return
         }
-        refreshKeepingSelection()
+        refresh()
     }
 
     func refreshIfStale() {
-        if resultsStale { refreshKeepingSelection() }
+        if resultsStale { refresh() }
     }
 
-    /// Rebuilds the rows for the same query. A selection the user moved follows their item, as
-    /// rows may come and go; otherwise the new top result is picked, as for a new query.
-    func refreshKeepingSelection() {
-        let kept = selectionMoved && items.indices.contains(picked)
-            ? (items[picked].title, items[picked].subtitle) : nil
-        refresh()
-        if let kept, let index = items.firstIndex(where: { ($0.title, $0.subtitle) == kept }) {
-            pick(index)
-        }
-    }
-
+    /// Rebuilds the rows. For the same query, the item the user moved to stays picked, as rows
+    /// may come and go; otherwise the top result is.
     func refresh() {
         resultsStale = false
-        let groups = launcher.query(query: field.stringValue)
+        let shown = launcher.query(query: field.stringValue)
+        let groups = shown.groups
         items = groups.flatMap(\.items)
         rows = []
         list.subviews.forEach { $0.removeFromSuperview() }
@@ -586,15 +575,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSTextFieldDelegate, N
         list.frame = NSRect(x: 0, y: 0, width: Metrics.width, height: height)
         results.frame = NSRect(x: 0, y: 0, width: Metrics.width, height: min(height, maxHeight))
         resize()
-        pick(0)
-        selectionMoved = false
+        show(Int(shown.picked))
     }
 
     /// `item`'s row, the `index`th in `items`.
     func row(for item: Item, at index: Int, frame: NSRect) -> Row {
         let row = Row(frame: frame)
         row.clicked = { [unowned self] in choose(index) }
-        row.hovered = { [unowned self] in if picked != index { picked = index } }
+        row.hovered = { [unowned self] in if picked != index { picked = Int(launcher.pick(index: UInt32(index))) } }
         row.wantsLayer = true
         row.layer?.cornerRadius = Metrics.selectionRadius
         let icon = NSImageView(image: item.icon.image(side: Metrics.icon))
@@ -615,15 +603,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSTextFieldDelegate, N
                 .filter { !$0.isEmpty }
                 .joined(separator: " · ")
         )
-        // Long subtitles such as app folders lose their start, not the keys. Title and subtitle each
-        // take room the other leaves, but a long subtitle leaves a long title at least up to 396.
+        // A long subtitle loses its start, such as an app's folder, rather than the keys.
         subtitle.lineBreakMode = .byTruncatingHead
         title.lineBreakMode = .byTruncatingTail
-        let end = row.frame.width - 12
-        let wholeSubtitleX = end - subtitle.fittingSize.width
-        let subtitleX = min(max(titleX + title.fittingSize.width + 4, wholeSubtitleX), max(396, wholeSubtitleX))
-        subtitle.frame = NSRect(x: subtitleX, y: 13, width: end - subtitleX, height: 18)
-        title.frame = NSRect(x: titleX, y: 11, width: subtitleX - 4 - titleX, height: 22)
+        let layout = RowLayout(
+            titleX: titleX, end: row.frame.width - 12,
+            title: title.fittingSize.width, subtitle: subtitle.fittingSize.width
+        )
+        subtitle.frame = NSRect(x: layout.subtitleX, y: 13, width: layout.subtitleWidth, height: 18)
+        title.frame = NSRect(x: titleX, y: 11, width: layout.titleWidth, height: 22)
         row.addSubview(title)
         row.addSubview(subtitle)
         return row
@@ -649,16 +637,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSTextFieldDelegate, N
         }
     }
 
-    /// Picks the `index`th item and scrolls its row into view. Hover sets `picked` alone: scrolling
-    /// under the pointer would pick the row that slides beneath it, and scroll again.
-    func pick(_ index: Int) {
+    /// Shows the `index`th item picked and scrolls its row into view. Hover sets `picked` alone:
+    /// scrolling under the pointer would pick the row that slides beneath it, and scroll again.
+    func show(_ index: Int) {
         picked = index
         if rows.indices.contains(index) { list.scrollToVisible(rows[index].reach) }
     }
 
     func showDetail(of index: Int) {
         // Going back after a refresh returns to the item the detail showed.
-        selectionMoved = true
+        picked = Int(launcher.pick(index: UInt32(index)))
         let pane = DetailPane(item: items[index])
         pane.text.back = { [unowned self] in
             closeDetail()
@@ -666,7 +654,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSTextFieldDelegate, N
             panel.makeFirstResponder(field)
             field.currentEditor()?.moveToEndOfDocument(nil)
         }
-        // The shown item, not `picked`: hidden rows under the pane may still track the pointer.
         pane.text.run = { [unowned self] in choose(index) }
         detail = pane
         content.addSubview(pane)
@@ -717,9 +704,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSTextFieldDelegate, N
     func control(_: NSControl, textView: NSTextView, doCommandBy selector: Selector) -> Bool {
         switch selector {
         case #selector(NSResponder.moveDown(_:)) where !items.isEmpty:
-            pick(step(picked, by: 1, count: items.count))
+            show(Int(launcher.down()))
         case #selector(NSResponder.moveUp(_:)) where !items.isEmpty:
-            pick(step(picked, by: -1, count: items.count))
+            show(Int(launcher.up()))
         // Only from the end of the query, so → still moves the caret elsewhere.
         case #selector(NSResponder.moveRight(_:))
             where textView.selectedRange() == NSRange(location: (textView.string as NSString).length, length: 0)
@@ -749,11 +736,6 @@ final class MainRelay: ResultsListener, Sendable {
     func resultsChanged() {
         DispatchQueue.main.async { MainActor.assumeIsolated { self.changed() } }
     }
-}
-
-/// Moves a selection through `count` entries, wrapping at either end.
-func step(_ index: Int, by offset: Int, count: Int) -> Int {
-    (index + offset + count) % count
 }
 
 @MainActor

@@ -8,9 +8,11 @@ let package = Package(
     platforms: [.macOS(.v26)],
     targets: [
         .systemLibrary(name: "launcher_ffiFFI", path: "Sources/launcher_ffiFFI"),
+        .target(name: "PanelLayout"),
+        .testTarget(name: "PanelLayoutTests", dependencies: ["PanelLayout"]),
         .executableTarget(
             name: "Launcher",
-            dependencies: ["launcher_ffiFFI"],
+            dependencies: ["launcher_ffiFFI", "PanelLayout"],
             linkerSettings: [
                 .unsafeFlags(["-L", Context.packageDirectory + "/../target/release"]),
                 .linkedLibrary("launcher_ffi"),

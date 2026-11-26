@@ -10,7 +10,7 @@ permissions:
   contents: read
 
 jobs:
-  # The Rust core and its tests, and the Swift shell built and bundled against it.
+  # The Rust core and the Swift shell built against it, each with its tests.
   macos:
     runs-on: macos-latest
     timeout-minutes: 30
@@ -21,7 +21,9 @@ jobs:
 
       - run: cargo clippy --all-targets -- -D warnings
       - run: cargo test
+      # Writes the bindings, without which SwiftPM can't load the package.
       - run: scripts/bundle
+      - run: swift test --package-path macos
 
   # The core is shared with the Linux shell to come. rustfmt checks every file whatever the cfg,
   # so `cargo fmt --check` runs only here.
