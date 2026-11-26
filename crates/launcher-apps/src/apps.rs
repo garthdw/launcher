@@ -59,10 +59,11 @@ impl Usage {
 
 /// Searches application bundles by name, ranked by match quality and frecency.
 pub struct Apps {
+    /// The index thread holds it weakly, and stops once it's dropped.
     index: Arc<Mutex<Vec<App>>>,
     usage: HashMap<PathBuf, Usage>,
     saver: Option<Saver>,
-    // Watching stops when this drops, which also ends the rescan thread.
+    // Watching stops when this drops, which wakes the index thread waiting for changes.
     _watcher: Option<Arc<Mutex<RecommendedWatcher>>>,
 }
 
@@ -88,9 +89,11 @@ impl Apps {
         let (sender, receiver) = mpsc::channel();
         let watcher = watch(sender).map(|watcher| Arc::new(Mutex::new(watcher)));
         thread::spawn({
-            let index = index.clone();
+            let index = Arc::downgrade(&index);
             let watcher = watcher.as_ref().map_or_else(Weak::new, Arc::downgrade);
-            move || keep_index(&index, &roots, &watcher, &receiver, &*changed)
+            move || {
+                keep_index(&index, &roots, &watcher, &receiver, &*changed);
+            }
         });
         let usage = frecency_path.as_deref().map(load_usage).unwrap_or_default();
         let saver = frecency_path.map(Saver::start);
@@ -217,17 +220,19 @@ fn app_folders() -> Vec<PathBuf> {
     roots
 }
 
-/// Rescans after each burst of changes. Each root is watched once it exists, before the scan,
-/// so an app added in between is still caught.
+/// Rescans after each burst of changes, until `index` or the watcher is dropped, when it returns
+/// `None`. Each root is watched once it exists, before the scan, so an app added in between is
+/// still caught.
 fn keep_index(
-    index: &Mutex<Vec<App>>,
+    index: &Weak<Mutex<Vec<App>>>,
     roots: &[PathBuf],
     watcher: &Weak<Mutex<RecommendedWatcher>>,
     changes: &Receiver<()>,
     changed: &dyn Fn(),
-) {
+) -> Option<()> {
     let mut watched = vec![false; roots.len()];
-    let mut refresh = || {
+    // `None` once `index` is dropped.
+    let mut refresh = || -> Option<()> {
         if let Some(watcher) = watcher.upgrade() {
             match watcher.lock() {
                 Ok(mut watcher) => {
@@ -245,10 +250,10 @@ fn keep_index(
             }
         }
         // Scan before locking: `query` takes the same lock on every keystroke.
-        let apps = scan(roots);
+        let apps = scan(roots, &|| index.strong_count() == 0)?;
         // Updates write inside bundles in bursts that change nothing here, and every call
         // rebuilds the shown rows.
-        let replaced = match index.lock() {
+        let replaced = match index.upgrade()?.lock() {
             Ok(mut index) if *index != apps => {
                 *index = apps;
                 true
@@ -262,10 +267,11 @@ fn keep_index(
         if replaced {
             changed();
         }
+        Some(())
     };
     let missing = || -> Vec<bool> { roots.iter().map(|root| !root.is_dir()).collect() };
     let mut was_missing = missing();
-    refresh();
+    refresh()?;
     loop {
         // A root that doesn't exist yet (`~/Applications` often doesn't) is looked for now and
         // then. Watching its parent instead would wake for every write anywhere under home.
@@ -288,10 +294,10 @@ fn keep_index(
                     continue;
                 }
             }
-            Err(RecvTimeoutError::Disconnected) => return,
+            Err(RecvTimeoutError::Disconnected) => return None,
         }
         was_missing = missing();
-        refresh();
+        refresh()?;
     }
 }
 
@@ -367,13 +373,14 @@ fn localized_name(_path: &Path) -> Option<String> {
     None
 }
 
-fn scan(roots: &[PathBuf]) -> Vec<App> {
+/// `None` if `cancelled` says so between bundles.
+fn scan(roots: &[PathBuf], cancelled: &dyn Fn() -> bool) -> Option<Vec<App>> {
     let mut apps = Vec::new();
     for root in roots {
         // One level of plain folders, for vendor folders such as `/Applications/Adobe …/`.
-        collect_apps(root, 1, &mut apps);
+        collect_apps(root, 1, &mut apps, cancelled)?;
     }
-    distinguish(apps)
+    Some(distinguish(apps))
 }
 
 /// `apps` in name order, without the copies overlapping roots find twice. Finder can give
@@ -399,16 +406,24 @@ fn distinguish(mut apps: Vec<App>) -> Vec<App> {
     apps
 }
 
-fn collect_apps(folder: &Path, depth: usize, apps: &mut Vec<App>) {
+fn collect_apps(
+    folder: &Path,
+    depth: usize,
+    apps: &mut Vec<App>,
+    cancelled: &dyn Fn() -> bool,
+) -> Option<()> {
     let entries = match fs::read_dir(folder) {
         Ok(entries) => entries,
-        Err(error) if error.kind() == io::ErrorKind::NotFound => return,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Some(()),
         Err(error) => {
             log!("can't list {}: {error}", folder.display());
-            return;
+            return Some(());
         }
     };
     for entry in entries {
+        if cancelled() {
+            return None;
+        }
         let entry = match entry {
             Ok(entry) => entry,
             Err(error) => {
@@ -430,9 +445,10 @@ fn collect_apps(folder: &Path, depth: usize, apps: &mut Vec<App>) {
         {
             apps.push(App { name, path });
         } else if depth > 0 {
-            collect_apps(&path, depth - 1, apps);
+            collect_apps(&path, depth - 1, apps, cancelled)?;
         }
     }
+    Some(())
 }
 
 /// Matching apps, best first, with their relevance. Ties keep the index's name order.
@@ -861,10 +877,10 @@ mod tests {
 
     #[test]
     #[cfg(target_os = "macos")]
-    fn apps_take_finders_name() {
+    fn apps_take_finders_name() -> io::Result<()> {
         // Finder shows "Find My" or a translation, never the bundle's file name.
         let path = Path::new("/System/Applications/FindMy.app");
-        let apps = scan(&[PathBuf::from("/System/Applications")]);
+        let apps = scan_all(&[PathBuf::from("/System/Applications")])?;
         let name = apps
             .iter()
             .find(|app| app.path == path)
@@ -873,6 +889,11 @@ mod tests {
             name.is_some_and(|name| name != "FindMy"),
             "FindMy.app scanned as {name:?}"
         );
+        Ok(())
+    }
+
+    fn scan_all(roots: &[PathBuf]) -> io::Result<Vec<App>> {
+        scan(roots, &|| false).ok_or_else(|| io::Error::other("a scan nothing cancelled stopped"))
     }
 
     #[test]
@@ -888,20 +909,21 @@ mod tests {
             fs::create_dir_all(root.path().join(folder))?;
         }
         fs::write(root.path().join("notes.app"), "not a bundle")?;
-        let names = |roots: &[PathBuf]| -> Vec<String> {
-            scan(roots).into_iter().map(|app| app.name).collect()
+        let names = |roots: &[PathBuf]| -> io::Result<Vec<String>> {
+            Ok(scan_all(roots)?.into_iter().map(|app| app.name).collect())
         };
         let missing = root.path().join("missing");
         assert_eq!(
-            names(&[root.path().to_path_buf(), missing]),
+            names(&[root.path().to_path_buf(), missing])?,
             ["Safari", "Tool"]
         );
         // `/System/Applications/Utilities` is a root and inside one.
         let vendor = root.path().join("Vendor");
         assert_eq!(
-            names(&[root.path().to_path_buf(), vendor]),
+            names(&[root.path().to_path_buf(), vendor])?,
             ["Hidden", "Safari", "Tool"]
         );
+        assert_eq!(scan(&[root.path().to_path_buf()], &|| true), None);
         Ok(())
     }
 
@@ -960,6 +982,33 @@ mod tests {
         fs::create_dir(root.path().join("Zed.app"))?;
         receiver.recv_timeout(Duration::from_secs(10))?;
         assert_eq!(titles(&mut plugin, "zed"), ["Zed"]);
+        Ok(())
+    }
+
+    #[test]
+    fn turning_apps_off_stops_its_scan() -> io::Result<()> {
+        let root = tempfile::tempdir()?;
+        // Far more than scan in the second the thread gets to end.
+        for index in 0..2000 {
+            fs::create_dir(root.path().join(format!("{index}.app")))?;
+        }
+        let called = Arc::new(AtomicBool::new(false));
+        let changed: ResultsChanged = Arc::new({
+            let called = called.clone();
+            move || called.store(true, Ordering::Relaxed)
+        });
+        // The index thread holds the only other reference.
+        let running = Arc::downgrade(&changed);
+        drop(Apps::watching(
+            vec![root.path().to_path_buf()],
+            None,
+            changed,
+        ));
+        assert!(
+            eventually_within(Duration::from_secs(1), || running.strong_count() == 0),
+            "the index thread ends"
+        );
+        assert!(!called.load(Ordering::Relaxed), "nothing to refresh");
         Ok(())
     }
 
