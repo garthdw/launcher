@@ -127,7 +127,7 @@ impl Plugin for Apps {
                     .unwrap_or_default(),
                 icon: Icon::File(app.path.clone()),
                 action: Action::Open(app.path.clone()),
-                detail: Vec::new(),
+                has_detail: false,
                 relevance,
             })
             .collect()

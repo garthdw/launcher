@@ -10,8 +10,8 @@ use std::time::Duration;
 use jiff::civil::Date;
 use launcher_core::{Action, Icon, Item, Plugin, ResultsChanged, Section, log};
 
-use expression::{Answer, Environment};
-use units::{Error, Money, Rates};
+use expression::{Answer, Environment, Reading};
+use units::{Error, Money, Quantity, Rates};
 
 pub const NAME: &str = "Calculator";
 /// How often to check whether the cached rates are a day old. Hourly rather than sleeping a
@@ -121,114 +121,175 @@ fn notice(title: &str) -> Item {
     Item::notice(title, "", Icon::Calculator, CALCULATION)
 }
 
+/// The answer to `query` and how it was read, with its relevance; `Err` with the row to show
+/// instead, if there is one.
+fn calculate<'query>(
+    exchange_rates: &ExchangeRates,
+    query: &'query str,
+) -> Result<(Reading<'query>, Answer, u8), Option<Item>> {
+    let has_number = query.chars().any(|character| character.is_ascii_digit());
+    // A lone letter such as `e` is more likely the start of an app's name than a constant.
+    if !has_number && query.chars().nth(1).is_none() {
+        return Err(None);
+    }
+    let rates = match exchange_rates {
+        ExchangeRates::Loaded(rates, _) => Some(&**rates),
+        ExchangeRates::Loading | ExchangeRates::Unavailable => None,
+    };
+    let environment = Environment::new(rates);
+    let (reading, answer) =
+        match expression::read(query).and_then(|reading| reading.resolve(&environment)) {
+            Ok(answer) => answer,
+            Err(Error::RatesMissing) if has_number => {
+                return Err(Some(notice(match exchange_rates {
+                    ExchangeRates::Unavailable => "Exchange rates unavailable",
+                    _ => "Loading exchange rates…",
+                })));
+            }
+            Err(_) => return Err(None),
+        };
+    // Bare words such as an app name are often units ("m", "day"), but echoing them back as
+    // "1 m" is noise in a launcher. Only a plain number, as `pi` is, says something.
+    let relevance = match &answer {
+        _ if has_number => CALCULATION,
+        Answer::Quantity(quantity) if quantity.is_plain() => CONSTANT,
+        _ => return Err(None),
+    };
+    Ok((reading, answer, relevance))
+}
+
 impl Plugin for Calc {
     fn name(&self) -> &'static str {
         NAME
     }
 
     fn query(&mut self, query: &str) -> Vec<Item> {
-        let has_number = query.chars().any(|character| character.is_ascii_digit());
-        // A lone letter such as `e` is more likely the start of an app's name than a constant.
-        if !has_number && query.chars().nth(1).is_none() {
-            return Vec::new();
-        }
         // Held for the query; the thread keeping rates current writes them once a day.
         let exchange_rates = lock(&self.rates);
-        let rates = match &*exchange_rates {
-            ExchangeRates::Loaded(rates, _) => Some(&**rates),
-            ExchangeRates::Loading | ExchangeRates::Unavailable => None,
+        let (_, answer, relevance) = match calculate(&exchange_rates, query) {
+            Ok(calculated) => calculated,
+            Err(notice) => return notice.into_iter().collect(),
         };
-        let environment = Environment::new(rates);
-        let answer = expression::read(query).and_then(|reading| reading.resolve(&environment));
-        let (reading, answer) = match answer {
-            Ok(answer) => answer,
-            Err(Error::RatesMissing) if has_number => {
-                return vec![notice(match *exchange_rates {
-                    ExchangeRates::Unavailable => "Exchange rates unavailable",
-                    _ => "Loading exchange rates…",
-                })];
+        let subtitle = match (&*exchange_rates, &answer) {
+            (ExchangeRates::Loaded(_, date), Answer::Quantity(quantity)) if quantity.is_money() => {
+                format!("ECB rates of {}", date.strftime("%-d %b"))
             }
-            Err(_) => return Vec::new(),
+            _ => String::new(),
         };
-        // Bare words such as an app name are often units ("m", "day"), but echoing them back as
-        // "1 m" is noise in a launcher. Only a plain number, as `pi` is, says something.
-        let relevance = match &answer {
-            _ if has_number => CALCULATION,
-            Answer::Quantity(quantity) if quantity.is_plain() => CONSTANT,
-            _ => return Vec::new(),
-        };
-        let mut subtitle = String::new();
-        let (title, copied, precise) = match answer {
-            Answer::Text(text) => (text.clone(), text.clone(), text),
-            Answer::Date(date) => {
-                let iso = date.to_string();
-                (date.strftime(DATE_FORMAT).to_string(), iso.clone(), iso)
-            }
-            Answer::Time(time) => (
-                time.strftime(&format!("{DATE_FORMAT}, %H:%M")).to_string(),
-                time.strftime("%Y-%m-%dT%H:%M:%S%:z").to_string(),
-                time.strftime("%Y-%m-%d %H:%M:%S %Z (%:z)").to_string(),
-            ),
-            Answer::Quantity(quantity) => {
-                if let ExchangeRates::Loaded(_, date) = &*exchange_rates
-                    && quantity.is_money()
-                {
-                    subtitle = format!("ECB rates of {}", date.strftime("%-d %b"));
-                }
-                if let Some(money) = quantity.as_money() {
-                    amounts(quantity.magnitude, &money)
-                } else {
-                    let unit = if quantity.is_plain() {
-                        String::new()
-                    } else {
-                        format!(" {}", quantity.unit_name())
-                    };
-                    let shown = rounded(quantity.magnitude);
-                    (
-                        format!("{shown}{unit}"),
-                        // Digit separators read well but break pasting into most other apps.
-                        format!("{}{unit}", shown.replace('_', "")),
-                        format!("{}{unit}", precise(quantity.magnitude)),
-                    )
-                }
-            }
-        };
-        let mut detail = vec![Section {
-            title: "Input".into(),
-            text: reading.to_string(),
-        }];
-        if precise != copied {
-            detail.push(Section {
-                title: "Full precision".into(),
-                text: precise,
-            });
-        }
+        let (title, copied) = shown(&answer);
         vec![Item {
             title,
             subtitle,
             icon: Icon::Calculator,
             action: Action::Copy(copied),
-            detail,
+            has_detail: true,
             relevance,
         }]
     }
+
+    /// How the query was read, and the answer to full precision if that says more than what's
+    /// copied. Worked out again, as most answers are never opened.
+    fn detail(&mut self, query: &str, _item: &Item) -> Vec<Section> {
+        let exchange_rates = lock(&self.rates);
+        let Ok((reading, answer, _)) = calculate(&exchange_rates, query) else {
+            return Vec::new();
+        };
+        let mut detail = vec![Section {
+            title: "Input".into(),
+            text: reading.to_string(),
+        }];
+        let precise = in_full(&answer);
+        if precise != shown(&answer).1 {
+            detail.push(Section {
+                title: "Full precision".into(),
+                text: precise,
+            });
+        }
+        detail
+    }
 }
 
-/// An amount as shown, copied and to full precision: to the currency's smallest unit, as
-/// `€9.60`, `¥1600` or `0.95 CHF`.
-fn amounts(value: f64, money: &Money) -> (String, String, String) {
-    let scale = 10f64.powi(money.decimals as i32);
-    let rounded = (value * scale).round() / scale;
-    // So an amount that rounds to nothing isn't `-€0.00`.
-    let sign = if rounded < 0.0 { "-" } else { "" };
-    let written = |number: &str| {
-        if money.symbol_first {
-            format!("{sign}{}{number}", money.symbol)
-        } else {
-            format!("{sign}{number} {}", money.symbol)
+/// An answer as shown and as copied.
+fn shown(answer: &Answer) -> (String, String) {
+    match answer {
+        Answer::Text(text) => (text.clone(), text.clone()),
+        Answer::Date(date) => (date.strftime(DATE_FORMAT).to_string(), date.to_string()),
+        Answer::Time(time) => (
+            time.strftime(&format!("{DATE_FORMAT}, %H:%M")).to_string(),
+            time.strftime("%Y-%m-%dT%H:%M:%S%:z").to_string(),
+        ),
+        Answer::Quantity(quantity) => {
+            if let Some(money) = quantity.as_money() {
+                return amounts(quantity.magnitude, &money);
+            }
+            let unit = unit_suffix(quantity);
+            let shown = rounded(quantity.magnitude);
+            (
+                format!("{shown}{unit}"),
+                // Digit separators read well but break pasting into most other apps.
+                format!("{}{unit}", shown.replace('_', "")),
+            )
         }
-    };
-    let fixed = format!("{:.*}", money.decimals, rounded.abs());
+    }
+}
+
+/// An answer to full precision.
+fn in_full(answer: &Answer) -> String {
+    match answer {
+        Answer::Text(text) => text.clone(),
+        Answer::Date(date) => date.to_string(),
+        Answer::Time(time) => time.strftime("%Y-%m-%d %H:%M:%S %Z (%:z)").to_string(),
+        Answer::Quantity(quantity) => match quantity.as_money() {
+            Some(money) => money_text(
+                &money,
+                sign(quantity.magnitude, &money),
+                &precise(quantity.magnitude.abs()),
+            ),
+            None => format!("{}{}", precise(quantity.magnitude), unit_suffix(quantity)),
+        },
+    }
+}
+
+fn unit_suffix(quantity: &Quantity) -> String {
+    if quantity.is_plain() {
+        String::new()
+    } else {
+        format!(" {}", quantity.unit_name())
+    }
+}
+
+/// `value` to the currency's smallest unit, halves away from zero.
+fn to_smallest_unit(value: f64, money: &Money) -> f64 {
+    let scale = 10f64.powi(money.decimals as i32);
+    (value * scale).round() / scale
+}
+
+/// The minus sign of an amount, unless it rounds to nothing, which isn't `-€0.00`.
+fn sign(value: f64, money: &Money) -> &'static str {
+    if to_smallest_unit(value, money) < 0.0 {
+        "-"
+    } else {
+        ""
+    }
+}
+
+fn money_text(money: &Money, sign: &str, number: &str) -> String {
+    if money.symbol_first {
+        format!("{sign}{}{number}", money.symbol)
+    } else {
+        format!("{sign}{number} {}", money.symbol)
+    }
+}
+
+/// An amount as shown and as copied: to the currency's smallest unit, as `€9.60`, `¥1600` or
+/// `0.95 CHF`.
+fn amounts(value: f64, money: &Money) -> (String, String) {
+    let sign = sign(value, money);
+    let fixed = format!(
+        "{:.*}",
+        money.decimals,
+        to_smallest_unit(value, money).abs()
+    );
     let (integer, fraction) = fixed.split_once('.').unwrap_or((&fixed, ""));
     let point = if fraction.is_empty() { "" } else { "." };
     let grouped = if integer.len() >= 5 {
@@ -237,9 +298,8 @@ fn amounts(value: f64, money: &Money) -> (String, String, String) {
         integer.to_owned()
     };
     (
-        written(&format!("{grouped}{point}{fraction}")),
-        written(&fixed),
-        written(&precise(value.abs())),
+        money_text(money, sign, &format!("{grouped}{point}{fraction}")),
+        money_text(money, sign, &fixed),
     )
 }
 
@@ -332,12 +392,20 @@ mod tests {
             .collect()
     }
 
+    /// The detail of each answer to `query`, as the shell would ask for it.
+    fn sections(query: &str) -> Vec<Section> {
+        let mut calc = with_rates();
+        let items = calc.query(query);
+        items
+            .iter()
+            .flat_map(|item| calc.detail(query, item))
+            .collect()
+    }
+
     /// How the calculator read `query`, from the detail.
     fn input(query: &str) -> Option<String> {
-        with_rates()
-            .query(query)
+        sections(query)
             .into_iter()
-            .flat_map(|item| item.detail)
             .find(|section| section.title == "Input")
             .map(|section| section.text)
     }
@@ -531,10 +599,8 @@ mod tests {
     #[test]
     fn detail_shows_the_reading_and_full_precision() {
         let detail = |query| {
-            with_rates()
-                .query(query)
+            sections(query)
                 .into_iter()
-                .flat_map(|item| item.detail)
                 .map(|section| (section.title, section.text))
                 .collect::<Vec<_>>()
         };
@@ -654,9 +720,8 @@ mod tests {
             "copied without separators"
         );
         assert_eq!(
-            items
+            sections("1000000 USD / 3 to EUR")
                 .into_iter()
-                .flat_map(|item| item.detail)
                 .find(|section| section.title == "Full precision")
                 .map(|section| section.text),
             Some("€266666.6666666667".into())
