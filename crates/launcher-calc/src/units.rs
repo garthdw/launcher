@@ -53,7 +53,9 @@ const YEAR: f64 = 365.2425 * DAY;
 enum Prefixes {
     Bare,
     Metric,
-    /// Metric and binary, as for bytes.
+    /// Metric from kilo up, as for bit rates: nobody means millibits.
+    Large,
+    /// Large metric and binary, as for bytes.
     Binary,
 }
 
@@ -87,7 +89,7 @@ const fn unit(
     }
 }
 
-use Prefixes::{Bare, Binary, Metric};
+use Prefixes::{Bare, Binary, Large, Metric};
 
 const UNITS: &[UnitEntry] = &[
     unit(
@@ -356,8 +358,9 @@ const UNITS: &[UnitEntry] = &[
     unit(&["lm"], &["lumen", "lumens"], LUMINOUS, 1.0, Metric),
     unit(&["sr"], &["steradian", "steradians"], SCALAR, 1.0, Bare),
     unit(&["B"], &["byte", "bytes"], INFORMATION, 8.0, Binary),
-    unit(&["bit"], &["bits"], INFORMATION, 1.0, Binary),
-    unit(&["bps"], &[], DATA_RATE, 1.0, Metric),
+    // `b` after a prefix, as in `Mb`; in lower case throughout, `SPELLINGS` makes it bytes.
+    unit(&["bit", "b"], &["bits"], INFORMATION, 1.0, Binary),
+    unit(&["bps"], &[], DATA_RATE, 1.0, Large),
     unit(&["rad"], &["radian", "radians"], SCALAR, 1.0, Metric),
     unit(
         &["°", "deg", "degree", "degrees"],
@@ -465,6 +468,12 @@ const BINARY_PREFIXES: &[(&str, &str, f64)] = &[
 const SPELLINGS: &[(&str, &[&str])] = &[
     // Kilobytes, though `K` is no prefix.
     ("KB", &["kB"]),
+    // File sizes as people type them; `Mb` and `Gb` stay bits, as speeds are written.
+    ("kb", &["kB"]),
+    ("mb", &["MB"]),
+    ("gb", &["GB"]),
+    ("tb", &["TB"]),
+    ("pb", &["PB"]),
     ("Nm", &["N", "m"]),
     ("kw", &["kW"]),
     ("ftlb", &["ft", "lbf"]),
@@ -472,6 +481,53 @@ const SPELLINGS: &[(&str, &[&str])] = &[
     ("lbft", &["lbf", "ft"]),
     ("lb-ft", &["lbf", "ft"]),
 ];
+
+/// Names with more than one meaning, the usual one first. A conversion whose sides don't measure
+/// the same thing tries the others: `10 nm to ft lbf` is in newton-metres, `10 hp to ps` in
+/// metric horsepower.
+const MEANINGS: &[(&str, &[&str])] = &[("nm", &["nm", "Nm"]), ("ps", &["ps", "PS"])];
+
+/// The units `name` may stand for, its usual one first: those in `MEANINGS`, or for a name that
+/// means nothing as typed, those it spells in another case. Empty when there's no choice: a
+/// unit typed in a case that means something keeps that meaning, so typing the case is how to
+/// choose.
+pub(crate) fn meanings(name: &str) -> Vec<Vec<Factor>> {
+    if let Some((_, spellings)) = MEANINGS.iter().find(|(ambiguous, _)| *ambiguous == name) {
+        return spellings
+            .iter()
+            .filter_map(|spelling| lookup(spelling, None).ok())
+            .collect();
+    }
+    if lookup(name, None) != Err(Error::Invalid) {
+        return Vec::new();
+    }
+    let units = in_any_case(name);
+    if units.len() < 2 {
+        return Vec::new();
+    }
+    units
+}
+
+/// The units `name` spells in any case, the likeliest first: those without a prefix, then by how
+/// far the prefix is from one, so `MS` is milliseconds sooner than megaseconds.
+pub(crate) fn in_any_case(name: &str) -> Vec<Vec<Factor>> {
+    let same: fn(&str, &str) -> bool = |typed, known| typed.eq_ignore_ascii_case(known);
+    let mut found: Vec<(f64, Vec<Factor>)> = SPELLINGS
+        .iter()
+        .filter(|(typed, _)| same(name, typed))
+        .filter_map(|(_, symbols)| spelled(symbols))
+        .map(|unit| (0.0, unit))
+        .collect();
+    found.extend(spelled_units(name, same).map(|(factor, distance)| (distance, vec![factor])));
+    found.sort_by(|(left, _), (right, _)| left.total_cmp(right));
+    let mut units: Vec<Vec<Factor>> = Vec::new();
+    for (_, unit) in found {
+        if !units.contains(&unit) {
+            units.push(unit);
+        }
+    }
+    units
+}
 
 /// Spellings with a hyphen, which the lexer must read as one word rather than a subtraction.
 pub(crate) fn hyphenated() -> impl Iterator<Item = &'static str> {
@@ -616,27 +672,16 @@ fn superscript_digit(digit: char) -> char {
 pub(crate) enum Error {
     /// Not something the calculator reads, or a calculation without an answer.
     Invalid,
+    /// Adding or converting quantities that measure different things, as `3 m + 2 s`.
+    Mismatch,
     /// A currency other than the euro, before rates have loaded.
     RatesMissing,
 }
 
-/// The unit `name` stands for, as factors: `Nm` is two. `newton_metres` reads `nm` as N·m
-/// rather than nanometres.
-pub(crate) fn lookup(
-    name: &str,
-    rates: Option<&Rates>,
-    newton_metres: bool,
-) -> Result<Vec<Factor>, Error> {
-    let name = if newton_metres && name == "nm" {
-        "Nm"
-    } else {
-        name
-    };
+/// The unit `name` spells as typed, as factors: `Nm` is two.
+pub(crate) fn lookup(name: &str, rates: Option<&Rates>) -> Result<Vec<Factor>, Error> {
     if let Some((_, symbols)) = SPELLINGS.iter().find(|(typed, _)| *typed == name) {
-        return symbols
-            .iter()
-            .map(|symbol| single_unit(symbol).ok_or(Error::Invalid))
-            .collect();
+        return spelled(symbols).ok_or(Error::Invalid);
     }
     if let Some(factor) = single_unit(name) {
         return Ok(vec![factor]);
@@ -644,41 +689,70 @@ pub(crate) fn lookup(
     currency(name, rates).map(|factor| vec![factor])
 }
 
+fn spelled(symbols: &[&str]) -> Option<Vec<Factor>> {
+    symbols.iter().map(|symbol| single_unit(symbol)).collect()
+}
+
 fn single_unit(name: &str) -> Option<Factor> {
+    spelled_units(name, |typed, known| typed == known)
+        .next()
+        .map(|(factor, _)| factor)
+}
+
+/// The units `name` spells, as `same` compares spellings: those without a prefix first, then
+/// prefixed ones in the prefixes' order, each with its prefix's distance from one in powers of
+/// ten.
+fn spelled_units(name: &str, same: fn(&str, &str) -> bool) -> impl Iterator<Item = (Factor, f64)> {
     let factor = |entry: &UnitEntry, prefix: &'static str, scale: f64| {
-        Some(Factor {
-            prefix,
-            symbol: entry.symbols.first()?,
-            dimension: entry.dimension,
-            scale: entry.scale * scale,
-            offset: entry.offset,
-            exponent: 1,
-        })
+        Some((
+            Factor {
+                prefix,
+                symbol: entry.symbols.first()?,
+                dimension: entry.dimension,
+                scale: entry.scale * scale,
+                offset: entry.offset,
+                exponent: 1,
+            },
+            scale.log10().abs(),
+        ))
     };
-    for entry in UNITS {
-        if entry.symbols.contains(&name) || entry.names.contains(&name) {
-            return factor(entry, "", 1.0);
-        }
-    }
-    for entry in UNITS {
-        let prefixes: &[&[(&str, &str, f64)]] = match entry.prefixes {
-            Bare => continue,
-            Metric => &[METRIC_PREFIXES],
-            Binary => &[METRIC_PREFIXES, BINARY_PREFIXES],
+    let spells = move |typed: &str, known: &[&str]| known.iter().any(|known| same(typed, known));
+    let unprefixed = UNITS
+        .iter()
+        .filter(move |entry| spells(name, entry.symbols) || spells(name, entry.names))
+        .filter_map(move |entry| factor(entry, "", 1.0));
+    // Prefixes that start the name first, so most names compare against no unit at all.
+    let prefixes = METRIC_PREFIXES
+        .iter()
+        .map(|prefix| (prefix, false))
+        .chain(BINARY_PREFIXES.iter().map(|prefix| (prefix, true)));
+    let prefixed = prefixes.flat_map(move |(&(symbol, long, scale), binary)| {
+        let after = |prefix: &str| {
+            let (start, rest) = name.split_at_checked(prefix.len())?;
+            same(start, prefix).then_some(rest)
         };
-        for &(symbol, long, scale) in prefixes.iter().copied().flatten() {
-            let short = name
-                .strip_prefix(symbol)
-                .is_some_and(|rest| entry.symbols.contains(&rest));
-            let spelled = name
-                .strip_prefix(long)
-                .is_some_and(|rest| entry.names.contains(&rest));
-            if short || spelled {
-                return factor(entry, symbol, scale);
-            }
-        }
-    }
-    None
+        let (short, spelled_out) = (after(symbol), after(long));
+        let candidates = if short.is_some() || spelled_out.is_some() {
+            UNITS
+        } else {
+            &[]
+        };
+        candidates
+            .iter()
+            .filter(move |entry| match entry.prefixes {
+                Bare => false,
+                Metric => !binary,
+                // Nobody means millibits.
+                Large => !binary && scale >= 1e3,
+                Binary => binary || scale >= 1e3,
+            })
+            .filter(move |entry| {
+                short.is_some_and(|rest| spells(rest, entry.symbols))
+                    || spelled_out.is_some_and(|rest| spells(rest, entry.names))
+            })
+            .filter_map(move |entry| factor(entry, symbol, scale))
+    });
+    unprefixed.chain(prefixed)
 }
 
 fn currency(name: &str, rates: Option<&Rates>) -> Result<Factor, Error> {
@@ -815,7 +889,7 @@ impl Quantity {
 
     pub(crate) fn add(self, other: Self, sign: f64) -> Result<Self, Error> {
         if self.dimension() != other.dimension() {
-            return Err(Error::Invalid);
+            return Err(Error::Mismatch);
         }
         // A difference in another unit, so `20 °C + 5 K` is 25 °C.
         let other_magnitude = if self.unit == other.unit {
@@ -897,7 +971,10 @@ impl Quantity {
 
     /// This quantity in `target`'s unit, which must measure the same thing.
     pub(crate) fn convert(&self, target: &Self) -> Result<Self, Error> {
-        if self.dimension() != target.dimension() || target.magnitude != 1.0 {
+        if self.dimension() != target.dimension() {
+            return Err(Error::Mismatch);
+        }
+        if target.magnitude != 1.0 {
             return Err(Error::Invalid);
         }
         Ok(Self {
@@ -906,27 +983,30 @@ impl Quantity {
         })
     }
 
-    /// `km/h`, `ft·lbf`, `m²`, `kg/(m·s²)`.
     pub(crate) fn unit_name(&self) -> String {
-        let join = |positive: bool| {
-            self.unit
-                .iter()
-                .filter(|factor| (factor.exponent > 0) == positive)
-                .map(Factor::name)
-                .collect::<Vec<_>>()
-        };
-        let numerator = join(true);
-        let denominator = join(false);
-        let numerator = if numerator.is_empty() && !denominator.is_empty() {
-            "1".to_owned()
-        } else {
-            numerator.join("·")
-        };
-        match denominator.as_slice() {
-            [] => numerator,
-            [single] => format!("{numerator}/{single}"),
-            several => format!("{numerator}/({})", several.join("·")),
-        }
+        unit_name(&self.unit)
+    }
+}
+
+/// `km/h`, `ft·lbf`, `m²`, `kg/(m·s²)`.
+pub(crate) fn unit_name(unit: &[Factor]) -> String {
+    let join = |positive: bool| {
+        unit.iter()
+            .filter(|factor| (factor.exponent > 0) == positive)
+            .map(Factor::name)
+            .collect::<Vec<_>>()
+    };
+    let numerator = join(true);
+    let denominator = join(false);
+    let numerator = if numerator.is_empty() && !denominator.is_empty() {
+        "1".to_owned()
+    } else {
+        numerator.join("·")
+    };
+    match denominator.as_slice() {
+        [] => numerator,
+        [single] => format!("{numerator}/{single}"),
+        several => format!("{numerator}/({})", several.join("·")),
     }
 }
 

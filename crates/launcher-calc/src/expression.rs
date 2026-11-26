@@ -1,13 +1,13 @@
 //! Reads a query into an expression and evaluates it.
 
-use std::cell::OnceCell;
+use std::cell::{OnceCell, RefCell};
 use std::f64::consts::{E, PI, TAU};
 use std::fmt;
 
 use jiff::civil::Date;
 use jiff::{Span, ZonedDateTime};
 
-use crate::units::{self, Error, Quantity, Rates};
+use crate::units::{self, Error, Factor, Quantity, Rates};
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 enum Token<'query> {
@@ -190,7 +190,7 @@ enum Operator {
     Power,
 }
 
-#[derive(Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq)]
 enum Expression<'query> {
     Number(f64),
     Name(&'query str),
@@ -201,16 +201,18 @@ enum Expression<'query> {
     Call(&'query str, Box<Self>),
     /// Terms side by side, as in `2 pi` or `5 ft 11 in`.
     Juxtaposed(Vec<Self>),
+    /// The unit an ambiguous or miscased name was taken for.
+    Unit(Vec<Factor>),
 }
 
-#[derive(Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq)]
 enum Target<'query> {
     Unit(Expression<'query>),
     Radix(u32),
 }
 
 /// How a query was read: an expression, perhaps converted.
-#[derive(Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq)]
 pub(crate) struct Reading<'query> {
     expression: Expression<'query>,
     target: Option<Target<'query>>,
@@ -470,14 +472,23 @@ pub(crate) enum Answer {
 
 /// What names mean while evaluating.
 pub(crate) struct Environment<'rates> {
-    pub(crate) rates: Option<&'rates Rates>,
-    /// Read `nm` as N·m rather than nanometres.
-    pub(crate) newton_metres: bool,
+    rates: Option<&'rates Rates>,
     /// Read only when a query names it, as the first read loads the time zone.
-    pub(crate) now: OnceCell<ZonedDateTime>,
+    now: OnceCell<ZonedDateTime>,
+    /// Names that meant nothing as typed and were read in another case, as `kb` is kilobytes,
+    /// so the reading can show what they were taken for.
+    recased: RefCell<Vec<(String, Vec<Factor>)>>,
 }
 
-impl Environment<'_> {
+impl<'rates> Environment<'rates> {
+    pub(crate) fn new(rates: Option<&'rates Rates>) -> Self {
+        Self {
+            rates,
+            now: OnceCell::new(),
+            recased: RefCell::default(),
+        }
+    }
+
     fn now(&self) -> ZonedDateTime {
         self.now.get_or_init(ZonedDateTime::now).clone()
     }
@@ -490,8 +501,89 @@ enum Value {
     Time(ZonedDateTime),
 }
 
-impl Reading<'_> {
-    pub(crate) fn evaluate(&self, environment: &Environment) -> Result<Answer, Error> {
+/// At most this many combinations of meanings are tried, so a query full of ambiguous names
+/// stays inside a keystroke.
+const MOST_COMBINATIONS: usize = 64;
+
+impl<'query> Reading<'query> {
+    /// The answer, and the reading it comes from. When a conversion's two sides measure different
+    /// things, names with other meanings try them, the likeliest first, and the first combination
+    /// that converts wins: in `10 hp to ps`, `ps` is metric horsepower.
+    pub(crate) fn resolve(mut self, environment: &Environment) -> Result<(Self, Answer), Error> {
+        match self.evaluate(environment) {
+            Ok(answer) => {
+                self.show_recased(environment);
+                return Ok((self, answer));
+            }
+            Err(Error::Mismatch) => {}
+            Err(error) => return Err(error),
+        }
+        let mut names: Vec<(&str, Vec<Vec<Factor>>)> = Vec::new();
+        let mut add = |name: &'query str| {
+            if !names.iter().any(|(known, _)| *known == name) {
+                let meanings = units::meanings(name);
+                if !meanings.is_empty() {
+                    names.push((name, meanings));
+                }
+            }
+        };
+        self.expression.for_each_name(&mut add);
+        if let Some(Target::Unit(target)) = &self.target {
+            target.for_each_name(&mut add);
+        }
+        // Each combination as the index of every name's meaning, fewest names changed from
+        // their usual meaning first. Combination 0, the usual meanings, didn't convert.
+        let combinations = names.iter().fold(1, |count: usize, (_, meanings)| {
+            count.saturating_mul(meanings.len())
+        });
+        let choice = |combination: usize| {
+            let mut rest = combination;
+            names.iter().map(move |(_, meanings)| {
+                let index = rest % meanings.len();
+                rest /= meanings.len();
+                index
+            })
+        };
+        let mut order: Vec<usize> =
+            (1..combinations.min(MOST_COMBINATIONS * MOST_COMBINATIONS)).collect();
+        order.sort_by_key(|&combination| choice(combination).filter(|&index| index > 0).count());
+        for combination in order.into_iter().take(MOST_COMBINATIONS) {
+            let chosen: Vec<(&str, &[Factor])> = names
+                .iter()
+                .zip(choice(combination))
+                .filter_map(|((name, meanings), index)| {
+                    Some((*name, meanings.get(index)?.as_slice()))
+                })
+                .collect();
+            let mut candidate = self.clone();
+            candidate.respell(&chosen);
+            if let Ok(answer) = candidate.evaluate(environment) {
+                candidate.show_recased(environment);
+                return Ok((candidate, answer));
+            }
+        }
+        Err(Error::Mismatch)
+    }
+
+    /// Takes each name in `chosen` for its unit.
+    fn respell(&mut self, chosen: &[(&str, &[Factor])]) {
+        self.expression.respell(chosen);
+        if let Some(Target::Unit(target)) = &mut self.target {
+            target.respell(chosen);
+        }
+    }
+
+    /// Shows the names read in another case as the units they were taken for: `1000 kB ➞ MB`.
+    fn show_recased(&mut self, environment: &Environment) {
+        let recased = environment.recased.borrow();
+        let chosen: Vec<(&str, &[Factor])> = recased
+            .iter()
+            .map(|(name, unit)| (name.as_str(), unit.as_slice()))
+            .collect();
+        self.respell(&chosen);
+    }
+
+    fn evaluate(&self, environment: &Environment) -> Result<Answer, Error> {
         let value = match value(&self.expression, environment)? {
             Value::Quantity(quantity) => quantity,
             Value::Date(date) if self.target.is_none() => return Ok(Answer::Date(date)),
@@ -535,6 +627,10 @@ fn value(expression: &Expression, environment: &Environment) -> Result<Value, Er
             return date.map(Value::Date).map_err(|_| Error::Invalid);
         }
         Expression::Name(name) => named(name, environment)?,
+        Expression::Unit(unit) => Quantity {
+            magnitude: 1.0,
+            unit: unit.clone(),
+        },
         Expression::Negate(inner) => {
             let mut quantity = evaluate(inner, environment)?;
             quantity.magnitude = -quantity.magnitude;
@@ -657,18 +753,33 @@ fn named(name: &str, environment: &Environment) -> Result<Quantity, Error> {
         "c" => {
             let metres = Quantity {
                 magnitude: 299_792_458.0,
-                unit: units::lookup("m", None, false)?,
+                unit: units::lookup("m", None)?,
             };
             let second = Quantity {
                 magnitude: 1.0,
-                unit: units::lookup("s", None, false)?,
+                unit: units::lookup("s", None)?,
             };
             return metres.multiply(second, -1);
         }
         _ => {
+            let unit = match units::lookup(name, environment.rates) {
+                // A name that means nothing as typed may in another case, as `kb` does.
+                Err(Error::Invalid) => {
+                    let unit = units::in_any_case(name)
+                        .into_iter()
+                        .next()
+                        .ok_or(Error::Invalid)?;
+                    let mut recased = environment.recased.borrow_mut();
+                    if !recased.iter().any(|(known, _)| known == name) {
+                        recased.push((name.to_owned(), unit.clone()));
+                    }
+                    unit
+                }
+                unit => unit?,
+            };
             return Ok(Quantity {
                 magnitude: 1.0,
-                unit: units::lookup(name, environment.rates, environment.newton_metres)?,
+                unit,
             });
         }
     };
@@ -770,12 +881,57 @@ impl Operator {
     }
 }
 
-impl Expression<'_> {
+impl<'query> Expression<'query> {
+    fn for_each_name(&self, visit: &mut impl FnMut(&'query str)) {
+        match self {
+            Self::Number(_) | Self::Unit(_) => {}
+            Self::Name(name) => visit(name),
+            Self::Negate(inner)
+            | Self::Factorial(inner)
+            | Self::Percent(inner)
+            | Self::Call(_, inner) => inner.for_each_name(visit),
+            Self::Binary(_, left, right) => {
+                left.for_each_name(visit);
+                right.for_each_name(visit);
+            }
+            Self::Juxtaposed(terms) => {
+                for term in terms {
+                    term.for_each_name(visit);
+                }
+            }
+        }
+    }
+
+    /// Takes each name in `chosen` for its unit.
+    fn respell(&mut self, chosen: &[(&str, &[Factor])]) {
+        match self {
+            Self::Number(_) | Self::Unit(_) => {}
+            Self::Name(name) => {
+                if let Some((_, unit)) = chosen.iter().find(|(chosen, _)| chosen == name) {
+                    *self = Self::Unit(unit.to_vec());
+                }
+            }
+            Self::Negate(inner)
+            | Self::Factorial(inner)
+            | Self::Percent(inner)
+            | Self::Call(_, inner) => inner.respell(chosen),
+            Self::Binary(_, left, right) => {
+                left.respell(chosen);
+                right.respell(chosen);
+            }
+            Self::Juxtaposed(terms) => {
+                for term in terms {
+                    term.respell(chosen);
+                }
+            }
+        }
+    }
+
     /// Whether a name, such as a unit or a constant, appears anywhere in the expression.
     fn has_name(&self) -> bool {
         match self {
             Self::Number(_) => false,
-            Self::Name(_) | Self::Call(..) => true,
+            Self::Name(_) | Self::Call(..) | Self::Unit(_) => true,
             Self::Negate(inner) | Self::Factorial(inner) | Self::Percent(inner) => inner.has_name(),
             Self::Binary(_, left, right) => left.has_name() || right.has_name(),
             Self::Juxtaposed(terms) => terms.iter().any(Self::has_name),
@@ -787,7 +943,9 @@ impl Expression<'_> {
             Self::Binary(operator, ..) => operator.precedence(),
             // Below `/`, though it binds tighter, so `1 / (2 m)` reads unambiguously.
             Self::Juxtaposed(_) => 2,
+            // `N·m` binds as a term beside a number, but not under `^`.
             Self::Negate(_) => 4,
+            Self::Unit(unit) if unit.len() > 1 => 4,
             _ => 6,
         }
     }
@@ -808,6 +966,7 @@ impl fmt::Display for Expression<'_> {
         match self {
             Self::Number(value) => formatter.write_str(&crate::precise(*value)),
             Self::Name(name) => formatter.write_str(name),
+            Self::Unit(unit) => formatter.write_str(&units::unit_name(unit)),
             Self::Negate(inner) => {
                 formatter.write_str("-")?;
                 Self::write_bound(formatter, inner, 6)
