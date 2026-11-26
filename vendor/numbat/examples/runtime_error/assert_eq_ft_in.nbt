@@ -1,2 +1,0 @@
-assert_eq(3 ft, 36 in)
-assert_eq(36 in, 3 ft)

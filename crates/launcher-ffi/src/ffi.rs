@@ -540,7 +540,7 @@ mod tests {
     #[test]
     fn query_converts_items() -> Result<(), Box<dyn std::error::Error>> {
         // Only the calculator, so installed apps can't add results.
-        let launcher = launcher(Plugins::new(vec![Box::new(Calc::new()?)]));
+        let launcher = launcher(Plugins::new(vec![Box::new(Calc::new())]));
         let groups = launcher.query("2 + 3".into()).groups;
         let [Group { name, items }] = groups.as_slice() else {
             panic!("expected one group, got {}", groups.len());

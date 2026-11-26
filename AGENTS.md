@@ -35,8 +35,7 @@ The app logs to stderr (`log(…)` in Swift, `launcher_core::log!` in Rust). Whe
 - `crates/launcher-config`: settings from `~/.config/launcher/config.toml` over the defaults, and the `config` command. A mistake rejects the whole file with a message naming its line. Tests keep `default.toml`, `config.schema.json` and the defaults in step.
 - `crates/launcher-plugins`: `Launcher` builds the plugins the settings turn on, starts their background work and reloads the settings when the shell asks (⌘R; nothing watches the file). Shells hold a `Launcher` rather than choosing plugins.
 - `crates/launcher-apps`: app search over the macOS app folders, indexed on a background thread and rescanned on change, with fuzzy matching and frecency.
-- `crates/launcher-calc`: numbat for arithmetic, units and currency, with ECB exchange rates cached on disk and refreshed in the background. The numbat context builds in the background, and each query is interpreted and forgotten so the context doesn't grow.
-- `vendor/numbat`: numbat with the patches in its `PATCHES.md`, through `[patch.crates-io]`.
+- `crates/launcher-calc`: a calculator of our own for arithmetic, units, currency and dates relative to now: `expression.rs` reads and evaluates a query, `units.rs` holds the units and quantities, in f64. ECB exchange rates are cached on disk and refreshed in the background. Nothing outlives a query.
 - `crates/launcher-jwt`: decodes a pasted JSON Web Token (signature not verified).
 - `crates/launcher-kagi`: web search with Kagi for queries starting with its prefix: a row that opens kagi.com in the browser, and with an API token, results from Kagi's Search API fetched on a background thread once typing pauses.
 - `crates/launcher-secret`: secrets such as API tokens in the platform's secret store (the login keychain through Security.framework on macOS; Linux to come), read on demand, and the `secret` command.

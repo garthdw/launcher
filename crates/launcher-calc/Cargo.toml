@@ -12,8 +12,6 @@ path = "src/calc.rs"
 attohttpc.workspace = true
 jiff.workspace = true
 launcher-core.workspace = true
-numbat.workspace = true
-numbat-exchange-rates.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true

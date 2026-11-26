@@ -1,7 +1,5 @@
 [workspace]
 members = ["crates/*"]
-# Built through `[patch.crates-io]` below; see vendor/numbat/PATCHES.md.
-exclude = ["vendor"]
 resolver = "3"
 
 [workspace.package]
@@ -20,18 +18,13 @@ launcher-kagi = { path = "crates/launcher-kagi" }
 launcher-plugins = { path = "crates/launcher-plugins" }
 launcher-secret = { path = "crates/launcher-secret" }
 launcher-window = { path = "crates/launcher-window" }
-# The client numbat's `fetch-exchangerates` uses. That feature is off because it fetches when a
-# query first meets a currency, on the UI thread; the calculator fetches and caches rates itself.
 attohttpc = { version = "0.32.0", default-features = false, features = ["tls-rustls-webpki-roots"] }
 base64 = "0.23.1"
-# The version numbat uses, so the app links one copy.
 jiff = "1.0.2"
 libc = "0.2.191"
 notify = "8.2.2"
 objc2-core-foundation = { version = "0.3.2", default-features = false, features = ["std", "CFError", "CFString", "CFURL"] }
 objc2-security = { version = "0.3.2", default-features = false, features = ["SecBase", "SecItem"] }
-numbat = { version = "1.24.0", default-features = false }
-numbat-exchange-rates = "0.6.0"
 serde = { version = "1.0.229", features = ["derive"] }
 # `preserve_order`, so a decoded JWT shows its claims in the token's order.
 serde_json = { version = "1.0.154", features = ["preserve_order"] }
@@ -41,10 +34,6 @@ toml = { version = "1.2.2", default-features = false, features = ["parse", "serd
 uniffi = "0.32.2"
 # The version attohttpc uses.
 url = "2.5.9"
-
-[patch.crates-io]
-numbat = { path = "vendor/numbat/numbat" }
-numbat-exchange-rates = { path = "vendor/numbat/numbat-exchange-rates" }
 
 [profile.release]
 lto = "thin"
