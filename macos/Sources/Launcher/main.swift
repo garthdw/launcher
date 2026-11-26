@@ -808,6 +808,7 @@ extension Icon {
         case .calculator: symbol("plus.forwardslash.minus")
         case .token: symbol("key.horizontal")
         case .search: symbol("magnifyingglass")
+        case .warning: symbol("exclamationmark.triangle")
         }
     }
 
