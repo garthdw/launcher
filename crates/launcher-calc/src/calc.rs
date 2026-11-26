@@ -1,7 +1,7 @@
 mod rates;
 
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, LazyLock, Mutex, Weak};
+use std::sync::{Arc, LazyLock, Mutex, PoisonError, Weak};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -47,7 +47,8 @@ enum Rates {
     Loaded(Date),
 }
 
-/// From the thread that keeps exchange rates current, not yet taken.
+/// From the thread that keeps exchange rates current, not yet taken. Each `publish` assigns one
+/// field, so a panic while it's locked can't leave it half-written: it's used even poisoned.
 #[derive(Default)]
 struct Pending {
     /// The newest context, with currencies at the rates of the date if any. Only the newest, so
@@ -84,13 +85,8 @@ impl Calc {
     }
 
     fn take_update(&mut self) {
-        let pending = match self.pending.lock() {
-            Ok(mut pending) => std::mem::take(&mut *pending),
-            Err(_) => {
-                log!("the exchange rates thread panicked; keeping the rates there are");
-                return;
-            }
-        };
+        let pending =
+            std::mem::take(&mut *self.pending.lock().unwrap_or_else(PoisonError::into_inner));
         if pending.rates_unavailable {
             self.rates = Rates::Unavailable;
         }
@@ -139,10 +135,7 @@ fn context(currencies: bool) -> Result<Context, Box<NumbatError>> {
 
 /// Leaves `update` in `pending` for the calculator to take.
 fn publish(pending: &Mutex<Pending>, update: impl FnOnce(&mut Pending)) {
-    match pending.lock() {
-        Ok(mut pending) => update(&mut pending),
-        Err(_) => log!("the calculator panicked; not updating it"),
-    }
+    update(&mut pending.lock().unwrap_or_else(PoisonError::into_inner));
 }
 
 /// Publishes `update` and says the answers changed; false once the calculator is gone.
@@ -559,6 +552,29 @@ mod tests {
             .into_iter()
             .map(|item| (item.title, item.subtitle))
             .collect()
+    }
+
+    #[test]
+    fn a_panic_holding_the_updates_loses_none() -> Result<(), Box<NumbatError>> {
+        let mut calc = Calc::new()?;
+        publish(&calc.pending, |pending| pending.rates_unavailable = true);
+        let held = std::panic::catch_unwind(|| {
+            let _held = calc.pending.lock();
+            panic!("panicking with the updates locked");
+        });
+        assert!(held.is_err() && calc.pending.is_poisoned());
+        assert_eq!(
+            shown(&mut calc, "100 USD to EUR"),
+            [("Exchange rates unavailable".into(), String::new())],
+            "an update from before"
+        );
+        publish(&calc.pending, |pending| pending.numbat_failed = true);
+        assert_eq!(
+            shown(&mut calc, "2 + 2"),
+            [("Calculator unavailable".into(), String::new())],
+            "an update from after"
+        );
+        Ok(())
     }
 
     #[test]
