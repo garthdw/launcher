@@ -1,6 +1,7 @@
 use std::cmp::Reverse;
 use std::ffi::OsString;
 use std::fmt;
+use std::hash::{DefaultHasher, Hash, Hasher};
 use std::path::PathBuf;
 use std::str::FromStr;
 use std::sync::Arc;
@@ -416,6 +417,74 @@ pub fn catch_plugin_panic<T>(name: &str, call: impl FnOnce() -> T) -> Option<T> 
     answer
 }
 
+/// Which shown item is picked: the top one for a new query. Once the user moves the selection
+/// (↑, ↓, hover) or opens an item's detail, a refresh for the same query keeps it on that item,
+/// as results arriving in the background come and go around it.
+#[derive(Default)]
+pub struct Selection {
+    query: String,
+    /// A hash of each shown item's plugin, title and subtitle, to find the picked one among the
+    /// next results without keeping their text. Two of a few dozen rows sharing one is unlikely
+    /// enough to ignore.
+    shown: Vec<u64>,
+    /// The item the user moved to; the top one while `None`.
+    moved_to: Option<usize>,
+}
+
+impl Selection {
+    /// Takes `groups`, shown for `query`, and returns the index of the picked item among their
+    /// items, counted across groups.
+    pub fn show(&mut self, query: &str, groups: &[Group]) -> usize {
+        let kept = self
+            .moved_to
+            .filter(|_| query == self.query)
+            .and_then(|index| self.shown.get(index).copied());
+        // Refilled rather than rebuilt, as this runs on every keystroke.
+        self.shown.clear();
+        self.shown.extend(groups.iter().flat_map(|group| {
+            group.items.iter().map(|item| {
+                let mut hasher = DefaultHasher::new();
+                (group.plugin.0, &item.title, &item.subtitle).hash(&mut hasher);
+                hasher.finish()
+            })
+        }));
+        self.moved_to = kept.and_then(|kept| self.shown.iter().position(|&item| item == kept));
+        query.clone_into(&mut self.query);
+        self.picked()
+    }
+
+    /// The user picked the `index`th item, by pointing at it or opening its detail. An index
+    /// past the items shown leaves the selection where it is.
+    pub fn pick(&mut self, index: usize) -> usize {
+        if index < self.shown.len() {
+            self.moved_to = Some(index);
+        }
+        self.picked()
+    }
+
+    /// ↓: the next item, wrapping from the last to the first.
+    pub fn down(&mut self) -> usize {
+        let count = self.shown.len();
+        if count == 0 {
+            return 0;
+        }
+        self.pick((self.picked() + 1) % count)
+    }
+
+    /// ↑: the previous item, wrapping from the first to the last.
+    pub fn up(&mut self) -> usize {
+        let count = self.shown.len();
+        if count == 0 {
+            return 0;
+        }
+        self.pick((self.picked() + count - 1) % count)
+    }
+
+    fn picked(&self) -> usize {
+        self.moved_to.unwrap_or(0)
+    }
+}
+
 /// The shell draws titles and subtitles on one line, but plugins can pass on text with line
 /// breaks or tabs, as a calculator string or a token's claims. Each run of control characters
 /// or Unicode line and paragraph separators becomes one space, and runs at either end go.
@@ -708,6 +777,120 @@ mod tests {
                 relevance: 50,
             }]
         }
+    }
+
+    /// One group per plugin, each item titled with its own name. A plugin keeps its id
+    /// whichever order the groups come in, as in `Plugins`.
+    fn groups(plugins: &[(&'static str, &[&str])]) -> Vec<Group> {
+        plugins
+            .iter()
+            .map(|(name, titles)| Group {
+                plugin: PluginId(
+                    ["Calculator", "Apps"]
+                        .iter()
+                        .position(|place| place == name)
+                        .unwrap_or(2),
+                ),
+                name,
+                items: titles
+                    .iter()
+                    .map(|title| Item::notice(title, "", Icon::Calculator, 50))
+                    .collect(),
+            })
+            .collect()
+    }
+
+    #[test]
+    fn a_new_query_picks_the_top_result() {
+        let mut selection = Selection::default();
+        assert_eq!(
+            selection.show("pi", &groups(&[("Calculator", &["3.14"])])),
+            0
+        );
+        selection.down();
+        let apps = groups(&[("Apps", &["Pixelmator", "Pi-hole"])]);
+        assert_eq!(selection.show("pix", &apps), 0);
+    }
+
+    /// As when the calculator answered `pi` before the apps loaded, and apps rank above it.
+    #[test]
+    fn a_refresh_picks_the_new_top_result_until_the_selection_moves() {
+        let mut selection = Selection::default();
+        selection.show("pi", &groups(&[("Calculator", &["3.14"])]));
+        let loaded = groups(&[
+            ("Apps", &["Raspberry Pi Imager"]),
+            ("Calculator", &["3.14"]),
+        ]);
+        assert_eq!(selection.show("pi", &loaded), 0);
+    }
+
+    #[test]
+    fn a_moved_selection_follows_its_item_across_refreshes() {
+        let mut selection = Selection::default();
+        selection.show("ma", &groups(&[("Apps", &["Mail", "Maps"])]));
+        assert_eq!(selection.down(), 1);
+        let more = groups(&[("Calculator", &["ma"]), ("Apps", &["Mail", "Maps"])]);
+        assert_eq!(selection.show("ma", &more), 2, "Maps, below the new row");
+        assert_eq!(
+            selection.show("ma", &more),
+            2,
+            "and still after another refresh"
+        );
+        let gone = groups(&[("Apps", &["Mail"])]);
+        assert_eq!(
+            selection.show("ma", &gone),
+            0,
+            "the top result once Maps goes"
+        );
+        let back = groups(&[("Apps", &["Mail", "Maps"])]);
+        assert_eq!(selection.show("ma", &back), 0, "which isn't a move");
+    }
+
+    /// Typing that gives the same query again, as pasting it over itself, is no new query.
+    #[test]
+    fn the_same_query_again_keeps_a_moved_selection() {
+        let mut selection = Selection::default();
+        let apps = groups(&[("Apps", &["Mail", "Maps"])]);
+        selection.show("ma", &apps);
+        selection.down();
+        assert_eq!(selection.show("ma", &apps), 1);
+    }
+
+    #[test]
+    fn picking_an_item_counts_as_moving() {
+        let mut selection = Selection::default();
+        let apps = groups(&[("Apps", &["Mail", "Maps"])]);
+        selection.show("ma", &apps);
+        assert_eq!(selection.pick(1), 1);
+        assert_eq!(selection.pick(5), 1, "past the items, nothing changes");
+        assert_eq!(selection.show("ma", &apps), 1);
+        assert_eq!(
+            selection.show("map", &apps),
+            0,
+            "a new query starts at the top"
+        );
+    }
+
+    #[test]
+    fn up_and_down_wrap_across_groups() {
+        let mut selection = Selection::default();
+        selection.show(
+            "e",
+            &groups(&[("Calculator", &["e"]), ("Apps", &["Mail", "Notes"])]),
+        );
+        assert_eq!(
+            selection.up(),
+            2,
+            "from the first to the last, past the headers"
+        );
+        assert_eq!(selection.down(), 0);
+        assert_eq!(selection.down(), 1, "into the next group");
+        selection.show("", &[]);
+        assert_eq!(
+            (selection.up(), selection.down()),
+            (0, 0),
+            "nothing to move through"
+        );
     }
 
     #[test]

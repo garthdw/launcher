@@ -29,6 +29,14 @@ impl From<launcher_core::Group> for Group {
     }
 }
 
+/// Every plugin's results for a query, and which item is picked.
+#[derive(Default, uniffi::Record)]
+pub struct Results {
+    pub groups: Vec<Group>,
+    /// Counted across the groups' items.
+    pub picked: u32,
+}
+
 #[derive(uniffi::Record)]
 pub struct Item {
     pub title: String,
@@ -300,6 +308,10 @@ pub fn window_moved_within(frame: Rect, visible: Rect) -> Rect {
 #[derive(uniffi::Object)]
 pub struct Launcher(Mutex<launcher_plugins::Launcher>);
 
+fn to_u32(index: usize) -> u32 {
+    u32::try_from(index).unwrap_or(u32::MAX)
+}
+
 impl Launcher {
     /// `None` after a panic while holding the lock: one outside the plugins, whose own panics
     /// `Plugins` catches.
@@ -367,18 +379,36 @@ impl Launcher {
         launcher.reload().then(|| Settings::from(&*launcher))
     }
 
-    /// Each plugin's results, most relevant group first. Called on every keystroke from the UI
+    /// Each plugin's results, most relevant group first, and the item picked: the top one, or
+    /// for the same query, the one the user moved to. Called on every keystroke from the UI
     /// thread, so plugins must answer well inside a frame.
-    pub fn query(&self, query: String) -> Vec<Group> {
+    pub fn query(&self, query: String) -> Results {
         let Some(mut launcher) = self.lock() else {
-            return Vec::new();
+            return Results::default();
         };
-        launcher
-            .plugins()
-            .query(&query)
-            .into_iter()
-            .map(Group::from)
-            .collect()
+        let (groups, picked) = launcher.query(&query);
+        Results {
+            groups: groups.into_iter().map(Group::from).collect(),
+            picked: to_u32(picked),
+        }
+    }
+
+    /// The user pointed at the `index`th item or opened its detail; returns the item picked.
+    pub fn pick(&self, index: u32) -> u32 {
+        self.lock().map_or(0, |mut launcher| {
+            to_u32(launcher.pick(usize::try_from(index).unwrap_or(usize::MAX)))
+        })
+    }
+
+    /// ↑, wrapping to the last item; returns the item picked.
+    pub fn up(&self) -> u32 {
+        self.lock().map_or(0, |mut launcher| to_u32(launcher.up()))
+    }
+
+    /// ↓, wrapping to the first item; returns the item picked.
+    pub fn down(&self) -> u32 {
+        self.lock()
+            .map_or(0, |mut launcher| to_u32(launcher.down()))
     }
 
     /// The shell hid the panel, or is about to run an item's action, so plugins drop work for
@@ -461,7 +491,7 @@ mod tests {
     #[test]
     fn query_converts_items_without_an_action() {
         let launcher = launcher(Plugins::new(vec![Box::new(Pending)]));
-        let groups = launcher.query("anything".into());
+        let groups = launcher.query("anything".into()).groups;
         let [Group { name, items }] = groups.as_slice() else {
             panic!("expected one group, got {}", groups.len());
         };
@@ -479,7 +509,7 @@ mod tests {
     fn query_converts_items() -> Result<(), Box<dyn std::error::Error>> {
         // Only the calculator, so installed apps can't add results.
         let launcher = launcher(Plugins::new(vec![Box::new(Calc::new()?)]));
-        let groups = launcher.query("2 + 3".into());
+        let groups = launcher.query("2 + 3".into()).groups;
         let [Group { name, items }] = groups.as_slice() else {
             panic!("expected one group, got {}", groups.len());
         };

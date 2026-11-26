@@ -269,15 +269,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSTextFieldDelegate, N
     var items: [Item] = []
     /// Each item's row; group headers sit between them in `list`.
     var rows: [Row] = []
+    /// The core decides which item is picked; this only mirrors it, to draw.
     var picked = 0 {
-        didSet {
-            highlightPicked()
-            selectionMoved = true
-        }
+        didSet { highlightPicked() }
     }
-    /// The selection moved since `refresh` picked the top result, so a refresh for the same
-    /// query keeps it on its item.
-    var selectionMoved = false
     var summoned: CFAbsoluteTime?
     /// A plugin's results changed while the panel was hidden or showed a detail.
     var resultsStale = false
@@ -532,27 +527,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSTextFieldDelegate, N
             resultsStale = true
             return
         }
-        refreshKeepingSelection()
+        refresh()
     }
 
     func refreshIfStale() {
-        if resultsStale { refreshKeepingSelection() }
+        if resultsStale { refresh() }
     }
 
-    /// Rebuilds the rows for the same query. A selection the user moved follows their item, as
-    /// rows may come and go; otherwise the new top result is picked, as for a new query.
-    func refreshKeepingSelection() {
-        let kept = selectionMoved && items.indices.contains(picked)
-            ? (items[picked].title, items[picked].subtitle) : nil
-        refresh()
-        if let kept, let index = items.firstIndex(where: { ($0.title, $0.subtitle) == kept }) {
-            pick(index)
-        }
-    }
-
+    /// Rebuilds the rows. For the same query, the item the user moved to stays picked, as rows
+    /// may come and go; otherwise the top result is.
     func refresh() {
         resultsStale = false
-        let groups = launcher.query(query: field.stringValue)
+        let shown = launcher.query(query: field.stringValue)
+        let groups = shown.groups
         items = groups.flatMap(\.items)
         rows = []
         list.subviews.forEach { $0.removeFromSuperview() }
@@ -586,15 +573,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSTextFieldDelegate, N
         list.frame = NSRect(x: 0, y: 0, width: Metrics.width, height: height)
         results.frame = NSRect(x: 0, y: 0, width: Metrics.width, height: min(height, maxHeight))
         resize()
-        pick(0)
-        selectionMoved = false
+        show(Int(shown.picked))
     }
 
     /// `item`'s row, the `index`th in `items`.
     func row(for item: Item, at index: Int, frame: NSRect) -> Row {
         let row = Row(frame: frame)
         row.clicked = { [unowned self] in choose(index) }
-        row.hovered = { [unowned self] in if picked != index { picked = index } }
+        row.hovered = { [unowned self] in if picked != index { picked = Int(launcher.pick(index: UInt32(index))) } }
         row.wantsLayer = true
         row.layer?.cornerRadius = Metrics.selectionRadius
         let icon = NSImageView(image: item.icon.image(side: Metrics.icon))
@@ -649,16 +635,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSTextFieldDelegate, N
         }
     }
 
-    /// Picks the `index`th item and scrolls its row into view. Hover sets `picked` alone: scrolling
-    /// under the pointer would pick the row that slides beneath it, and scroll again.
-    func pick(_ index: Int) {
+    /// Shows the `index`th item picked and scrolls its row into view. Hover sets `picked` alone:
+    /// scrolling under the pointer would pick the row that slides beneath it, and scroll again.
+    func show(_ index: Int) {
         picked = index
         if rows.indices.contains(index) { list.scrollToVisible(rows[index].reach) }
     }
 
     func showDetail(of index: Int) {
         // Going back after a refresh returns to the item the detail showed.
-        selectionMoved = true
+        picked = Int(launcher.pick(index: UInt32(index)))
         let pane = DetailPane(item: items[index])
         pane.text.back = { [unowned self] in
             closeDetail()
@@ -717,9 +703,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSTextFieldDelegate, N
     func control(_: NSControl, textView: NSTextView, doCommandBy selector: Selector) -> Bool {
         switch selector {
         case #selector(NSResponder.moveDown(_:)) where !items.isEmpty:
-            pick(step(picked, by: 1, count: items.count))
+            show(Int(launcher.down()))
         case #selector(NSResponder.moveUp(_:)) where !items.isEmpty:
-            pick(step(picked, by: -1, count: items.count))
+            show(Int(launcher.up()))
         // Only from the end of the query, so → still moves the caret elsewhere.
         case #selector(NSResponder.moveRight(_:))
             where textView.selectedRange() == NSRange(location: (textView.string as NSString).length, length: 0)

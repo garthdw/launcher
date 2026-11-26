@@ -6,7 +6,9 @@ use std::time::Duration;
 use launcher_apps::Apps;
 use launcher_calc::Calc;
 use launcher_config::Config;
-use launcher_core::{Plugin, Plugins, ResultsChanged, cache_directory, catch_plugin_panic, log};
+use launcher_core::{
+    Group, Plugin, Plugins, ResultsChanged, Selection, cache_directory, catch_plugin_panic, log,
+};
 use launcher_jwt::Jwt;
 use launcher_kagi::Kagi;
 
@@ -87,9 +89,11 @@ impl PluginSettings {
     }
 }
 
-/// The plugins and the settings from the config file, kept as the file changes.
+/// The plugins and the settings from the config file, kept as the file changes, and which of
+/// the results shown is picked.
 pub struct Launcher {
     plugins: Plugins,
+    selection: Selection,
     config: Config,
     /// Why the config file can't be used; `config` is then the settings from before, or the
     /// defaults.
@@ -120,6 +124,7 @@ impl Launcher {
     ) -> Self {
         Self {
             plugins,
+            selection: Selection::default(),
             config,
             problem,
             results_changed,
@@ -128,6 +133,29 @@ impl Launcher {
 
     pub fn plugins(&mut self) -> &mut Plugins {
         &mut self.plugins
+    }
+
+    /// The results for `query`, to show, and the index of the item picked among them.
+    pub fn query(&mut self, query: &str) -> (Vec<Group>, usize) {
+        let groups = self.plugins.query(query);
+        let picked = self.selection.show(query, &groups);
+        (groups, picked)
+    }
+
+    /// The user pointed at the `index`th item shown or opened its detail; returns the item
+    /// picked.
+    pub fn pick(&mut self, index: usize) -> usize {
+        self.selection.pick(index)
+    }
+
+    /// ↑, wrapping to the last item; returns the item picked.
+    pub fn up(&mut self) -> usize {
+        self.selection.up()
+    }
+
+    /// ↓, wrapping to the first item; returns the item picked.
+    pub fn down(&mut self) -> usize {
+        self.selection.down()
     }
 
     pub fn config(&self) -> &Config {
@@ -224,6 +252,22 @@ mod tests {
         assert_eq!(launcher.problem(), Some("config.toml: nonsense"));
         // The same plugins are on, so they weren't restarted.
         assert_eq!(launcher.plugins().query("anything").len(), 1);
+    }
+
+    #[test]
+    fn the_picked_item_stays_with_the_user_across_refreshes() {
+        let mut launcher = Launcher::with(
+            Plugins::new(vec![Box::new(Echo), Box::new(Echo)]),
+            Config::default(),
+            None,
+            Arc::new(|| {}),
+        );
+        assert_eq!(launcher.query("a").1, 0);
+        assert_eq!(launcher.down(), 1);
+        assert_eq!(launcher.query("a").1, 1, "a refresh keeps it");
+        assert_eq!(launcher.up(), 0);
+        assert_eq!(launcher.pick(1), 1);
+        assert_eq!(launcher.query("ab").1, 0, "a new query starts at the top");
     }
 
     /// The ids of the plugins with results for `query`.
