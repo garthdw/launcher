@@ -2,6 +2,7 @@ use base64::Engine;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use jiff::tz::TimeZone;
 use jiff::{SignedDuration, Timestamp};
+use launcher_core::markdown::escape;
 use launcher_core::{Action, Icon, Item, Plugin, Section};
 use serde_json::{Map, Value};
 
@@ -106,12 +107,12 @@ impl Token {
         }
     }
 
-    /// The header, payload and times, in `zone`.
+    /// The header, payload and times, in `zone`, the times as a table's rows.
     fn detail(&self, now: Timestamp, zone: &TimeZone) -> Vec<Section> {
         let times: Vec<String> = ["exp", "iat", "nbf"]
             .into_iter()
             .filter_map(|claim| {
-                Some(match self.time(claim)? {
+                let (time, relative) = match self.time(claim)? {
                     Ok(time) => {
                         let relative = if time <= now {
                             format!("{} ago", span(now.duration_since(time)))
@@ -121,10 +122,15 @@ impl Token {
                         let local = time
                             .to_zoned_datetime(zone.clone())
                             .strftime("%Y-%m-%d %H:%M:%S %Z");
-                        format!("{claim}  {local}  ({relative})")
+                        (local.to_string(), relative)
                     }
-                    Err(raw) => format!("{claim}  {raw}  (unreadable)"),
-                })
+                    Err(raw) => (raw, "unreadable".into()),
+                };
+                Some(format!(
+                    "| {claim} | {} | {} |",
+                    escape(&time),
+                    escape(&relative)
+                ))
             })
             .collect();
         let mut detail = vec![
@@ -135,7 +141,11 @@ impl Token {
             Section::mono("Payload", self.payload_json()),
         ];
         if !times.is_empty() {
-            detail.push(Section::mono("Times", times.join("\n")));
+            let header = "| Claim | Time | Relative |\n|---|---|---|";
+            detail.push(Section::markdown(
+                "Times",
+                format!("{header}\n{}", times.join("\n")),
+            ));
         }
         detail
     }
@@ -213,18 +223,20 @@ mod tests {
         assert_eq!(
             detail
                 .iter()
-                .map(|section| (section.title.as_str(), section.text.as_str()))
+                .map(|section| (section.title.as_str(), section.plain_text()))
                 .collect::<Vec<_>>(),
             [
                 (
                     "Header · signature not verified",
-                    "{\n  \"alg\": \"HS256\",\n  \"typ\": \"JWT\"\n}"
+                    "{\n  \"alg\": \"HS256\",\n  \"typ\": \"JWT\"\n}".into()
                 ),
-                ("Payload", payload),
+                ("Payload", payload.into()),
                 (
                     "Times",
-                    "exp  2027-01-15 08:12:00 UTC  (in 12 min)\n\
-                     iat  2027-01-15 07:00:00 UTC  (1 h ago)"
+                    "Claim\tTime\tRelative\n\
+                     exp\t2027-01-15 08:12:00 UTC\tin 12 min\n\
+                     iat\t2027-01-15 07:00:00 UTC\t1 h ago"
+                        .into()
                 ),
             ]
         );
@@ -295,13 +307,22 @@ mod tests {
             panic!("didn't decode");
         };
         assert_eq!(item.title, "HS256 · unreadable expiry");
+        let times = |detail: Vec<Section>| detail.last().map(Section::plain_text);
         assert_eq!(
-            detail.last().map(|section| section.text.as_str()),
-            Some("exp  1800000000000  (unreadable)")
+            times(detail),
+            Some("Claim\tTime\tRelative\nexp\t1800000000000\tunreadable".into())
         );
+        let Some((item, detail)) = decoded(&token(
+            json!({"alg": "HS256"}),
+            json!({"exp": "soon | *later*"}),
+        )) else {
+            panic!("didn't decode");
+        };
+        assert_eq!(item.title, "HS256 · unreadable expiry");
         assert_eq!(
-            title(json!({"alg": "HS256"}), json!({"exp": "soon"})),
-            Some("HS256 · unreadable expiry".into())
+            times(detail),
+            Some("Claim\tTime\tRelative\nexp\t\"soon | *later*\"\tunreadable".into()),
+            "the raw value is escaped, so it stays in its cell"
         );
     }
 

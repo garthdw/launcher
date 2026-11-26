@@ -79,6 +79,22 @@ pub enum Block {
     Paragraph(Vec<Span>),
     /// Monospaced, its lines kept.
     Code(String),
+    /// Every item of a list and the lists inside it, in order.
+    List(Vec<ListItem>),
+    /// Rows of cells, under a header row of cells.
+    Table {
+        header: Vec<Vec<Span>>,
+        rows: Vec<Vec<Vec<Span>>>,
+    },
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct ListItem {
+    /// 0 for the outermost list.
+    pub depth: u8,
+    /// Such as `•` or `3.`; empty for text after a list inside the item.
+    pub marker: String,
+    pub spans: Vec<Span>,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -129,11 +145,33 @@ impl Section {
 }
 
 impl Block {
+    /// Lists as their markers show them, and tables tab-separated, as a spreadsheet pastes them.
     fn plain_text(&self) -> String {
-        match self {
-            Self::Paragraph(spans) => spans.iter().map(|span| span.text.as_str()).collect(),
-            Self::Code(text) => text.clone(),
+        fn text(spans: &[Span]) -> String {
+            spans.iter().map(|span| span.text.as_str()).collect()
         }
+        let lines: Vec<String> = match self {
+            Self::Paragraph(spans) => return text(spans),
+            Self::Code(code) => return code.clone(),
+            Self::List(items) => items
+                .iter()
+                .map(|item| {
+                    let indent = "  ".repeat(item.depth.into());
+                    match item.marker.as_str() {
+                        "" => format!("{indent}{}", text(&item.spans)),
+                        marker => format!("{indent}{marker} {}", text(&item.spans)),
+                    }
+                })
+                .collect(),
+            Self::Table { header, rows } => std::iter::once(header)
+                .chain(rows)
+                .map(|row| {
+                    let cells: Vec<String> = row.iter().map(|cell| text(cell)).collect();
+                    cells.join("\t")
+                })
+                .collect(),
+        };
+        lines.join("\n")
     }
 }
 

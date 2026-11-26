@@ -218,9 +218,83 @@ final class DetailText: NSTextView {
 
     static func draw(_ block: Block) -> NSAttributedString {
         switch block {
-        case let .paragraph(spans):
-            spans.reduce(into: NSMutableAttributedString()) { string, span in string.append(draw(span)) }
+        case let .paragraph(spans): draw(spans)
         case let .code(text): NSAttributedString(string: text, attributes: code)
+        case let .list(items): drawList(items)
+        case let .table(header, rows): drawTable(header: header, rows: rows)
+        }
+    }
+
+    /// Each item a paragraph, its marker hanging in the indent of its depth.
+    static func drawList(_ items: [ListItem]) -> NSAttributedString {
+        let step: CGFloat = 22
+        let string = NSMutableAttributedString()
+        for (index, item) in items.enumerated() {
+            if index > 0 { string.append(NSAttributedString(string: "\n")) }
+            let indent = CGFloat(item.depth) * step
+            let style = NSMutableParagraphStyle()
+            style.firstLineHeadIndent = indent
+            style.headIndent = indent + step
+            style.tabStops = [NSTextTab(textAlignment: .left, location: indent + step)]
+            let line = NSMutableAttributedString(string: item.marker + "\t", attributes: [
+                .font: NSFont.systemFont(ofSize: 13),
+                .foregroundColor: NSColor.secondaryLabelColor,
+            ])
+            line.append(draw(item.spans, inParagraph: true))
+            line.addAttribute(.paragraphStyle, value: style, range: NSRange(location: 0, length: line.length))
+            string.append(line)
+        }
+        return string
+    }
+
+    /// Each row a paragraph, its cells at tab stops past the widest cell of the column before, so
+    /// columns are as wide as their text. The header is bold and muted.
+    static func drawTable(header: [[Span]], rows: [[[Span]]]) -> NSAttributedString {
+        let gap: CGFloat = 20
+        let cells = ([header] + rows).enumerated().map { index, row in
+            row.map { spans in
+                let cell = NSMutableAttributedString(attributedString: draw(
+                    index == 0 ? spans.map { var span = $0; span.style.bold = true; return span } : spans,
+                    // A line break would end the row.
+                    inParagraph: true
+                ))
+                if index == 0 {
+                    cell.addAttribute(.foregroundColor, value: NSColor.secondaryLabelColor,
+                                      range: NSRange(location: 0, length: cell.length))
+                }
+                return cell
+            }
+        }
+        var widths: [CGFloat] = []
+        for row in cells {
+            for (column, cell) in row.enumerated() {
+                if column == widths.count { widths.append(0) }
+                widths[column] = max(widths[column], cell.size().width)
+            }
+        }
+        let style = NSMutableParagraphStyle()
+        style.tabStops = widths.dropLast().reduce(into: []) { stops, width in
+            stops.append(NSTextTab(textAlignment: .left, location: (stops.last?.location ?? 0) + width + gap))
+        }
+        let tab = NSAttributedString(string: "\t", attributes: [.font: NSFont.systemFont(ofSize: 13)])
+        let string = NSMutableAttributedString()
+        for (index, row) in cells.enumerated() {
+            if index > 0 { string.append(NSAttributedString(string: "\n")) }
+            for (column, cell) in row.enumerated() {
+                if column > 0 { string.append(tab) }
+                string.append(cell)
+            }
+        }
+        string.addAttribute(.paragraphStyle, value: style, range: NSRange(location: 0, length: string.length))
+        return string
+    }
+
+    /// In a list item or table cell, line breaks stay within the paragraph that places it.
+    static func draw(_ spans: [Span], inParagraph: Bool = false) -> NSAttributedString {
+        spans.reduce(into: NSMutableAttributedString()) { string, span in
+            var span = span
+            if inParagraph { span.text = span.text.replacingOccurrences(of: "\n", with: "\u{2028}") }
+            string.append(draw(span))
         }
     }
 

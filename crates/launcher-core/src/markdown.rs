@@ -4,7 +4,7 @@
 
 use pulldown_cmark::{Event, Options, Parser, Tag, TagEnd};
 
-use crate::{Block, Span, Style};
+use crate::{Block, ListItem, Span, Style};
 
 /// Backslash-escapes every ASCII punctuation mark, so text from outside, such as a web page's
 /// title, reads as itself in Markdown. CommonMark allows escaping any of them.
@@ -31,7 +31,7 @@ pub(crate) fn blocks(markdown: &str) -> Vec<Block> {
 #[derive(Default)]
 struct Reader {
     blocks: Vec<Block>,
-    /// The text of the paragraph being read.
+    /// The text of the paragraph, list item or table cell being read.
     spans: Vec<Span>,
     /// How many bold and italic runs the text is inside; a heading counts as bold.
     bold: usize,
@@ -39,6 +39,17 @@ struct Reader {
     link: Option<String>,
     /// The text of the code block being read.
     code: Option<String>,
+    /// Each list the text is inside, outermost first, with its next number if it's numbered.
+    lists: Vec<Option<u64>>,
+    /// The items read so far of the outermost list.
+    items: Vec<ListItem>,
+    /// The marker of the item being read, until its text is read.
+    marker: String,
+    /// Inside a table, and its header and rows so far.
+    table: bool,
+    header: Vec<Vec<Span>>,
+    rows: Vec<Vec<Vec<Span>>>,
+    row: Vec<Vec<Span>>,
 }
 
 impl Reader {
@@ -54,17 +65,68 @@ impl Reader {
             Event::End(TagEnd::Emphasis) => self.italic = self.italic.saturating_sub(1),
             Event::Start(Tag::Link { dest_url, .. }) => self.link = web_address(&dest_url),
             Event::End(TagEnd::Link) => self.link = None,
+            // A list item's second paragraph.
+            Event::Start(Tag::Paragraph) if !self.spans.is_empty() => self.push("\n", false),
+            Event::End(TagEnd::Paragraph | TagEnd::HtmlBlock) => self.end_paragraph(),
             Event::Start(Tag::CodeBlock(_)) => {
                 self.end_paragraph();
                 self.code = Some(String::new());
             }
             Event::End(TagEnd::CodeBlock) => {
-                if let Some(code) = self.code.take() {
-                    self.blocks
-                        .push(Block::Code(code.trim_end_matches('\n').into()));
+                let Some(code) = self.code.take() else { return };
+                let code = code.trim_end_matches('\n');
+                if self.in_list_or_table() {
+                    if !self.spans.is_empty() {
+                        self.push("\n", false);
+                    }
+                    self.push(code, true);
+                } else {
+                    self.blocks.push(Block::Code(code.into()));
                 }
             }
-            Event::End(TagEnd::Paragraph | TagEnd::HtmlBlock) => self.end_paragraph(),
+            Event::Start(Tag::List(first)) => {
+                self.end_paragraph();
+                // The text of the item this list is in, before it.
+                self.end_item();
+                self.lists.push(first);
+            }
+            Event::Start(Tag::Item) => {
+                self.marker = match self.lists.last_mut() {
+                    Some(Some(number)) => {
+                        *number += 1;
+                        format!("{}.", *number - 1)
+                    }
+                    _ => "•".into(),
+                };
+            }
+            Event::End(TagEnd::Item) => self.end_item(),
+            Event::End(TagEnd::List(_)) => {
+                self.lists.pop();
+                if self.lists.is_empty() && !self.items.is_empty() {
+                    self.blocks
+                        .push(Block::List(std::mem::take(&mut self.items)));
+                }
+            }
+            Event::Start(Tag::Table(_)) => {
+                self.end_paragraph();
+                self.table = true;
+            }
+            Event::End(TagEnd::TableCell) => {
+                let cell = self.take_spans();
+                self.row.push(cell);
+            }
+            Event::End(TagEnd::TableHead) => self.header = std::mem::take(&mut self.row),
+            Event::End(TagEnd::TableRow) => {
+                let row = std::mem::take(&mut self.row);
+                self.rows.push(row);
+            }
+            Event::End(TagEnd::Table) => {
+                self.table = false;
+                self.blocks.push(Block::Table {
+                    header: std::mem::take(&mut self.header),
+                    rows: std::mem::take(&mut self.rows),
+                });
+            }
             Event::Text(text) | Event::Html(text) | Event::InlineHtml(text) => {
                 match &mut self.code {
                     Some(code) => code.push_str(&text),
@@ -95,16 +157,41 @@ impl Reader {
         }
     }
 
-    fn end_paragraph(&mut self) {
+    fn in_list_or_table(&self) -> bool {
+        !self.lists.is_empty() || self.table
+    }
+
+    /// The text read so far, as a list item or table cell keeps it.
+    fn take_spans(&mut self) -> Vec<Span> {
         // An HTML block's lines end in a line break.
         if let Some(last) = self.spans.last_mut() {
             last.text.truncate(last.text.trim_end().len());
         }
         self.spans.retain(|span| !span.text.is_empty());
-        if !self.spans.is_empty() {
-            self.blocks
-                .push(Block::Paragraph(std::mem::take(&mut self.spans)));
+        std::mem::take(&mut self.spans)
+    }
+
+    /// Ends a paragraph, unless it's part of a list item or table cell, which ends it itself.
+    fn end_paragraph(&mut self) {
+        if self.in_list_or_table() {
+            return;
         }
+        let spans = self.take_spans();
+        if !spans.is_empty() {
+            self.blocks.push(Block::Paragraph(spans));
+        }
+    }
+
+    fn end_item(&mut self) {
+        let spans = self.take_spans();
+        if spans.is_empty() {
+            return;
+        }
+        self.items.push(ListItem {
+            depth: u8::try_from(self.lists.len().saturating_sub(1)).unwrap_or(u8::MAX),
+            marker: std::mem::take(&mut self.marker),
+            spans,
+        });
     }
 }
 
@@ -203,10 +290,68 @@ mod tests {
         );
     }
 
+    fn item(depth: u8, marker: &str, spans: Vec<Span>) -> ListItem {
+        ListItem {
+            depth,
+            marker: marker.into(),
+            spans,
+        }
+    }
+
+    #[test]
+    fn lists_keep_their_items_depth_and_numbers() {
+        assert_eq!(
+            blocks(
+                "Before\n\n- one\n- **two**\n\n  3. three\n  4. four\n\n     second paragraph\n\n  \
+                 after\n- five\n\n      code\n\nAfter"
+            ),
+            [
+                Block::Paragraph(vec![plain("Before")]),
+                Block::List(vec![
+                    item(0, "•", vec![plain("one")]),
+                    item(0, "•", vec![styled("two", true, false, false)]),
+                    item(1, "3.", vec![plain("three")]),
+                    item(1, "4.", vec![plain("four\nsecond paragraph")]),
+                    item(0, "", vec![plain("after")]),
+                    item(
+                        0,
+                        "•",
+                        vec![plain("five\n"), styled("code", false, false, true)]
+                    ),
+                ]),
+                Block::Paragraph(vec![plain("After")]),
+            ]
+        );
+    }
+
+    #[test]
+    fn tables_keep_their_header_and_cells() {
+        assert_eq!(
+            blocks("| Claim | Time |\n|---|--:|\n| `exp` | in **5** min |\n| iat |\n\nAfter"),
+            [
+                Block::Table {
+                    header: vec![vec![plain("Claim")], vec![plain("Time")]],
+                    rows: vec![
+                        vec![
+                            vec![styled("exp", false, false, true)],
+                            vec![plain("in "), styled("5", true, false, false), plain(" min")],
+                        ],
+                        vec![vec![plain("iat")], vec![]],
+                    ],
+                },
+                Block::Paragraph(vec![plain("After")]),
+            ]
+        );
+    }
+
     #[test]
     fn copying_a_section_drops_the_markdown() {
         let section = crate::Section::markdown("", "A **b** [c](https://c.example)\n\n```\nd\n```");
         assert_eq!(section.plain_text(), "A b c\nd");
+        let list = crate::Section::markdown("", "1. one\n   - two\n\n   after");
+        assert_eq!(list.plain_text(), "1. one\n  • two\nafter");
+        let table = crate::Section::markdown("", "| a | b |\n|---|---|\n| 1 | 2 |");
+        assert_eq!(table.plain_text(), "a\tb\n1\t2");
         let mono = crate::Section::mono("", "**kept**\n\n");
         assert_eq!(mono.plain_text(), "**kept**\n\n");
     }

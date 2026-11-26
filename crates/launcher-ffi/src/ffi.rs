@@ -70,19 +70,55 @@ impl From<launcher_core::Section> for Section {
 
 #[derive(uniffi::Enum)]
 pub enum Block {
-    Paragraph { spans: Vec<Span> },
-    Code { text: String },
+    Paragraph {
+        spans: Vec<Span>,
+    },
+    Code {
+        text: String,
+    },
+    List {
+        items: Vec<ListItem>,
+    },
+    Table {
+        header: Vec<Vec<Span>>,
+        rows: Vec<Vec<Vec<Span>>>,
+    },
 }
 
 impl From<launcher_core::Block> for Block {
     fn from(block: launcher_core::Block) -> Self {
+        fn spans(spans: Vec<launcher_core::Span>) -> Vec<Span> {
+            spans.into_iter().map(Span::from).collect()
+        }
+        fn cells(row: Vec<Vec<launcher_core::Span>>) -> Vec<Vec<Span>> {
+            row.into_iter().map(spans).collect()
+        }
         match block {
-            launcher_core::Block::Paragraph(spans) => Self::Paragraph {
-                spans: spans.into_iter().map(Span::from).collect(),
-            },
+            launcher_core::Block::Paragraph(text) => Self::Paragraph { spans: spans(text) },
             launcher_core::Block::Code(text) => Self::Code { text },
+            launcher_core::Block::List(items) => Self::List {
+                items: items
+                    .into_iter()
+                    .map(|item| ListItem {
+                        depth: item.depth,
+                        marker: item.marker,
+                        spans: spans(item.spans),
+                    })
+                    .collect(),
+            },
+            launcher_core::Block::Table { header, rows } => Self::Table {
+                header: cells(header),
+                rows: rows.into_iter().map(cells).collect(),
+            },
         }
     }
+}
+
+#[derive(uniffi::Record)]
+pub struct ListItem {
+    pub depth: u8,
+    pub marker: String,
+    pub spans: Vec<Span>,
 }
 
 #[derive(uniffi::Record)]
