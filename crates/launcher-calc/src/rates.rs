@@ -130,6 +130,8 @@ pub(crate) mod tests {
 			<Cube currency='USD' rate='1.25'/>
 			<Cube currency='JPY' rate='160'/>
 			<Cube currency='GBP' rate='0.8'/>
+			<Cube currency='KRW' rate='1500'/>
+			<Cube currency='ISK' rate='150'/>
 		</Cube>
 	</Cube>
 </gesmes:Envelope>";

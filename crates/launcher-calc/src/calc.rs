@@ -12,7 +12,7 @@ use jiff::civil::Date;
 use launcher_core::{Action, Icon, Item, Plugin, ResultsChanged, Section, log};
 
 use expression::{Answer, Environment};
-use units::{Error, Rates};
+use units::{Error, Money, Rates};
 
 pub const NAME: &str = "Calculator";
 /// How often to check whether the cached rates are a day old. Hourly rather than sleeping a
@@ -190,18 +190,22 @@ impl Plugin for Calc {
                 {
                     subtitle = format!("ECB rates of {}", date.strftime("%-d %b"));
                 }
-                let unit = if quantity.is_plain() {
-                    String::new()
+                if let Some(money) = quantity.as_money() {
+                    amounts(quantity.magnitude, &money)
                 } else {
-                    format!(" {}", quantity.unit_name())
-                };
-                let shown = rounded(quantity.magnitude);
-                (
-                    format!("{shown}{unit}"),
-                    // Digit separators read well but break pasting into most other apps.
-                    format!("{}{unit}", shown.replace('_', "")),
-                    format!("{}{unit}", precise(quantity.magnitude)),
-                )
+                    let unit = if quantity.is_plain() {
+                        String::new()
+                    } else {
+                        format!(" {}", quantity.unit_name())
+                    };
+                    let shown = rounded(quantity.magnitude);
+                    (
+                        format!("{shown}{unit}"),
+                        // Digit separators read well but break pasting into most other apps.
+                        format!("{}{unit}", shown.replace('_', "")),
+                        format!("{}{unit}", precise(quantity.magnitude)),
+                    )
+                }
             }
         };
         let mut detail = vec![Section {
@@ -223,6 +227,35 @@ impl Plugin for Calc {
             relevance,
         }]
     }
+}
+
+/// An amount as shown, copied and to full precision: to the currency's smallest unit, as
+/// `€9.60`, `¥1600` or `0.95 CHF`.
+fn amounts(value: f64, money: &Money) -> (String, String, String) {
+    let scale = 10f64.powi(money.decimals as i32);
+    let rounded = (value * scale).round() / scale;
+    // So an amount that rounds to nothing isn't `-€0.00`.
+    let sign = if rounded < 0.0 { "-" } else { "" };
+    let written = |number: &str| {
+        if money.symbol_first {
+            format!("{sign}{}{number}", money.symbol)
+        } else {
+            format!("{sign}{number} {}", money.symbol)
+        }
+    };
+    let fixed = format!("{:.*}", money.decimals, rounded.abs());
+    let (integer, fraction) = fixed.split_once('.').unwrap_or((&fixed, ""));
+    let point = if fraction.is_empty() { "" } else { "." };
+    let grouped = if integer.len() >= 5 {
+        group_thousands(integer)
+    } else {
+        integer.to_owned()
+    };
+    (
+        written(&format!("{grouped}{point}{fraction}")),
+        written(&fixed),
+        written(&precise(value.abs())),
+    )
 }
 
 /// Integers below this show whole, as `2^40` does: f64 holds them exactly.
@@ -545,19 +578,45 @@ mod tests {
     #[test]
     fn currencies() {
         answers(&[
-            ("100 USD to EUR", "80 €"),
-            ("12 usd to eur", "9.6 €"),
-            ("£20 to EUR", "25 €"),
-            ("$5 to EUR", "4 €"),
-            ("100USD to EUR", "80 €"),
-            ("100 EUR + 5 €", "105 €"),
-            ("10 € to ¥", "1600 ¥"),
+            ("100 USD to EUR", "€80.00"),
+            ("12 usd to eur", "€9.60"),
+            ("£20 to EUR", "€25.00"),
+            ("$5 to EUR", "€4.00"),
+            ("100USD to EUR", "€80.00"),
+            ("100 EUR + 5 €", "€105.00"),
+            ("-5 €", "-€5.00"),
+            ("1000000 USD to EUR", "€800_000.00"),
+            ("10 € to ¥", "¥1600"),
+            ("0.01 EUR to JPY", "¥2"),
+            ("1 GBP to KRW", "1875 KRW"),
+            ("0.0333 EUR to ISK", "5 ISK"),
+            ("5 €/kg", "5 €/kg"),
             ("1 EUR / 1 USD", "1.25"),
             ("100 CHF to EUR", ""),
         ]);
         assert_eq!(
             shown(&mut with_rates(), "100 USD to EUR"),
-            [("80 €".into(), "ECB rates of 21 Nov".into())]
+            [("€80.00".into(), "ECB rates of 21 Nov".into())]
+        );
+        let items = with_rates().query("1000000 USD / 3 to EUR");
+        assert_eq!(
+            items
+                .iter()
+                .map(|item| (&item.title, &item.action))
+                .collect::<Vec<_>>(),
+            [(
+                &"€266_666.67".to_owned(),
+                &Action::Copy("€266666.67".into())
+            )],
+            "copied without separators"
+        );
+        assert_eq!(
+            items
+                .into_iter()
+                .flat_map(|item| item.detail)
+                .find(|section| section.title == "Full precision")
+                .map(|section| section.text),
+            Some("€266666.6666666667".into())
         );
         assert_eq!(
             shown(&mut with_rates(), "2 m"),
@@ -583,7 +642,7 @@ mod tests {
         );
         assert_eq!(
             shown(&mut calc, "100 EUR + 5 €"),
-            [("105 €".into(), String::new())]
+            [("€105.00".into(), String::new())]
         );
         assert_eq!(calc.query("100 parsecs + 2 usd2"), []);
         *lock(&calc.rates) = ExchangeRates::Unavailable;
@@ -607,7 +666,7 @@ mod tests {
         wait.recv_timeout(Duration::from_secs(10))?;
         assert_eq!(
             shown(&mut calc, "100 USD to EUR"),
-            [("80 €".into(), "ECB rates of 21 Nov".into())]
+            [("€80.00".into(), "ECB rates of 21 Nov".into())]
         );
         Ok(())
     }
@@ -622,7 +681,7 @@ mod tests {
         assert!(held.is_err() && calc.rates.is_poisoned());
         assert_eq!(
             shown(&mut calc, "100 USD to EUR"),
-            [("80 €".into(), "ECB rates of 21 Nov".into())]
+            [("€80.00".into(), "ECB rates of 21 Nov".into())]
         );
     }
 

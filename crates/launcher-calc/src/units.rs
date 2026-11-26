@@ -536,6 +536,15 @@ pub(crate) const CURRENCIES: &[Currency] = &[
     currency_entry("ZAR", None, &[]),
 ];
 
+/// An amount of one currency, and how it's written.
+pub(crate) struct Money {
+    pub(crate) symbol: &'static str,
+    /// Whether the symbol goes before the number, as in `$5.00`, rather than a code after it.
+    pub(crate) symbol_first: bool,
+    /// Digits after the point, as ISO 4217 gives them: none for the yen, won and króna.
+    pub(crate) decimals: usize,
+}
+
 /// Where `code` sits in `CURRENCIES`, and so in `Rates`.
 pub(crate) fn currency_index(code: &str) -> Option<usize> {
     CURRENCIES.iter().position(|currency| currency.code == code)
@@ -717,6 +726,28 @@ impl Quantity {
 
     pub(crate) fn is_plain(&self) -> bool {
         self.unit.is_empty()
+    }
+
+    /// The amount's currency, if it's a plain amount of one, rather than money per kilogram.
+    pub(crate) fn as_money(&self) -> Option<Money> {
+        let [factor] = self.unit.as_slice() else {
+            return None;
+        };
+        if factor.exponent != 1 || factor.dimension != MONEY {
+            return None;
+        }
+        let currency = CURRENCIES.iter().find(|currency| {
+            currency.symbol == Some(factor.symbol) || currency.code == factor.symbol
+        })?;
+        Some(Money {
+            symbol: factor.symbol,
+            symbol_first: currency.symbol.is_some(),
+            decimals: if matches!(currency.code, "JPY" | "KRW" | "ISK") {
+                0
+            } else {
+                2
+            },
+        })
     }
 
     pub(crate) fn is_money(&self) -> bool {
