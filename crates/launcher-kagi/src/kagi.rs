@@ -32,6 +32,9 @@ pub struct Kagi {
     shared: Arc<Shared>,
     search: Search,
     spawn: Spawn,
+    /// The last worker couldn't start. Each keystroke tries again, but logs only the first
+    /// failure in a row, as the log is kept on disk.
+    cant_start: bool,
     /// How long typing must pause before a search goes to the API: each costs money and tells
     /// Kagi what was typed, so a half-typed query mustn't.
     pause: Duration,
@@ -95,6 +98,7 @@ impl Kagi {
             }),
             search,
             spawn: spawn_worker,
+            cant_start: false,
             pause,
         }
     }
@@ -102,7 +106,7 @@ impl Kagi {
     /// Asks the worker to search for `terms` once typing pauses, unless they're the latest
     /// searched, and returns the rows that answer them; `None` while they're being searched.
     /// `None` for terms stops a search that hasn't started.
-    fn want(&self, terms: Option<&str>) -> Option<Vec<Item>> {
+    fn want(&mut self, terms: Option<&str>) -> Option<Vec<Item>> {
         let Ok(mut state) = self.shared.state.lock() else {
             return Some(vec![notice(
                 "Kagi search stopped",
@@ -133,9 +137,14 @@ impl Kagi {
         if wanted.is_some() && !state.working {
             let (shared, search, pause) = (self.shared.clone(), self.search.clone(), self.pause);
             match (self.spawn)(Box::new(move || work(&shared, &*search, pause))) {
-                Ok(()) => state.working = true,
+                Ok(()) => {
+                    state.working = true;
+                    self.cant_start = false;
+                }
                 Err(error) => {
-                    log!("can't start searching Kagi: {error}");
+                    if !std::mem::replace(&mut self.cant_start, true) {
+                        log!("can't start searching Kagi: {error}");
+                    }
                     return Some(vec![notice("Can't search Kagi", &error.to_string())]);
                 }
             }
@@ -633,6 +642,33 @@ mod tests {
         kagi.query("k go");
         changed.recv_timeout(Duration::from_secs(5))?;
         assert_eq!(searched(&searches), ["rust", "go"]);
+        Ok(())
+    }
+
+    /// Runs itself again with stderr on a pipe, to count what it logs.
+    #[test]
+    fn a_worker_that_cant_start_is_logged_once() -> Result<(), Box<dyn std::error::Error>> {
+        let Some(again) = launcher_core::run_test_again(
+            "tests::a_worker_that_cant_start_is_logged_once",
+            std::process::Stdio::piped(),
+        )?
+        else {
+            let (mut kagi, _, _) = plugin();
+            kagi.spawn = |_| Err(io::Error::other("no threads left"));
+            for query in ["k w", "k we", "k web"] {
+                assert_eq!(
+                    titles(&mut kagi, query).get(1).map(String::as_str),
+                    Some("Can't search Kagi")
+                );
+            }
+            return Ok(());
+        };
+        let logged = String::from_utf8(again.stderr)?;
+        assert_eq!(
+            logged.matches("can't start searching Kagi").count(),
+            1,
+            "{logged}"
+        );
         Ok(())
     }
 
