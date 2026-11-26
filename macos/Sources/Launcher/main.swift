@@ -63,8 +63,9 @@ final class Row: NSView {
         fatalError("rows are built in code")
     }
 
+    // Hidden rows, as under an open detail, keep their tracking areas and still hear the pointer.
     override func mouseMoved(with _: NSEvent) {
-        hovered()
+        if !isHiddenOrHasHiddenAncestor { hovered() }
     }
 
     // Clicks on the title, subtitle or icon belong to the row.
@@ -653,7 +654,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSTextFieldDelegate, N
             panel.makeFirstResponder(field)
             field.currentEditor()?.moveToEndOfDocument(nil)
         }
-        // The shown item, not `picked`: hidden rows under the pane may still track the pointer.
         pane.text.run = { [unowned self] in choose(index) }
         detail = pane
         content.addSubview(pane)
