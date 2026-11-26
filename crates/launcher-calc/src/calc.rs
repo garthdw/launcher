@@ -545,6 +545,12 @@ mod tests {
         assert!(titles("100 N to lbf")[0].ends_with("lbf"));
     }
 
+    #[test]
+    fn horsepower_is_mechanical() {
+        assert_eq!(titles("1 hp to kW"), ["0.7457 kW"]);
+        assert_eq!(titles("1 metric_hp to kW"), ["0.735499 kW"]);
+    }
+
     /// numbat holds exchange rates process-wide, so tests that set them take turns.
     static RATES: std::sync::Mutex<()> = std::sync::Mutex::new(());
 

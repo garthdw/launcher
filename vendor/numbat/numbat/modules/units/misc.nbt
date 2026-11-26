@@ -56,10 +56,15 @@ unit ounce_force: Force = 1 / 16 * lbf
 @aliases(kgf: short)
 unit kilogram_force: Force = 9.80665 newton
 
-@name("Metric horsepower")
-@url("https://en.wikipedia.org/wiki/Horsepower")
+@name("Horsepower")
+@url("https://en.wikipedia.org/wiki/Horsepower#Mechanical_horsepower")
 @aliases(hp: short)
-unit horsepower: Power = 735.49875 W
+unit horsepower: Power = 745.69987158227022 W
+
+@name("Metric horsepower")
+@url("https://en.wikipedia.org/wiki/Horsepower#Metric_horsepower_(PS,_KM,_cv,_hk,_pk,_k,_ks,_ch)")
+@aliases(metric_hp: short)
+unit metric_horsepower: Power = 735.49875 W
 
 @name("Revolution")
 @url("https://en.wikipedia.org/wiki/Revolution_(unit)")
