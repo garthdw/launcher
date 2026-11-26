@@ -250,6 +250,40 @@ pub fn write_log(line: fmt::Arguments) {
     }
 }
 
+/// For a test that checks what's logged: `None` in the copy of the test `name` (its full path,
+/// such as `tests::logs_once`) this starts, which should then log; otherwise that copy's output,
+/// once it has passed, with its stderr sent to `stderr`. `--nocapture`, so a regression to
+/// `eprintln!` reaches `stderr` rather than libtest.
+#[cfg(any(test, feature = "test-support"))]
+pub fn run_test_again(
+    name: &str,
+    stderr: std::process::Stdio,
+) -> Result<Option<std::process::Output>, Box<dyn std::error::Error>> {
+    const AGAIN: &str = "LAUNCHER_TEST_AGAIN";
+    if std::env::var_os(AGAIN).is_some() {
+        return Ok(None);
+    }
+    let again = std::process::Command::new(std::env::current_exe()?)
+        .args(["--exact", name, "--nocapture"])
+        .env(AGAIN, "1")
+        .stderr(stderr)
+        .output()?;
+    if !again.status.success() {
+        return Err(format!(
+            "{name} failed when run again ({}):\n{}{}",
+            again.status,
+            String::from_utf8_lossy(&again.stdout),
+            String::from_utf8_lossy(&again.stderr)
+        )
+        .into());
+    }
+    // A stale test name would run nothing and pass.
+    if !String::from_utf8_lossy(&again.stdout).contains("1 passed") {
+        return Err(format!("no test {name} to run again").into());
+    }
+    Ok(Some(again))
+}
+
 /// Called from a plugin's background work when it may have changed the plugin's results, so the
 /// shell asks again for the query it shows. Any thread may call it.
 pub type ResultsChanged = Arc<dyn Fn() + Send + Sync>;
@@ -709,29 +743,11 @@ mod tests {
     /// again with stderr on a pipe nobody reads, since macOS has no `/dev/full`.
     #[test]
     fn logging_survives_a_failed_write() -> Result<(), Box<dyn std::error::Error>> {
-        if std::env::var_os("LAUNCHER_TEST_LOG_CHILD").is_some() {
-            log!("nobody reads this");
-            return Ok(());
-        }
         let (reader, writer) = std::io::pipe()?;
         drop(reader);
-        // `--nocapture`, so a regression to `eprintln!` reaches the pipe rather than libtest.
-        let child = std::process::Command::new(std::env::current_exe()?)
-            .args([
-                "--exact",
-                "tests::logging_survives_a_failed_write",
-                "--nocapture",
-            ])
-            .env("LAUNCHER_TEST_LOG_CHILD", "1")
-            .stderr(writer)
-            .output()?;
-        assert!(
-            child.status.success(),
-            "logging failed the test: {}",
-            child.status
-        );
-        // A stale test name would run nothing and pass.
-        assert!(String::from_utf8(child.stdout)?.contains("1 passed"));
+        if run_test_again("tests::logging_survives_a_failed_write", writer.into())?.is_none() {
+            log!("nobody reads this");
+        }
         Ok(())
     }
 }
