@@ -14,6 +14,7 @@ cargo test -p launcher-calc units            # single test, by name substring
 just                                         # bundle, stop any running copy, run in the foreground
 just run '100 N to lbf'                      # the same, opening the panel with this query
 scripts/bundle                               # macOS: Rust core, Swift bindings, signed target/release/Launcher.app
+swift build --package-path macos --target PanelLayoutTests && swift test --package-path macos --skip-build   # the Swift shell's tests, after scripts/bundle
 scripts/install                              # bundle, install as ~/Applications/Launcher.app, quit any running copy and open it
 LAUNCHER_OPEN='100 N to lbf' target/release/Launcher.app/Contents/MacOS/Launcher   # open the panel at launch
 target/release/Launcher.app/Contents/MacOS/Launcher config init   # write ~/.config/launcher/config.toml, every setting commented out
@@ -41,7 +42,7 @@ The app logs to stderr (`log(…)` in Swift, `launcher_core::log!` in Rust). Whe
 - `crates/launcher-secret`: secrets such as API tokens in the platform's secret store (the login keychain through Security.framework on macOS; Linux to come), read on demand, and the `secret` command.
 - `crates/launcher-window`: window layouts and moves between displays as pure geometry, and their default hotkeys. Shells only read and move windows.
 - `crates/launcher-ffi`: the UniFFI boundary the Swift shell calls, mirroring the core's types so the core stays free of FFI derives. Built as a static library linked into the app. `crates/uniffi-bindgen` is the matching bindgen CLI.
-- `macos/`: the AppKit shell. A non-activating `NSPanel`, so the app the user was in stays frontmost for window management; global hotkeys through Carbon's `RegisterEventHotKey`; no Dock icon or main menu, so the panel handles ⌘Q, ⌘, and ⌘R itself; an optional menu bar item; launch at login through `SMAppService`. Given arguments, the binary runs the `login`, `config` and `secret` commands before starting AppKit. `Windows.swift` moves windows through the Accessibility API.
+- `macos/`: the AppKit shell. A non-activating `NSPanel`, so the app the user was in stays frontmost for window management; global hotkeys through Carbon's `RegisterEventHotKey`; no Dock icon or main menu, so the panel handles ⌘Q, ⌘, and ⌘R itself; an optional menu bar item; launch at login through `SMAppService`. Given arguments, the binary runs the `login`, `config` and `secret` commands before starting AppKit. `Windows.swift` moves windows through the Accessibility API. `PanelLayout` holds arithmetic the shell can't leave to the core, such as how a row shares its width, free of AppKit so `swift test` covers it.
 
 Logic belongs in the shared Rust crates; shells stay thin: they draw results, register hotkeys, name the keys and run actions.
 

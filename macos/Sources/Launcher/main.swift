@@ -1,5 +1,6 @@
 import AppKit
 import Carbon.HIToolbox
+import PanelLayout
 import ServiceManagement
 
 let started = CFAbsoluteTimeGetCurrent()
@@ -601,15 +602,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSTextFieldDelegate, N
                 .filter { !$0.isEmpty }
                 .joined(separator: " · ")
         )
-        // Long subtitles such as app folders lose their start, not the keys. Title and subtitle each
-        // take room the other leaves, but a long subtitle leaves a long title at least up to 396.
+        // A long subtitle loses its start, such as an app's folder, rather than the keys.
         subtitle.lineBreakMode = .byTruncatingHead
         title.lineBreakMode = .byTruncatingTail
-        let end = row.frame.width - 12
-        let wholeSubtitleX = end - subtitle.fittingSize.width
-        let subtitleX = min(max(titleX + title.fittingSize.width + 4, wholeSubtitleX), max(396, wholeSubtitleX))
-        subtitle.frame = NSRect(x: subtitleX, y: 13, width: end - subtitleX, height: 18)
-        title.frame = NSRect(x: titleX, y: 11, width: subtitleX - 4 - titleX, height: 22)
+        let layout = RowLayout(
+            titleX: titleX, end: row.frame.width - 12,
+            title: title.fittingSize.width, subtitle: subtitle.fittingSize.width
+        )
+        subtitle.frame = NSRect(x: layout.subtitleX, y: 13, width: layout.subtitleWidth, height: 18)
+        title.frame = NSRect(x: titleX, y: 11, width: layout.titleWidth, height: 22)
         row.addSubview(title)
         row.addSubview(subtitle)
         return row
@@ -735,11 +736,6 @@ final class MainRelay: ResultsListener, Sendable {
     func resultsChanged() {
         DispatchQueue.main.async { MainActor.assumeIsolated { self.changed() } }
     }
-}
-
-/// Moves a selection through `count` entries, wrapping at either end.
-func step(_ index: Int, by offset: Int, count: Int) -> Int {
-    (index + offset + count) % count
 }
 
 @MainActor
