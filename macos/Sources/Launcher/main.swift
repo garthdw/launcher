@@ -703,8 +703,32 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSTextFieldDelegate, N
         log(String(format: "summon to focus: %.1f ms", (CFAbsoluteTimeGetCurrent() - summoned) * 1000))
     }
 
+    /// Another app's panel, such as a clipboard history's or the emoji picker, can take the keyboard
+    /// without that app coming to the front, and gives it back when it closes. The panel stays
+    /// meanwhile, so what that app pastes lands in the query; anything else that takes the keyboard
+    /// hides it.
     func windowDidResignKey(_: Notification) {
-        hide()
+        hideUnlessLent()
+    }
+
+    /// Checked a moment after the keyboard goes, as the other panel isn't on screen yet, then again
+    /// until the keyboard is back or that panel has closed.
+    func hideUnlessLent() {
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) { [weak self] in
+            guard let self, panel.isVisible, !panel.isKeyWindow else { return }
+            if anotherAppsPanelIsAbove() { hideUnlessLent() } else { hide() }
+        }
+    }
+
+    /// Above the normal level, only the window server's own windows show otherwise.
+    func anotherAppsPanelIsAbove() -> Bool {
+        let above = CGWindowListCopyWindowInfo(.optionOnScreenAboveWindow, CGWindowID(panel.windowNumber))
+        let ours = ProcessInfo.processInfo.processIdentifier
+        return (above as? [[String: Any]] ?? []).contains { window in
+            (window[kCGWindowLayer as String] as? Int ?? 0) > 0
+                && window[kCGWindowOwnerPID as String] as? pid_t != ours
+                && window[kCGWindowOwnerName as String] as? String != "Window Server"
+        }
     }
 
     /// A plugin's background work finished, so the shown query may have other results now.
