@@ -5,7 +5,8 @@ use std::f64::consts::{E, PI, TAU};
 use std::fmt;
 
 use jiff::civil::Date;
-use jiff::{Span, ZonedDateTime};
+use jiff::tz::TimeZone;
+use jiff::{Span, Timestamp, ZonedDateTime};
 
 use crate::units::{self, Error, Factor, Quantity, Rates};
 
@@ -209,6 +210,10 @@ enum Expression<'query> {
 enum Target<'query> {
     Unit(Expression<'query>),
     Radix(u32),
+    /// Seconds, or milliseconds, since 1970 began in UTC.
+    Unix {
+        milliseconds: bool,
+    },
 }
 
 /// How a query was read: an expression, perhaps converted.
@@ -313,17 +318,23 @@ impl<'query> Parser<'query> {
             if self.next() == Some(Token::Name("in")) && !expression.has_name() {
                 expression = Expression::Juxtaposed(vec![expression, Expression::Name("in")]);
             }
-            let radix = match (self.peek(), self.peek_after()) {
-                (Some(Token::Name(name)), None) => RADIXES
+            let named = match self.tokens.get(self.position..).unwrap_or_default() {
+                [Token::Name("unix")] => Some(Target::Unix {
+                    milliseconds: false,
+                }),
+                [Token::Name("unix"), Token::Name("ms")] => {
+                    Some(Target::Unix { milliseconds: true })
+                }
+                [Token::Name(name)] => RADIXES
                     .iter()
-                    .find(|(radix_name, _)| *radix_name == name)
-                    .map(|(_, radix)| *radix),
+                    .find(|(radix_name, _)| radix_name == name)
+                    .map(|(_, radix)| Target::Radix(*radix)),
                 _ => None,
             };
-            Some(match radix {
-                Some(radix) => {
-                    self.next();
-                    Target::Radix(radix)
+            Some(match named {
+                Some(target) => {
+                    self.position = self.tokens.len();
+                    target
                 }
                 None => Target::Unit(self.sum()?),
             })
@@ -584,7 +595,11 @@ impl<'query> Reading<'query> {
     }
 
     fn evaluate(&self, environment: &Environment) -> Result<Answer, Error> {
-        let value = match value(&self.expression, environment)? {
+        let value = value(&self.expression, environment)?;
+        if let Some(Target::Unix { milliseconds }) = self.target {
+            return in_unix_time(value, milliseconds);
+        }
+        let value = match value {
             Value::Quantity(quantity) => quantity,
             Value::Date(date) if self.target.is_none() => return Ok(Answer::Date(date)),
             Value::Time(time) if self.target.is_none() => return Ok(Answer::Time(time)),
@@ -602,6 +617,7 @@ impl<'query> Reading<'query> {
                 }
                 in_radix(value.magnitude, *radix).map(Answer::Text)
             }
+            Some(Target::Unix { .. }) => Err(Error::Invalid),
         }
     }
 }
@@ -638,7 +654,15 @@ fn value(expression: &Expression, environment: &Environment) -> Result<Value, Er
         }
         Expression::Binary(operator @ (Operator::Add | Operator::Subtract), left, right) => {
             let sign = if *operator == Operator::Add { 1 } else { -1 };
-            let (point, duration) = match (value(left, environment)?, value(right, environment)?) {
+            let mut left = value(left, environment)?;
+            let mut right = value(right, environment)?;
+            // A number beside a duration is a Unix time, as in `1795758014 + 1 day`.
+            if let Some(time) = unix_time_beside(&left, &right) {
+                left = Value::Time(time);
+            } else if let Some(time) = unix_time_beside(&right, &left) {
+                right = Value::Time(time);
+            }
+            let (point, duration) = match (left, right) {
                 (Value::Quantity(left), Value::Quantity(right)) => {
                     return finite(left.add(right, f64::from(sign))?);
                 }
@@ -690,6 +714,57 @@ fn finite(quantity: Quantity) -> Result<Value, Error> {
         Ok(Value::Quantity(quantity))
     } else {
         Err(Error::Invalid)
+    }
+}
+
+/// A plain number as seconds since 1970, from 2001 until 2286, to the millisecond as in
+/// `1795758014.123`, or a whole number as milliseconds over the same years, in the system's time
+/// zone.
+pub(crate) fn unix_time(quantity: &Quantity) -> Option<ZonedDateTime> {
+    let count = quantity.magnitude;
+    if !quantity.is_plain() {
+        return None;
+    }
+    let milliseconds = if (1e9..1e10).contains(&count) {
+        (count * 1000.0).round()
+    } else if (1e12..1e13).contains(&count) && count.fract() == 0.0 {
+        count
+    } else {
+        return None;
+    };
+    Some(
+        Timestamp::from_millisecond(milliseconds as i64)
+            .ok()?
+            .to_zoned_datetime(TimeZone::system()),
+    )
+}
+
+/// A time, the start of a date, or a number that reads as a Unix time, as a count of seconds or
+/// milliseconds since 1970.
+fn in_unix_time(value: Value, milliseconds: bool) -> Result<Answer, Error> {
+    let time = match value {
+        Value::Time(time) => time,
+        Value::Date(date) => date
+            .to_zoned_datetime(TimeZone::system())
+            .map_err(|_| Error::Invalid)?,
+        Value::Quantity(quantity) => unix_time(&quantity).ok_or(Error::Invalid)?,
+    };
+    let timestamp = time.timestamp();
+    let count = if milliseconds {
+        timestamp.as_millisecond()
+    } else {
+        timestamp.as_second()
+    };
+    Ok(Answer::Text(count.to_string()))
+}
+
+/// `value` as a Unix time when it's a number that reads as one and `other` is a duration.
+fn unix_time_beside(value: &Value, other: &Value) -> Option<ZonedDateTime> {
+    match (value, other) {
+        (Value::Quantity(number), Value::Quantity(duration)) if duration.seconds().is_some() => {
+            unix_time(number)
+        }
+        _ => None,
     }
 }
 
@@ -1016,6 +1091,10 @@ impl fmt::Display for Reading<'_> {
                     .find(|(_, candidate)| candidate == radix)
                     .map_or("", |(name, _)| name);
                 write!(formatter, " ➞ {name}")
+            }
+            Some(Target::Unix { milliseconds }) => {
+                let unit = if *milliseconds { " ms" } else { "" };
+                write!(formatter, " ➞ unix{unit}")
             }
         }
     }

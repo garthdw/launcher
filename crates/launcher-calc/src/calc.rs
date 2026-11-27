@@ -7,7 +7,9 @@ use std::sync::{Arc, Mutex, MutexGuard, PoisonError, Weak};
 use std::thread;
 use std::time::Duration;
 
+use jiff::ZonedDateTime;
 use jiff::civil::Date;
+use jiff::tz::TimeZone;
 use launcher_core::{Action, Icon, Item, Plugin, ResultsChanged, Section, log};
 
 use expression::{Answer, Environment, Reading};
@@ -155,6 +157,8 @@ fn calculate<'query>(
     // "1 m" is noise in a launcher. Only a plain number, as `pi` is, says something.
     let relevance = match &answer {
         _ if has_number => CALCULATION,
+        // Only a conversion such as `now to unix` answers in text, and no app's name has one.
+        Answer::Text(_) => CALCULATION,
         Answer::Quantity(quantity) if quantity.is_plain() => CONSTANT,
         _ => return Err(None),
     };
@@ -177,6 +181,9 @@ impl Plugin for Calc {
             (ExchangeRates::Loaded(_, date), Answer::Quantity(quantity)) if quantity.is_money() => {
                 format!("ECB rates of {}", date.strftime("%-d %b"))
             }
+            (_, Answer::Quantity(quantity)) => expression::unix_time(quantity)
+                .map(|time| format!("Unix time · {}", time.strftime("%a %-d %b %Y, %H:%M:%S %Z")))
+                .unwrap_or_default(),
             _ => String::new(),
         };
         let (title, copied) = shown(&answer);
@@ -190,17 +197,27 @@ impl Plugin for Calc {
         }]
     }
 
-    /// How the query was read, and the answer to full precision if that says more than what's
-    /// copied. Worked out again, as most answers are never opened.
+    /// How the query was read, the answer to full precision if that says more than what's copied,
+    /// and a time, or a number that reads as a Unix time, in local time and UTC. Worked out
+    /// again, as most answers are never opened.
     fn detail(&mut self, query: &str, _item: &Item) -> Vec<Section> {
         let exchange_rates = lock(&self.rates);
         let Ok((reading, answer, _)) = calculate(&exchange_rates, query) else {
             return Vec::new();
         };
         let mut detail = vec![Section::mono("Input", reading.to_string())];
-        let precise = in_full(&answer);
-        if precise != shown(&answer).1 {
-            detail.push(Section::mono("Full precision", precise));
+        match &answer {
+            Answer::Quantity(quantity) => {
+                let precise = in_full(quantity);
+                if precise != shown(&answer).1 {
+                    detail.push(Section::mono("Full precision", precise));
+                }
+                if let Some(time) = expression::unix_time(quantity) {
+                    detail.push(Section::mono("As a Unix time", local_and_utc(&time)));
+                }
+            }
+            Answer::Time(time) => detail.push(Section::mono("Local and UTC", local_and_utc(time))),
+            Answer::Text(_) | Answer::Date(_) => {}
         }
         detail
     }
@@ -213,7 +230,7 @@ fn shown(answer: &Answer) -> (String, String) {
         Answer::Date(date) => (date.strftime(DATE_FORMAT).to_string(), date.to_string()),
         Answer::Time(time) => (
             time.strftime(&format!("{DATE_FORMAT}, %H:%M")).to_string(),
-            time.strftime("%Y-%m-%dT%H:%M:%S%:z").to_string(),
+            format!("{}{}", to_the_millisecond(time, 'T'), time.strftime("%:z")),
         ),
         Answer::Quantity(quantity) => {
             if let Some(money) = quantity.as_money() {
@@ -230,20 +247,37 @@ fn shown(answer: &Answer) -> (String, String) {
     }
 }
 
-/// An answer to full precision.
-fn in_full(answer: &Answer) -> String {
-    match answer {
-        Answer::Text(text) => text.clone(),
-        Answer::Date(date) => date.to_string(),
-        Answer::Time(time) => time.strftime("%Y-%m-%d %H:%M:%S %Z (%:z)").to_string(),
-        Answer::Quantity(quantity) => match quantity.as_money() {
-            Some(money) => money_text(
-                &money,
-                sign(quantity.magnitude, &money),
-                &precise(quantity.magnitude.abs()),
-            ),
-            None => format!("{}{}", precise(quantity.magnitude), unit_suffix(quantity)),
-        },
+/// `time` to the second, and the millisecond when it has any, with `between` its date and time.
+/// Times from `now` carry nanoseconds, which say nothing.
+fn to_the_millisecond(time: &ZonedDateTime, between: char) -> String {
+    let milliseconds = match time.millisecond() {
+        0 => String::new(),
+        milliseconds => format!(".{milliseconds:03}"),
+    };
+    let format = format!("%Y-%m-%d{between}%H:%M:%S");
+    format!("{}{milliseconds}", time.strftime(&format))
+}
+
+/// `time` on one line and in UTC on the next.
+fn local_and_utc(time: &ZonedDateTime) -> String {
+    let utc = time.with_time_zone(TimeZone::UTC);
+    format!(
+        "{} {}\n{} UTC",
+        to_the_millisecond(time, ' '),
+        time.strftime("%Z (%:z)"),
+        to_the_millisecond(&utc, ' ')
+    )
+}
+
+/// A quantity to full precision.
+fn in_full(quantity: &Quantity) -> String {
+    match quantity.as_money() {
+        Some(money) => money_text(
+            &money,
+            sign(quantity.magnitude, &money),
+            &precise(quantity.magnitude.abs()),
+        ),
+        None => format!("{}{}", precise(quantity.magnitude), unit_suffix(quantity)),
     }
 }
 
@@ -681,6 +715,122 @@ mod tests {
         }
     }
 
+    fn local(timestamp: jiff::Timestamp) -> jiff::ZonedDateTime {
+        timestamp.to_zoned_datetime(jiff::tz::TimeZone::system())
+    }
+
+    fn copied(query: &str) -> Vec<Action> {
+        with_rates()
+            .query(query)
+            .into_iter()
+            .map(|item| item.action)
+            .collect()
+    }
+
+    fn section(query: &str, title: &str) -> Option<String> {
+        sections(query)
+            .into_iter()
+            .find(|section| section.title == title)
+            .map(|section| section.text)
+    }
+
+    #[test]
+    fn a_number_beside_a_duration_is_a_unix_time() -> Result<(), jiff::Error> {
+        let next_day = local(jiff::Timestamp::from_second(1_795_844_414)?);
+        let title = next_day
+            .strftime(&format!("{DATE_FORMAT}, %H:%M"))
+            .to_string();
+        answers(&[
+            ("1795758014 + 1 day", &title),
+            ("(1795758014) + 1 day", &title),
+            ("1 day + 1795758014", &title),
+            ("1795758014000 + 1 day", &title),
+            ("1795930814 - 1 day", &title),
+            ("2 + 1 day", ""),
+            ("123456789 + 1 day", ""),
+            ("1795758014.123 + 1 day", &title),
+            ("1795758014123.5 + 1 day", ""),
+        ]);
+        assert_eq!(
+            copied("1795758014 + 1 day"),
+            [Action::Copy(
+                next_day.strftime("%Y-%m-%dT%H:%M:%S%:z").to_string()
+            )],
+            "whole seconds copy without a fraction"
+        );
+        let with_milliseconds = next_day.strftime("%Y-%m-%dT%H:%M:%S.123%:z").to_string();
+        for query in ["1795758014123 + 1 day", "1795758014.123 + 1 day"] {
+            assert_eq!(
+                copied(query),
+                [Action::Copy(with_milliseconds.clone())],
+                "{query}"
+            );
+        }
+        for action in copied("now + 1 hour") {
+            let Action::Copy(text) = action else {
+                panic!("copies");
+            };
+            let fraction = text
+                .split_once('.')
+                .and_then(|(_, rest)| rest.split(['+', '-']).next());
+            assert!(fraction.is_none_or(|digits| digits.len() == 3), "{text}");
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn converts_to_a_unix_time() -> Result<(), jiff::Error> {
+        answers(&[
+            ("1795758014 + 1 day to unix", "1795844414"),
+            ("1795758014 + 1 day to unix ms", "1795844414000"),
+            ("1795758014000 to unix", "1795758014"),
+            ("1795758014 to unix ms", "1795758014000"),
+            ("5 to unix", ""),
+            ("1 m to unix", ""),
+        ]);
+        let midnight = jiff::ZonedDateTime::now()
+            .date()
+            .to_zoned_datetime(jiff::tz::TimeZone::system())?;
+        assert_eq!(
+            copied("today to unix"),
+            [Action::Copy(midnight.timestamp().as_second().to_string())]
+        );
+        assert_eq!(titles("now to unix").len(), 1);
+        assert_eq!(input("now to unix ms"), Some("now ➞ unix ms".into()));
+        Ok(())
+    }
+
+    #[test]
+    fn a_unix_time_shows_in_local_time_and_utc() -> Result<(), jiff::Error> {
+        let time = local(jiff::Timestamp::from_second(1_795_758_014)?);
+        assert_eq!(
+            shown(&mut with_rates(), "1795758014"),
+            [(
+                "1\u{202f}795\u{202f}758\u{202f}014".into(),
+                format!("Unix time · {}", time.strftime("%a %-d %b %Y, %H:%M:%S %Z"))
+            )]
+        );
+        assert_eq!(
+            shown(&mut with_rates(), "12345"),
+            [("12\u{202f}345".into(), String::new())]
+        );
+        let local_line = time.strftime("%Y-%m-%d %H:%M:%S %Z (%:z)");
+        assert_eq!(
+            section("1795758014", "As a Unix time"),
+            Some(format!("{local_line}\n2026-11-27 05:40:14 UTC"))
+        );
+        assert!(
+            section("1795758014123", "As a Unix time")
+                .is_some_and(|text| text.ends_with("05:40:14.123 UTC"))
+        );
+        assert_eq!(
+            section("1795758014 + 1 day", "Local and UTC").map(|text| text.lines().count()),
+            Some(2)
+        );
+        assert_eq!(section("12345", "As a Unix time"), None);
+        Ok(())
+    }
+
     #[test]
     fn currencies() {
         answers(&[
@@ -808,6 +958,7 @@ mod tests {
             "sqrt()",
             "now(",
             "1 to",
+            "1 to unix",
             "1 m to",
             "5 m to 3 m",
             "171!",
