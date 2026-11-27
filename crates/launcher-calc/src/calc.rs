@@ -27,6 +27,9 @@ const CALCULATION: u8 = 90;
 const CONSTANT: u8 = 80;
 const SIGNIFICANT_DIGITS: i32 = 6;
 const DATE_FORMAT: &str = "%A, %-d %B %Y";
+/// A narrow no-break space, as SI writes `2 000 000`: narrower than the space before a unit, and
+/// never wrapped.
+const DIGIT_SEPARATOR: char = '\u{202f}';
 
 pub struct Calc {
     rates: Arc<Mutex<ExchangeRates>>,
@@ -221,7 +224,7 @@ fn shown(answer: &Answer) -> (String, String) {
             (
                 format!("{shown}{unit}"),
                 // Digit separators read well but break pasting into most other apps.
-                format!("{}{unit}", shown.replace('_', "")),
+                format!("{}{unit}", shown.replace(DIGIT_SEPARATOR, "")),
             )
         }
     }
@@ -300,8 +303,8 @@ fn amounts(value: f64, money: &Money) -> (String, String) {
 /// Integers below this show whole, as `2^40` does: f64 holds them exactly.
 const WHOLE_BELOW: f64 = 1e15;
 
-/// `value` to `SIGNIFICANT_DIGITS`, or whole if it's an integer, with `_` between groups of
-/// thousands in numbers of five digits or more: `2_000_000`, `0.333333`, `9.46073e12`.
+/// `value` to `SIGNIFICANT_DIGITS`, or whole if it's an integer, with `DIGIT_SEPARATOR` between
+/// groups of thousands in numbers of five digits or more: `2 000 000`, `0.333333`, `9.46073e12`.
 fn rounded(value: f64) -> String {
     if value == 0.0 {
         return "0".into();
@@ -346,7 +349,7 @@ fn group_thousands(digits: &str) -> String {
     let mut grouped = String::with_capacity(digits.len() * 2);
     for (index, digit) in digits.chars().enumerate() {
         if index > 0 && (digits.len() - index).is_multiple_of(3) {
-            grouped.push('_');
+            grouped.push(DIGIT_SEPARATOR);
         }
         grouped.push(digit);
     }
@@ -429,12 +432,12 @@ mod tests {
             ("2 x 2", "4"),
             ("3x4", "12"),
             ("10 X 1.5", "15"),
-            ("2x1000000", "2_000_000"),
+            ("2x1000000", "2\u{202f}000\u{202f}000"),
             ("-2^2", "-4"),
             ("2^-1", "0.5"),
             ("2^3^2", "512"),
             ("1/3", "0.333333"),
-            ("10!", "3_628_800"),
+            ("10!", "3\u{202f}628\u{202f}800"),
             ("50%", "0.5"),
             ("15% of 80", "12"),
             ("2^1000", "1.07151e301"),
@@ -472,7 +475,7 @@ mod tests {
             ("2 pi", "6.28319"),
             ("2e", "5.43656"),
             ("e*e", "7.38906"),
-            ("1 c to km/s", "299_792 km/s"),
+            ("1 c to km/s", "299\u{202f}792 km/s"),
         ]);
     }
 
@@ -481,7 +484,7 @@ mod tests {
         answers(&[
             ("5 km to m", "5000 m"),
             ("2 x 3 km", "6 km"),
-            ("2 x 1000000 m", "2_000_000 m"),
+            ("2 x 1000000 m", "2\u{202f}000\u{202f}000 m"),
             ("10 kg to lb", "22.0462 lb"),
             ("10 kg -> lb", "22.0462 lb"),
             ("100 km/h to mph", "62.1371 mph"),
@@ -503,7 +506,7 @@ mod tests {
             ("1 m in in", "39.3701 in"),
             ("1 gal to L", "3.78541 L"),
             ("1 atm to psi", "14.6959 psi"),
-            ("1 kWh to J", "3_600_000 J"),
+            ("1 kWh to J", "3\u{202f}600\u{202f}000 J"),
             ("2 lux", "2 lx"),
             ("30 deg to rad", "0.523599 rad"),
         ]);
@@ -555,7 +558,7 @@ mod tests {
         answers(&[
             ("1000kb to mb", "1 MB"),
             ("2 GB to mb", "2000 MB"),
-            ("1 mB to B", "1_000_000 B"),
+            ("1 mB to B", "1\u{202f}000\u{202f}000 B"),
             ("5 ms to S", ""),
             ("1 Km", "1 km"),
             ("1 KILOMETRE to m", "1000 m"),
@@ -579,7 +582,7 @@ mod tests {
     fn a_unit_in_the_right_case_keeps_it() {
         answers(&[
             ("1 mW to W", "0.001 W"),
-            ("1 MW to W", "1_000_000 W"),
+            ("1 MW to W", "1\u{202f}000\u{202f}000 W"),
             ("1 mW to MW", "1e-9 MW"),
             // Typed in a case that means something, a unit isn't swapped to make a query work.
             ("5 MS to s", ""),
@@ -688,7 +691,7 @@ mod tests {
             ("100USD to EUR", "€80.00"),
             ("100 EUR + 5 €", "€105.00"),
             ("-5 €", "-€5.00"),
-            ("1000000 USD to EUR", "€800_000.00"),
+            ("1000000 USD to EUR", "€800\u{202f}000.00"),
             ("10 € to ¥", "¥1600"),
             ("0.01 EUR to JPY", "¥2"),
             ("1 GBP to KRW", "1875 KRW"),
@@ -708,7 +711,7 @@ mod tests {
                 .map(|item| (&item.title, &item.action))
                 .collect::<Vec<_>>(),
             [(
-                &"€266_666.67".to_owned(),
+                &"€266\u{202f}666.67".to_owned(),
                 &Action::Copy("€266666.67".into())
             )],
             "copied without separators"
